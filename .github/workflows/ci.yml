@@ -31,7 +31,13 @@ jobs:
 
       - name: Install flatc (Windows)
         if: runner.os == 'Windows'
-        run: choco install flatbuffers
+        shell: pwsh
+        run: |
+          $version = "25.2.10"
+          $url = "https://github.com/google/flatbuffers/releases/download/v$version/Windows.flatc.binary.zip"
+          Invoke-WebRequest -Uri $url -OutFile flatc.zip
+          Expand-Archive -Path flatc.zip -DestinationPath flatc
+          echo "$PWD\flatc" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # First set up Java 21 to build the JAR
       - name: Set up Java 21 (for build)
