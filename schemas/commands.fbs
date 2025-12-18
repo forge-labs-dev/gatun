@@ -16,7 +16,8 @@ enum Action : byte {
   SetField = 8,
   RegisterCallback = 9,    // Python registers a callback, gets callback_id
   UnregisterCallback = 10, // Python unregisters a callback
-  CallbackResponse = 11    // Python sends result of callback execution back to Java
+  CallbackResponse = 11,   // Python sends result of callback execution back to Java
+  Cancel = 12              // Python requests cancellation of a running operation
 }
 
 // Element types for arrays
@@ -99,6 +100,7 @@ table Command {
   target_name: string;
   target_id: long;
   args: [Argument];
+  request_id: long;  // Optional: unique ID for this request, used for cancellation
 }
 
 // Response from Java -> Python

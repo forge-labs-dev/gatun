@@ -126,6 +126,14 @@ class JavaRuntimeException(JavaException):
     pass
 
 
+class CancelledException(Exception):
+    """Raised when a request is cancelled."""
+
+    def __init__(self, request_id: int):
+        self.request_id = request_id
+        super().__init__(f"Request {request_id} was cancelled")
+
+
 # Mapping from Java exception class names to Python exception classes
 _JAVA_EXCEPTION_MAP: dict[str, type[JavaException]] = {
     "java.lang.SecurityException": JavaSecurityException,
@@ -140,6 +148,7 @@ _JAVA_EXCEPTION_MAP: dict[str, type[JavaException]] = {
     "java.lang.NumberFormatException": JavaNumberFormatException,
     "java.lang.RuntimeException": JavaRuntimeException,
     "org.gatun.PayloadTooLargeException": PayloadTooLargeError,
+    "java.lang.InterruptedException": CancelledException,
 }
 
 
@@ -163,6 +172,13 @@ def _raise_java_exception(error_type: str, error_msg: str) -> None:
             payload_size = 0
             max_size = 0
         raise PayloadTooLargeError(payload_size, max_size, "Response")
+
+    # Handle InterruptedException specially - extract request ID
+    if error_type == "java.lang.InterruptedException":
+        # Message format: "Request X was cancelled"
+        match = re.search(r"Request (\d+) was cancelled", error_msg)
+        request_id = int(match.group(1)) if match else 0
+        raise CancelledException(request_id)
 
     # Get the exception class, defaulting to JavaException
     exc_class = _JAVA_EXCEPTION_MAP.get(error_type, JavaException)
@@ -336,6 +352,9 @@ class GatunClient:
 
         # Callback registry: callback_id -> callable
         self._callbacks: dict[int, callable] = {}
+
+        # Request ID counter for cancellation support
+        self._next_request_id = 1
 
     @property
     def jvm(self):
@@ -1131,6 +1150,47 @@ class GatunClient:
             responses.append(response)
 
         return responses
+
+    def _get_request_id(self) -> int:
+        """Get the next request ID for cancellation support."""
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        return request_id
+
+    def cancel(self, request_id: int) -> bool:
+        """Cancel a running request by its ID.
+
+        This sends a cancellation signal to the Java server. The server will
+        attempt to interrupt the running operation, which will raise a
+        CancelledException on the next response.
+
+        Note: Cancellation is cooperative - the operation must check for
+        cancellation to actually stop. Long-running Java operations that
+        don't check Thread.interrupted() may not respond to cancellation.
+
+        Args:
+            request_id: The ID of the request to cancel (returned by operations
+                       when using request IDs).
+
+        Returns:
+            True if the cancel request was acknowledged by the server.
+
+        Example:
+            # In async context or with threading:
+            request_id = client._get_request_id()
+            # ... start operation with request_id in another thread ...
+            client.cancel(request_id)  # Cancel it
+        """
+        builder = flatbuffers.Builder(64)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.Cancel)
+        Cmd.CommandAddRequestId(builder, request_id)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        result = self._send_raw(builder.Output())
+        return result is True
 
     def close(self):
         try:

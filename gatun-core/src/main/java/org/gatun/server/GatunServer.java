@@ -86,6 +86,12 @@ public class GatunServer {
   // Per-session: shared memory segment
   private static final ThreadLocal<MemorySegment> sessionSharedMem = new ThreadLocal<>();
 
+  // Per-session: current request ID for cancellation support
+  private static final ThreadLocal<Long> currentRequestId = new ThreadLocal<>();
+
+  // Per-session: cancelled request IDs
+  private static final ThreadLocal<Set<Long>> cancelledRequests = ThreadLocal.withInitial(HashSet::new);
+
   private final BufferAllocator allocator = new RootAllocator();
 
   /** Holds information about a registered callback. */
@@ -196,12 +202,44 @@ public class GatunServer {
         // Define 'cmd' here so it is visible to the rest of the loop
         Command cmd = Command.getRootAsCommand(cmdBuf);
 
+        // Handle Cancel action immediately (doesn't require response processing)
+        if (cmd.action() == Action.Cancel) {
+          long requestIdToCancel = cmd.requestId();
+          cancelledRequests.get().add(requestIdToCancel);
+          LOG.fine("Marked request " + requestIdToCancel + " for cancellation");
+
+          // Send acknowledgement
+          FlatBufferBuilder cancelBuilder = new FlatBufferBuilder(256);
+          int cancelResponse = packSuccess(cancelBuilder, true);
+          cancelBuilder.finish(cancelResponse);
+          ByteBuffer cancelBuf = cancelBuilder.dataBuffer();
+          int cancelSize = cancelBuf.remaining();
+
+          MemorySegment cancelSlice = sharedMem.asSlice(this.responseOffset, cancelSize);
+          cancelSlice.copyFrom(MemorySegment.ofBuffer(cancelBuf));
+
+          lengthBuf.putInt(cancelSize);
+          lengthBuf.flip();
+          client.write(lengthBuf);
+          lengthBuf.clear();
+          continue;
+        }
+
+        // Track current request ID for cancellation checks
+        long requestId = cmd.requestId();
+        currentRequestId.set(requestId);
+
         // --- Standard Request/Response Logic ---
         FlatBufferBuilder builder = new FlatBufferBuilder(1024);
         int responseOffset = 0;
         Object result = null;
 
         try {
+          // Check if this request was already cancelled
+          if (requestId != 0 && cancelledRequests.get().contains(requestId)) {
+            throw new InterruptedException("Request " + requestId + " was cancelled");
+          }
+
           if (cmd.action() == Action.CreateObject) {
             String className = cmd.targetName();
             if (!ALLOWED_CLASSES.contains(className)) {
@@ -463,13 +501,45 @@ public class GatunServer {
         lengthBuf.flip();
         client.write(lengthBuf);
         lengthBuf.clear();
+
+        // Clean up completed request from cancelled set
+        if (requestId != 0) {
+          cancelledRequests.get().remove(requestId);
+        }
+        currentRequestId.remove();
       }
     } catch (IOException e) {
       LOG.fine("Client session ended");
     } finally {
       // Cleanup orphans...
       for (Long id : sessionObjectIds) objectRegistry.remove(id);
+      // Clear thread-locals
+      cancelledRequests.get().clear();
+      currentRequestId.remove();
     }
+  }
+
+  /**
+   * Check if the current request has been cancelled.
+   * Can be called from long-running operations to support cooperative cancellation.
+   *
+   * @throws InterruptedException if the current request was cancelled
+   */
+  public static void checkCancelled() throws InterruptedException {
+    Long reqId = currentRequestId.get();
+    if (reqId != null && reqId != 0 && cancelledRequests.get().contains(reqId)) {
+      throw new InterruptedException("Request " + reqId + " was cancelled");
+    }
+  }
+
+  /**
+   * Check if the current request has been cancelled without throwing.
+   *
+   * @return true if the current request was cancelled
+   */
+  public static boolean isCancelled() {
+    Long reqId = currentRequestId.get();
+    return reqId != null && reqId != 0 && cancelledRequests.get().contains(reqId);
   }
 
   // --- HELPER: Convert FlatBuffer Argument to Java Object ---

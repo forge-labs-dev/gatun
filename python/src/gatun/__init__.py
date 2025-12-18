@@ -17,6 +17,7 @@ from gatun.client import (
     JavaIndexOutOfBoundsException,
     JavaNumberFormatException,
     JavaRuntimeException,
+    CancelledException,
 )
 from gatun.async_client import (
     AsyncGatunClient,
@@ -58,6 +59,7 @@ __all__ = [
     "JavaIndexOutOfBoundsException",
     "JavaNumberFormatException",
     "JavaRuntimeException",
+    "CancelledException",
     # Config
     "GatunConfig",
     "get_config",
