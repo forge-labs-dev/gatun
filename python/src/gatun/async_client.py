@@ -24,18 +24,15 @@ import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Any, Callable, Optional, TypeVar
+from typing import Callable, Optional, TypeVar
 
 import flatbuffers
 import pyarrow as pa
 
 from gatun.client import (
-    GatunClient,
     JavaObject,
-    JVMView,
     PayloadTooLargeError,
     PROTOCOL_VERSION,
-    _recv_exactly,
     _raise_java_exception,
 )
 from gatun.generated.org.gatun.protocol import Command as Cmd
@@ -52,7 +49,9 @@ def get_default_executor() -> ThreadPoolExecutor:
     """Get or create the default thread pool executor."""
     global _default_executor
     if _default_executor is None:
-        _default_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gatun-")
+        _default_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="gatun-"
+        )
     return _default_executor
 
 
@@ -127,7 +126,9 @@ class _AsyncMethodInvoker:
         self._method_name = method_name
 
     async def __call__(self, *args):
-        return await self._client.invoke_method(self._object_id, self._method_name, *args)
+        return await self._client.invoke_method(
+            self._object_id, self._method_name, *args
+        )
 
 
 class AsyncJVMView:
@@ -166,7 +167,9 @@ class AsyncJavaClass:
                 raise ValueError(f"Invalid method path: {self._path}")
             class_name = self._path[:last_dot]
             method_name = self._path[last_dot + 1 :]
-            return await self._client.invoke_static_method(class_name, method_name, *args)
+            return await self._client.invoke_static_method(
+                class_name, method_name, *args
+            )
         else:
             # Constructor call
             return await self._client.create_object(self._path, *args)
@@ -226,7 +229,9 @@ class AsyncGatunClient:
     async def connect(self) -> bool:
         """Connect to the Gatun server asynchronously."""
         try:
-            self._reader, self._writer = await asyncio.open_unix_connection(self.socket_path)
+            self._reader, self._writer = await asyncio.open_unix_connection(
+                self.socket_path
+            )
 
             # Read handshake
             handshake_data = await self._reader.readexactly(16)
@@ -302,8 +307,6 @@ class AsyncGatunClient:
     async def _handle_callback(self, resp):
         """Handle a callback invocation request from Java."""
         callback_id = resp.CallbackId()
-        method_name_bytes = resp.CallbackMethod()
-        method_name = method_name_bytes.decode("utf-8") if method_name_bytes else "invoke"
 
         # Unpack callback arguments
         args = []
@@ -314,7 +317,9 @@ class AsyncGatunClient:
         # Look up the callback function
         callback_fn = self._callbacks.get(callback_id)
         if callback_fn is None:
-            await self._send_callback_response(callback_id, None, True, f"Callback {callback_id} not found")
+            await self._send_callback_response(
+                callback_id, None, True, f"Callback {callback_id} not found"
+            )
             return
 
         # Execute the callback (could be sync or async)
@@ -327,9 +332,10 @@ class AsyncGatunClient:
         except Exception as e:
             await self._send_callback_response(callback_id, None, True, str(e))
 
-    async def _send_callback_response(self, callback_id: int, result, is_error: bool, error_msg: Optional[str]):
+    async def _send_callback_response(
+        self, callback_id: int, result, is_error: bool, error_msg: Optional[str]
+    ):
         """Send the result of a callback execution back to Java."""
-        from gatun.generated.org.gatun.protocol import Argument
 
         builder = flatbuffers.Builder(1024)
 
@@ -444,7 +450,10 @@ class AsyncGatunClient:
             elif elem_type == ElementType.ElementType.Byte:
                 return bytes(union_obj.ByteValuesAsNumpy())
             elif elem_type == ElementType.ElementType.String:
-                return [union_obj.StringValues(i).decode("utf-8") for i in range(union_obj.StringValuesLength())]
+                return [
+                    union_obj.StringValues(i).decode("utf-8")
+                    for i in range(union_obj.StringValuesLength())
+                ]
             else:
                 return []
         else:
@@ -638,7 +647,9 @@ class AsyncGatunClient:
 
         return await self._send_raw(builder.Output())
 
-    async def register_callback(self, callback_fn: callable, interface_name: str) -> AsyncJavaObject:
+    async def register_callback(
+        self, callback_fn: callable, interface_name: str
+    ) -> AsyncJavaObject:
         """Register a Python callable as a Java interface implementation.
 
         The callback can be either a sync function or an async coroutine.

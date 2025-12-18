@@ -18,12 +18,8 @@ Configuration precedence (highest to lowest):
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore
+import tomllib
 
 
 @dataclass
@@ -32,7 +28,7 @@ class GatunConfig:
 
     # Server settings
     memory: str = "16MB"
-    socket_path: Optional[str] = None
+    socket_path: str | None = None
 
     # JVM settings
     jvm_flags: list[str] = field(default_factory=list)
@@ -47,7 +43,7 @@ class GatunConfig:
             self.socket_path = os.path.expanduser(self.socket_path)
 
 
-def find_pyproject_toml(start_path: Optional[Path] = None) -> Optional[Path]:
+def find_pyproject_toml(start_path: Path | None = None) -> Path | None:
     """Find pyproject.toml by searching up from start_path.
 
     Args:
@@ -74,7 +70,7 @@ def find_pyproject_toml(start_path: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
-def load_config(pyproject_path: Optional[Path] = None) -> GatunConfig:
+def load_config(pyproject_path: Path | None = None) -> GatunConfig:
     """Load configuration from pyproject.toml.
 
     Args:
@@ -124,7 +120,7 @@ def load_config(pyproject_path: Optional[Path] = None) -> GatunConfig:
 
 
 # Global config instance, lazily loaded
-_config: Optional[GatunConfig] = None
+_config: GatunConfig | None = None
 
 
 def get_config() -> GatunConfig:

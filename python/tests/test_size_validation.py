@@ -19,7 +19,9 @@ def test_payload_too_large_error_attributes():
 def test_payload_too_large_error_message_suggests_increase():
     """Test error message suggests increasing memory size."""
     err = PayloadTooLargeError(10000, 4096, "Arrow batch")
-    assert "increasing memory size" in str(err).lower() or "Consider increasing" in str(err)
+    assert "increasing memory size" in str(err).lower() or "Consider increasing" in str(
+        err
+    )
     assert "memory=" in str(err)
 
 
@@ -66,7 +68,9 @@ def test_response_size_limit(client):
         result = sb.toString()
         # If we got here, the response was within limits
         # This is OK - just means our estimate was wrong
-        assert len(result) <= 4096, f"Expected response to be limited, got {len(result)} chars"
+        assert len(result) <= 4096, (
+            f"Expected response to be limited, got {len(result)} chars"
+        )
     except (PayloadTooLargeError, JavaException, RuntimeError) as e:
         # Either response too large OR socket closed is acceptable
         # The key is that we don't silently corrupt data
@@ -85,7 +89,7 @@ def test_large_list_response(client):
 
     # Getting subList will try to serialize all items
     try:
-        result = arr.subList(0, 200)
+        arr.subList(0, 200)
         # If we got here, response was within limits
         pass  # This is OK
     except (PayloadTooLargeError, JavaException, RuntimeError) as e:
@@ -191,11 +195,13 @@ def test_send_arrow_table_batched_multiple_columns(client):
     """Test batched sending with multiple columns."""
     import pyarrow as pa
 
-    table = pa.table({
-        "int_col": list(range(50)),
-        "str_col": [f"value_{i}" for i in range(50)],
-        "float_col": [i * 0.1 for i in range(50)],
-    })
+    table = pa.table(
+        {
+            "int_col": list(range(50)),
+            "str_col": [f"value_{i}" for i in range(50)],
+            "float_col": [i * 0.1 for i in range(50)],
+        }
+    )
     responses = client.send_arrow_table_batched(table, batch_size=20)
 
     # 50 rows with batch_size=20 should produce 3 batches

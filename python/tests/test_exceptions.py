@@ -5,8 +5,6 @@ import pytest
 from gatun import (
     JavaException,
     JavaSecurityException,
-    JavaIllegalArgumentException,
-    JavaNoSuchMethodException,
     JavaNoSuchFieldException,
     JavaNumberFormatException,
     JavaIndexOutOfBoundsException,

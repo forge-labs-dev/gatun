@@ -86,7 +86,9 @@ def launch_gateway(memory: Optional[str] = None, socket_path: Optional[str] = No
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
 
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
     # 4. Wait for Socket (Handshake)
     max_retries = int(config.startup_timeout / 0.1)
@@ -98,7 +100,9 @@ def launch_gateway(memory: Optional[str] = None, socket_path: Optional[str] = No
         if process.poll() is not None:
             # Process died
             stdout, stderr = process.communicate()
-            raise RuntimeError(f"Java Server failed to start:\nstdout: {stdout}\nstderr: {stderr}")
+            raise RuntimeError(
+                f"Java Server failed to start:\nstdout: {stdout}\nstderr: {stderr}"
+            )
 
         time.sleep(0.1)
         retries -= 1

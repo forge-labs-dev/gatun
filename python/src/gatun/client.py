@@ -303,7 +303,7 @@ class _JVMNode:
             if last_dot == -1:
                 raise ValueError(f"Invalid method path: {self._path}")
             class_name = self._path[:last_dot]
-            method_name = self._path[last_dot + 1:]
+            method_name = self._path[last_dot + 1 :]
             return self._client.invoke_static_method(class_name, method_name, *args)
         else:
             # This is a constructor call: java.util.ArrayList()
@@ -470,16 +470,26 @@ class GatunClient:
         if elem_type == ElementType.ElementType.Int:
             return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
         elif elem_type == ElementType.ElementType.Long:
-            return [array_val.LongValues(i) for i in range(array_val.LongValuesLength())]
+            return [
+                array_val.LongValues(i) for i in range(array_val.LongValuesLength())
+            ]
         elif elem_type == ElementType.ElementType.Double:
-            return [array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())]
+            return [
+                array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())
+            ]
         elif elem_type == ElementType.ElementType.Float:
             # Float was widened to double
-            return [array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())]
+            return [
+                array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())
+            ]
         elif elem_type == ElementType.ElementType.Bool:
-            return [array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())]
+            return [
+                array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())
+            ]
         elif elem_type == ElementType.ElementType.Byte:
-            return bytes([array_val.ByteValues(i) for i in range(array_val.ByteValuesLength())])
+            return bytes(
+                [array_val.ByteValues(i) for i in range(array_val.ByteValuesLength())]
+            )
         elif elem_type == ElementType.ElementType.Short:
             # Short was widened to int
             return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
@@ -532,8 +542,6 @@ class GatunClient:
     def _handle_callback(self, resp):
         """Handle a callback invocation request from Java."""
         callback_id = resp.CallbackId()
-        method_name_bytes = resp.CallbackMethod()
-        method_name = method_name_bytes.decode("utf-8") if method_name_bytes else "invoke"
 
         # Unpack callback arguments
         args = []
@@ -545,7 +553,9 @@ class GatunClient:
         callback_fn = self._callbacks.get(callback_id)
         if callback_fn is None:
             # Send error response
-            self._send_callback_response(callback_id, None, True, f"Callback {callback_id} not found")
+            self._send_callback_response(
+                callback_id, None, True, f"Callback {callback_id} not found"
+            )
             return
 
         # Execute the callback
@@ -555,7 +565,9 @@ class GatunClient:
         except Exception as e:
             self._send_callback_response(callback_id, None, True, str(e))
 
-    def _send_callback_response(self, callback_id: int, result, is_error: bool, error_msg: str | None):
+    def _send_callback_response(
+        self, callback_id: int, result, is_error: bool, error_msg: str | None
+    ):
         """Send the result of a callback execution back to Java."""
         builder = flatbuffers.Builder(1024)
 
@@ -744,7 +756,9 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
-    def register_callback(self, callback_fn: callable, interface_name: str) -> "JavaObject":
+    def register_callback(
+        self, callback_fn: callable, interface_name: str
+    ) -> "JavaObject":
         """Register a Python callable as a Java interface implementation.
 
         This creates a Java dynamic proxy that implements the specified interface.
@@ -883,6 +897,7 @@ class GatunClient:
             return self._build_typed_array(builder, value)
         elif value is None:
             from gatun.generated.org.gatun.protocol import NullVal
+
             NullVal.Start(builder)
             return Value.Value.NullVal, NullVal.End(builder)
         else:
@@ -936,7 +951,7 @@ class GatunClient:
             ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
             ArrayVal.AddIntValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif arr.dtype.kind == 'U' or arr.dtype.kind == 'O':
+        elif arr.dtype.kind == "U" or arr.dtype.kind == "O":
             # String array or object array - use object_values
             item_offsets = []
             for item in arr:
@@ -946,7 +961,7 @@ class GatunClient:
                 builder.PrependUOffsetTRelative(offset)
             vec_off = builder.EndVector()
             ArrayVal.Start(builder)
-            if arr.dtype.kind == 'U':
+            if arr.dtype.kind == "U":
                 ArrayVal.AddElementType(builder, ElementType.ElementType.String)
             else:
                 ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
@@ -978,41 +993,41 @@ class GatunClient:
         """Build an ArrayVal from Python array.array."""
         typecode = arr.typecode
         # Convert array.array to numpy for CreateNumpyVector
-        if typecode == 'i':  # int (usually 32-bit)
+        if typecode == "i":  # int (usually 32-bit)
             np_arr = np.array(arr, dtype=np.int32)
             vec_off = builder.CreateNumpyVector(np_arr)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
             ArrayVal.AddIntValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif typecode == 'l' or typecode == 'q':  # long
+        elif typecode == "l" or typecode == "q":  # long
             np_arr = np.array(arr, dtype=np.int64)
             vec_off = builder.CreateNumpyVector(np_arr)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
             ArrayVal.AddLongValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif typecode == 'd':  # double
+        elif typecode == "d":  # double
             np_arr = np.array(arr, dtype=np.float64)
             vec_off = builder.CreateNumpyVector(np_arr)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif typecode == 'f':  # float -> widen to double
+        elif typecode == "f":  # float -> widen to double
             np_arr = np.array(arr, dtype=np.float64)
             vec_off = builder.CreateNumpyVector(np_arr)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif typecode == 'b' or typecode == 'B':  # byte
+        elif typecode == "b" or typecode == "B":  # byte
             vec_off = builder.CreateByteVector(arr.tobytes())
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
             ArrayVal.AddByteValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif typecode == 'h' or typecode == 'H':  # short -> widen to int
+        elif typecode == "h" or typecode == "H":  # short -> widen to int
             np_arr = np.array(arr, dtype=np.int32)
             vec_off = builder.CreateNumpyVector(np_arr)
             ArrayVal.Start(builder)

@@ -15,7 +15,9 @@ class TestCallbackBasics:
         def my_callback(*args):
             return sum(args) if args else 0
 
-        callback_obj = client.register_callback(my_callback, "java.util.function.IntSupplier")
+        callback_obj = client.register_callback(
+            my_callback, "java.util.function.IntSupplier"
+        )
         assert callback_obj is not None
         assert isinstance(callback_obj, JavaObject)
 
@@ -127,7 +129,9 @@ class TestCallbackWithCollections:
         def uppercase(s):
             return s.upper() if isinstance(s, str) else str(s).upper()
 
-        operator = client.register_callback(uppercase, "java.util.function.UnaryOperator")
+        operator = client.register_callback(
+            uppercase, "java.util.function.UnaryOperator"
+        )
 
         arr = client.create_object("java.util.ArrayList")
         arr.add("hello")
@@ -199,7 +203,9 @@ class TestCallbackErrorHandling:
 
         # Sorting should raise an exception
         with pytest.raises(JavaException) as excinfo:
-            client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
+            client.invoke_static_method(
+                "java.util.Collections", "sort", arr, comparator
+            )
 
         assert "Intentional error from Python" in str(excinfo.value)
 
@@ -245,7 +251,9 @@ class TestCallbackMultipleInvocations:
             seen_values.append(value)
             return None
 
-        consumer = client.register_callback(tracking_consumer, "java.util.function.Consumer")
+        consumer = client.register_callback(
+            tracking_consumer, "java.util.function.Consumer"
+        )
 
         arr = client.create_object("java.util.ArrayList")
         for i in range(5):

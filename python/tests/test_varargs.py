@@ -1,7 +1,5 @@
 """Tests for varargs method support."""
 
-import pytest
-
 
 def test_arrays_aslist_single_arg(client):
     """Test Arrays.asList with single argument."""

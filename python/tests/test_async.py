@@ -112,7 +112,9 @@ class TestAsyncCallbacks:
                 return 1
             return 0
 
-        comparator = await async_client.register_callback(compare, "java.util.Comparator")
+        comparator = await async_client.register_callback(
+            compare, "java.util.Comparator"
+        )
         assert isinstance(comparator, AsyncJavaObject)
 
         # Use it to sort
@@ -144,7 +146,9 @@ class TestAsyncCallbacks:
 
         import asyncio
 
-        comparator = await async_client.register_callback(async_compare, "java.util.Comparator")
+        comparator = await async_client.register_callback(
+            async_compare, "java.util.Comparator"
+        )
 
         arr = await async_client.create_object("java.util.ArrayList")
         await arr.add("z")

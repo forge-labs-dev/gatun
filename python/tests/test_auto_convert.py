@@ -1,7 +1,5 @@
 """Tests for auto-convert between Java collections and Python list/dict."""
 
-import pytest
-
 
 def test_java_list_to_python_list(client):
     """Test that Java List returned from method is auto-converted to Python list."""

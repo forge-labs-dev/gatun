@@ -3,7 +3,6 @@
 import array
 
 import numpy as np
-import pytest
 
 
 # Uses the shared `client` fixture from conftest.py
@@ -29,7 +28,6 @@ class TestArrayReturnValues:
 
     def test_string_array_copyof(self, client):
         """Test Arrays.copyOf with String[] equivalent."""
-        Arrays = client.jvm.java.util.Arrays
         # Create Object[] with strings via ArrayList.toArray
         ArrayList = client.jvm.java.util.ArrayList
         al = ArrayList()
