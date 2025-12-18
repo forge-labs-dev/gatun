@@ -1,4 +1,5 @@
 import logging
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,8 @@ def java_gateway():
     Launches the Java Server once for the entire test session.
     Uses the packed JAR via the new 'launch_gateway' API.
     """
-    # 1. Setup specific test paths
-    socket_path = Path("/tmp/gatun_test.sock")
+    # 1. Setup specific test paths (use tempfile for cross-platform compatibility)
+    socket_path = Path(tempfile.gettempdir()) / "gatun_test.sock"
 
     # Cleanup stale socket from previous runs
     # (unlink(missing_ok=True) requires Python 3.8+)
