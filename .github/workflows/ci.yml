@@ -20,6 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Install FlatBuffers compiler
+      - name: Install flatc (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y flatbuffers-compiler
+
+      - name: Install flatc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install flatbuffers
+
+      - name: Install flatc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install flatbuffers
+
       # First set up Java 21 to build the JAR
       - name: Set up Java 21 (for build)
         uses: actions/setup-java@v4
