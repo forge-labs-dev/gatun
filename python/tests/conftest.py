@@ -1,5 +1,6 @@
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -51,8 +52,15 @@ def client(java_gateway):
     socket_str = str(java_gateway.socket_path)
     logger.debug(f"Connecting client to {socket_str}")
 
+    # Retry connection a few times to handle race condition where
+    # socket file exists but server isn't listening yet
     c = GatunClient(socket_str)
-    connected = c.connect()
+    connected = False
+    for _ in range(10):
+        connected = c.connect()
+        if connected:
+            break
+        time.sleep(0.1)
 
     if not connected:
         pytest.fail(f"Client failed to connect to Gateway at {socket_str}")
