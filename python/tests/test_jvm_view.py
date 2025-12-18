@@ -2,6 +2,8 @@
 
 import pytest
 
+from gatun import JavaSecurityException
+
 
 def test_jvm_view_create_arraylist(client):
     """Test creating ArrayList via JVM view."""
@@ -78,7 +80,7 @@ def test_jvm_view_hashmap(client):
 def test_jvm_view_blocked_class(client):
     """Verify blocked classes still raise errors via JVM view."""
     Runtime = client.jvm.java.lang.Runtime
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaSecurityException) as excinfo:
         Runtime()  # Try to instantiate
     assert "not allowed" in str(excinfo.value).lower()
 

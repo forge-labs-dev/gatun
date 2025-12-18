@@ -1,6 +1,12 @@
 import pytest
 
-from gatun import PROTOCOL_VERSION
+from gatun import (
+    PROTOCOL_VERSION,
+    JavaException,
+    JavaSecurityException,
+    JavaNoSuchFieldException,
+    JavaNumberFormatException,
+)
 
 
 def test_protocol_version_exported():
@@ -25,7 +31,7 @@ def test_security_access_denied(client):
     # 3. VERIFICATION:
     # Proof that the object is actually gone (and the first free worked)
     # Trying to use it SHOULD fail.
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaException) as excinfo:
         client.invoke_method(valid_id, "toString")
 
     assert "not found" in str(excinfo.value)
@@ -59,7 +65,7 @@ def test_allowlist_permits_safe_classes(client, class_name):
 )
 def test_allowlist_blocks_dangerous_classes(client, class_name):
     """Verify that non-allowlisted classes are rejected."""
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaSecurityException) as excinfo:
         client.create_object(class_name)
     assert "not allowed" in str(excinfo.value).lower()
 
@@ -118,7 +124,7 @@ def test_static_method_math_abs(client):
 
 def test_static_method_blocked_class(client):
     """Verify static methods on non-allowlisted classes are rejected."""
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaSecurityException) as excinfo:
         client.invoke_static_method("java.lang.Runtime", "getRuntime")
     assert "not allowed" in str(excinfo.value).lower()
 
@@ -149,7 +155,7 @@ def test_set_field_stringbuilder_count(client):
 def test_field_not_found(client):
     """Verify accessing non-existent field raises error."""
     arr = client.create_object("java.util.ArrayList")
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaNoSuchFieldException) as excinfo:
         client.get_field(arr, "nonExistentField")
     assert "no field" in str(excinfo.value).lower()
 
@@ -157,7 +163,7 @@ def test_field_not_found(client):
 def test_exception_includes_stack_trace(client):
     """Verify Java exceptions include full stack trace."""
     # Integer.parseInt with invalid input will throw NumberFormatException
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(JavaNumberFormatException) as excinfo:
         client.invoke_static_method("java.lang.Integer", "parseInt", "not_a_number")
 
     error_msg = str(excinfo.value)

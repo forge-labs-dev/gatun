@@ -14,6 +14,8 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +75,31 @@ public class GatunServer {
   private final Map<Long, Object> objectRegistry = new ConcurrentHashMap<>();
   private final AtomicLong objectIdCounter = new AtomicLong(1);
 
+  // --- CALLBACK REGISTRY ---
+  // Maps callback ID -> CallbackInfo (interface name + proxy object)
+  // Note: callback IDs are allocated from objectIdCounter to ensure uniqueness
+  private final Map<Long, CallbackInfo> callbackRegistry = new ConcurrentHashMap<>();
+
+  // Per-session: the socket channel for sending callback requests
+  private static final ThreadLocal<SocketChannel> sessionChannel = new ThreadLocal<>();
+
+  // Per-session: shared memory segment
+  private static final ThreadLocal<MemorySegment> sessionSharedMem = new ThreadLocal<>();
+
   private final BufferAllocator allocator = new RootAllocator();
+
+  /** Holds information about a registered callback. */
+  private static class CallbackInfo {
+    final long id;
+    final String interfaceName;
+    final Object proxyInstance;
+
+    CallbackInfo(long id, String interfaceName, Object proxyInstance) {
+      this.id = id;
+      this.interfaceName = interfaceName;
+      this.proxyInstance = proxyInstance;
+    }
+  }
 
   public GatunServer(String socketPathStr, long memorySize) {
     this.socketPath = Path.of(socketPathStr);
@@ -130,7 +156,12 @@ public class GatunServer {
 
   private void handleClient(SocketChannel client, MemorySegment sharedMem) {
     Set<Long> sessionObjectIds = new HashSet<>();
+    Set<Long> sessionCallbackIds = new HashSet<>();
     LOG.fine("New client session started");
+
+    // Set up thread-local session context for callbacks
+    sessionChannel.set(client);
+    sessionSharedMem.set(sharedMem);
 
     try (client) {
 
@@ -348,6 +379,38 @@ public class GatunServer {
               }
             }
           }
+          // --- CALLBACK BLOCK ---
+          else if (cmd.action() == Action.RegisterCallback) {
+            // Register a Python callback and create a Java proxy
+            String interfaceName = cmd.targetName();
+            // Use the same ID for both callback and object registry
+            // This way Python can use the object_id as the callback_id
+            long callbackId = objectIdCounter.getAndIncrement();
+
+            // Create a dynamic proxy that will invoke Python when called
+            Object proxy = createCallbackProxy(callbackId, interfaceName);
+
+            // Store in callback registry
+            CallbackInfo info = new CallbackInfo(callbackId, interfaceName, proxy);
+            callbackRegistry.put(callbackId, info);
+            sessionCallbackIds.add(callbackId);
+
+            // Also register proxy in object registry with the SAME ID
+            objectRegistry.put(callbackId, proxy);
+            sessionObjectIds.add(callbackId);
+
+            LOG.fine("Registered callback ID " + callbackId + " for interface " + interfaceName);
+            result = new ObjectRefT(callbackId);
+          } else if (cmd.action() == Action.UnregisterCallback) {
+            long callbackId = cmd.targetId();
+            CallbackInfo info = callbackRegistry.remove(callbackId);
+            if (info != null) {
+              sessionCallbackIds.remove(callbackId);
+              LOG.fine("Unregistered callback ID " + callbackId);
+            }
+            result = null;
+          }
+          // Note: CallbackResponse is handled directly in invokeCallback(), not here
 
           // 3. Pack Success
           responseOffset = packSuccess(builder, result);
@@ -369,7 +432,8 @@ public class GatunServer {
           }
 
           String message = formatException(cause);
-          responseOffset = packError(builder, message);
+          String errorType = cause.getClass().getName();
+          responseOffset = packError(builder, message, errorType);
         }
 
         // 4. Write Response to Zone C
@@ -385,7 +449,7 @@ public class GatunServer {
               String.format(
                   "Response too large: %d bytes exceeds %d byte limit",
                   resSize, RESPONSE_ZONE_SIZE);
-          responseOffset = packError(builder, errorMsg);
+          responseOffset = packError(builder, errorMsg, "org.gatun.PayloadTooLargeException");
           builder.finish(responseOffset);
           resBuf = builder.dataBuffer();
           resSize = resBuf.remaining();
@@ -459,12 +523,95 @@ public class GatunServer {
     } else if (valType == Value.NullVal) {
       value = null;
       type = Object.class;
+    } else if (valType == Value.ArrayVal) {
+      // Convert ArrayVal to Java array
+      ArrayVal av = (ArrayVal) arg.val(new ArrayVal());
+      value = convertArrayVal(av);
+      type = value.getClass();
     } else {
       value = null;
       type = Object.class;
     }
 
     return new Object[] {value, type};
+  }
+
+  // --- HELPER: Convert ArrayVal to Java array ---
+  private Object convertArrayVal(ArrayVal av) {
+    byte elemType = av.elementType();
+
+    if (elemType == ElementType.Int) {
+      int len = av.intValuesLength();
+      int[] arr = new int[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = av.intValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Long) {
+      int len = av.longValuesLength();
+      long[] arr = new long[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = av.longValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Double) {
+      int len = av.doubleValuesLength();
+      double[] arr = new double[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = av.doubleValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Float) {
+      // Float was widened to double, narrow back
+      int len = av.doubleValuesLength();
+      float[] arr = new float[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = (float) av.doubleValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Bool) {
+      int len = av.boolValuesLength();
+      boolean[] arr = new boolean[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = av.boolValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Byte) {
+      int len = av.byteValuesLength();
+      byte[] arr = new byte[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = (byte) av.byteValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.Short) {
+      // Short was widened to int, narrow back
+      int len = av.intValuesLength();
+      short[] arr = new short[len];
+      for (int i = 0; i < len; i++) {
+        arr[i] = (short) av.intValues(i);
+      }
+      return arr;
+    } else if (elemType == ElementType.String) {
+      // String array stored as object_values
+      int len = av.objectValuesLength();
+      String[] arr = new String[len];
+      for (int i = 0; i < len; i++) {
+        Argument item = av.objectValues(i);
+        Object[] converted = convertArgument(item);
+        arr[i] = (String) converted[0];
+      }
+      return arr;
+    } else {
+      // Object array
+      int len = av.objectValuesLength();
+      Object[] arr = new Object[len];
+      for (int i = 0; i < len; i++) {
+        Argument item = av.objectValues(i);
+        Object[] converted = convertArgument(item);
+        arr[i] = converted[0];
+      }
+      return arr;
+    }
   }
 
   // --- HELPER: Find method by name and compatible argument types ---
@@ -650,7 +797,8 @@ public class GatunServer {
         || obj instanceof Boolean
         || obj instanceof Character
         || obj instanceof List
-        || obj instanceof Map;
+        || obj instanceof Map
+        || obj.getClass().isArray();
   }
 
   // --- HELPER: Format exception with full stack trace ---
@@ -742,6 +890,10 @@ public class GatunServer {
       }
       int entriesVec = MapVal.createEntriesVector(builder, entryOffsets);
       valueOffset = MapVal.createMapVal(builder, entriesVec);
+    } else if (value.getClass().isArray()) {
+      // Handle Java arrays
+      type = Value.ArrayVal;
+      valueOffset = packArray(builder, value, sessionObjectIds);
     } else {
       // Unknown type - wrap as object reference
       long newId = objectIdCounter.getAndIncrement();
@@ -754,6 +906,233 @@ public class GatunServer {
     }
 
     return new int[] {type, valueOffset};
+  }
+
+  // --- HELPER: Pack Java array into ArrayVal ---
+  private int packArray(FlatBufferBuilder builder, Object array, Set<Long> sessionObjectIds) {
+    Class<?> componentType = array.getClass().getComponentType();
+
+    if (componentType == int.class) {
+      int[] arr = (int[]) array;
+      int vecOffset = ArrayVal.createIntValuesVector(builder, arr);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Int);
+      ArrayVal.addIntValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == long.class) {
+      long[] arr = (long[]) array;
+      int vecOffset = ArrayVal.createLongValuesVector(builder, arr);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Long);
+      ArrayVal.addLongValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == double.class) {
+      double[] arr = (double[]) array;
+      int vecOffset = ArrayVal.createDoubleValuesVector(builder, arr);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Double);
+      ArrayVal.addDoubleValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == float.class) {
+      float[] arr = (float[]) array;
+      // Widen float[] to double[]
+      double[] widened = new double[arr.length];
+      for (int i = 0; i < arr.length; i++) {
+        widened[i] = arr[i];
+      }
+      int vecOffset = ArrayVal.createDoubleValuesVector(builder, widened);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Float);
+      ArrayVal.addDoubleValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == boolean.class) {
+      boolean[] arr = (boolean[]) array;
+      int vecOffset = ArrayVal.createBoolValuesVector(builder, arr);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Bool);
+      ArrayVal.addBoolValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == byte.class) {
+      byte[] arr = (byte[]) array;
+      int vecOffset = ArrayVal.createByteValuesVector(builder, arr);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Byte);
+      ArrayVal.addByteValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else if (componentType == short.class) {
+      short[] arr = (short[]) array;
+      // Widen short[] to int[]
+      int[] widened = new int[arr.length];
+      for (int i = 0; i < arr.length; i++) {
+        widened[i] = arr[i];
+      }
+      int vecOffset = ArrayVal.createIntValuesVector(builder, widened);
+      ArrayVal.startArrayVal(builder);
+      ArrayVal.addElementType(builder, ElementType.Short);
+      ArrayVal.addIntValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    } else {
+      // Object array (String[], Object[], etc.)
+      Object[] arr = (Object[]) array;
+      int[] argOffsets = new int[arr.length];
+      for (int i = 0; i < arr.length; i++) {
+        int[] packed = packValue(builder, arr[i], sessionObjectIds);
+        Argument.startArgument(builder);
+        Argument.addValType(builder, (byte) packed[0]);
+        Argument.addVal(builder, packed[1]);
+        argOffsets[i] = Argument.endArgument(builder);
+      }
+      int vecOffset = ArrayVal.createObjectValuesVector(builder, argOffsets);
+      ArrayVal.startArrayVal(builder);
+      // Use String type for String[], Object for everything else
+      if (componentType == String.class) {
+        ArrayVal.addElementType(builder, ElementType.String);
+      } else {
+        ArrayVal.addElementType(builder, ElementType.Object);
+      }
+      ArrayVal.addObjectValues(builder, vecOffset);
+      return ArrayVal.endArrayVal(builder);
+    }
+  }
+
+  // --- CALLBACK HELPERS ---
+
+  /**
+   * Creates a dynamic proxy that implements the specified interface. When any method on the proxy
+   * is called, it sends a callback request to Python and waits for the response.
+   */
+  private Object createCallbackProxy(long callbackId, String interfaceName)
+      throws ClassNotFoundException {
+    Class<?> interfaceClass = Class.forName(interfaceName);
+    if (!interfaceClass.isInterface()) {
+      throw new IllegalArgumentException(interfaceName + " is not an interface");
+    }
+
+    InvocationHandler handler =
+        (proxy, method, args) -> {
+          // Handle Object methods locally
+          if (method.getDeclaringClass() == Object.class) {
+            String methodName = method.getName();
+            if ("toString".equals(methodName)) {
+              return "PythonCallback[" + callbackId + "]@" + interfaceName;
+            } else if ("hashCode".equals(methodName)) {
+              return (int) callbackId;
+            } else if ("equals".equals(methodName)) {
+              return proxy == args[0];
+            }
+          }
+
+          // Send callback request to Python and wait for response
+          return invokeCallback(callbackId, method.getName(), args == null ? new Object[0] : args);
+        };
+
+    return Proxy.newProxyInstance(
+        interfaceClass.getClassLoader(), new Class<?>[] {interfaceClass}, handler);
+  }
+
+  /**
+   * Sends a callback invocation request to Python and blocks until Python responds. This is called
+   * from the dynamic proxy when Java code invokes a method on the callback object.
+   */
+  private Object invokeCallback(long callbackId, String methodName, Object[] args)
+      throws Exception {
+    SocketChannel channel = sessionChannel.get();
+    MemorySegment sharedMem = sessionSharedMem.get();
+
+    if (channel == null || sharedMem == null) {
+      throw new IllegalStateException("Callback invoked outside of session context");
+    }
+
+    // Build the callback request response
+    FlatBufferBuilder builder = new FlatBufferBuilder(1024);
+
+    // Build callback arguments
+    int[] argOffsets = new int[args.length];
+    for (int i = 0; i < args.length; i++) {
+      int[] packed = packValue(builder, args[i], null);
+      Argument.startArgument(builder);
+      Argument.addValType(builder, (byte) packed[0]);
+      Argument.addVal(builder, packed[1]);
+      argOffsets[i] = Argument.endArgument(builder);
+    }
+
+    int argsVec = Response.createCallbackArgsVector(builder, argOffsets);
+    int methodOff = builder.createString(methodName);
+
+    Response.startResponse(builder);
+    Response.addIsError(builder, false);
+    Response.addIsCallback(builder, true);
+    Response.addCallbackId(builder, callbackId);
+    Response.addCallbackMethod(builder, methodOff);
+    Response.addCallbackArgs(builder, argsVec);
+    int responseOffset = Response.endResponse(builder);
+
+    builder.finish(responseOffset);
+    ByteBuffer resBuf = builder.dataBuffer();
+    int resSize = resBuf.remaining();
+
+    // Write to response zone
+    MemorySegment responseSlice = sharedMem.asSlice(this.responseOffset, resSize);
+    responseSlice.copyFrom(MemorySegment.ofBuffer(resBuf));
+
+    // Signal Python with the response size
+    ByteBuffer lengthBuf = ByteBuffer.allocate(4);
+    lengthBuf.order(ByteOrder.LITTLE_ENDIAN);
+    lengthBuf.putInt(resSize);
+    lengthBuf.flip();
+    while (lengthBuf.hasRemaining()) {
+      channel.write(lengthBuf);
+    }
+
+    // Now we need to read the callback response directly from Python
+    // Python sends a CallbackResponse command back to us
+    lengthBuf.clear();
+    if (!readFully(channel, lengthBuf)) {
+      throw new IOException("Connection closed while waiting for callback response");
+    }
+    lengthBuf.flip();
+    int commandSize = lengthBuf.getInt();
+
+    // Read the command from command zone
+    MemorySegment cmdSlice = sharedMem.asSlice(COMMAND_OFFSET, commandSize);
+    ByteBuffer cmdBuf = cmdSlice.asByteBuffer();
+    cmdBuf.order(ByteOrder.LITTLE_ENDIAN);
+
+    Command cmd = Command.getRootAsCommand(cmdBuf);
+    if (cmd.action() != Action.CallbackResponse) {
+      throw new RuntimeException("Expected CallbackResponse but got action: " + cmd.action());
+    }
+
+    // Extract the result from the callback response
+    Object returnValue = null;
+    boolean isError = false;
+    String errorMsg = null;
+
+    if (cmd.argsLength() > 0) {
+      Argument arg = cmd.args(0);
+      Object[] converted = convertArgument(arg);
+      returnValue = converted[0];
+    }
+
+    // Check if there's an error flag (second arg if present)
+    if (cmd.argsLength() > 1) {
+      Argument errorArg = cmd.args(1);
+      Object[] converted = convertArgument(errorArg);
+      if (converted[0] instanceof Boolean) {
+        isError = (Boolean) converted[0];
+      }
+    }
+
+    // Error message is in target_name for error responses
+    if (isError) {
+      errorMsg = cmd.targetName();
+    }
+
+    if (isError) {
+      throw new RuntimeException("Callback error: " + errorMsg);
+    }
+
+    return returnValue;
   }
 
   // --- HELPER: Pack Result into FlatBuffer ---
@@ -772,11 +1151,13 @@ public class GatunServer {
     return Response.endResponse(builder);
   }
 
-  private int packError(FlatBufferBuilder builder, String msg) {
+  private int packError(FlatBufferBuilder builder, String msg, String errorType) {
     int errOff = builder.createString(msg == null ? "Unknown Error" : msg);
+    int typeOff = builder.createString(errorType == null ? "java.lang.RuntimeException" : errorType);
     Response.startResponse(builder);
     Response.addIsError(builder, true);
     Response.addErrorMsg(builder, errOff);
+    Response.addErrorType(builder, typeOff);
     return Response.endResponse(builder);
   }
 

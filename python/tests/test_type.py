@@ -1,5 +1,7 @@
 import pytest
 
+from gatun import JavaNoSuchMethodException
+
 
 def test_primitive_types_and_math(client):
     """Verify that numbers return as ints/floats, not strings."""
@@ -35,17 +37,15 @@ def test_object_creation(client, java_object, expected_str):
 
 
 def test_error_propagation(client):
-    """Verify Java exceptions are raised as Python RuntimeErrors."""
+    """Verify Java exceptions are raised as typed Python exceptions."""
     my_list = client.create_object("java.util.ArrayList")
 
-    # Trigger a Java-side error (calling a method we didn't implement logic for)
-    # OR calling a method that throws (like get(99) on empty list)
-    with pytest.raises(RuntimeError) as excinfo:
-        # Assuming your server throws "Object Not Found" or similar for bad methods
-        # Or you can invoke 'get' with index 100 if you implemented 'get'
+    # Trigger a Java-side error (calling a method that doesn't exist)
+    with pytest.raises(JavaNoSuchMethodException) as excinfo:
         client.invoke_method(my_list.object_id, "methodThatDoesNotExist")
 
-    assert "Java Error" in str(excinfo.value)
+    # Should contain the method name in the error
+    assert "methodThatDoesNotExist" in str(excinfo.value)
 
 
 def test_stress_gc(client):

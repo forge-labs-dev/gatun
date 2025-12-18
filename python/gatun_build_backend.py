@@ -65,7 +65,34 @@ def _generate_flatbuffers():
     # Post-process Java files: remove version check that depends on flatc version
     _patch_java_version_checks()
 
+    # Post-process Python files: fix import paths for nested tables
+    _patch_python_imports()
+
     logger.info("--- [Gatun Backend] FlatBuffers generation complete ---")
+
+
+def _patch_python_imports():
+    """Patch import paths in generated Python files.
+
+    The flatc compiler generates imports like:
+        from org.gatun.protocol.Argument import Argument
+
+    But our package structure requires:
+        from gatun.generated.org.gatun.protocol.Argument import Argument
+    """
+    python_protocol_dir = PYTHON_GEN_DIR / "org" / "gatun" / "protocol"
+    if not python_protocol_dir.exists():
+        return
+
+    import_pattern = re.compile(r"from org\.gatun\.protocol\.(\w+) import (\w+)")
+    replacement = r"from gatun.generated.org.gatun.protocol.\1 import \2"
+
+    for py_file in python_protocol_dir.glob("*.py"):
+        content = py_file.read_text()
+        new_content = import_pattern.sub(replacement, content)
+        if new_content != content:
+            py_file.write_text(new_content)
+            logger.info(f"  Patched imports in {py_file.name}")
 
 
 # Must match flatbuffers-java version in gatun-core/build.gradle.kts

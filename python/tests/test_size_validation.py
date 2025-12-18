@@ -1,7 +1,7 @@
 """Tests for size validation of shared memory zones."""
 
 import pytest
-from gatun import PayloadTooLargeError
+from gatun import PayloadTooLargeError, JavaException, JavaRuntimeException
 from gatun.client import COMMAND_ZONE_SIZE
 
 
@@ -67,10 +67,11 @@ def test_response_size_limit(client):
         # If we got here, the response was within limits
         # This is OK - just means our estimate was wrong
         assert len(result) <= 4096, f"Expected response to be limited, got {len(result)} chars"
-    except RuntimeError as e:
+    except (PayloadTooLargeError, JavaException, RuntimeError) as e:
         # Either response too large OR socket closed is acceptable
         # The key is that we don't silently corrupt data
-        assert "Response too large" in str(e) or "Socket closed" in str(e)
+        err_str = str(e).lower()
+        assert "too large" in err_str or "socket closed" in err_str
 
 
 def test_large_list_response(client):
@@ -87,9 +88,10 @@ def test_large_list_response(client):
         result = arr.subList(0, 200)
         # If we got here, response was within limits
         pass  # This is OK
-    except RuntimeError as e:
+    except (PayloadTooLargeError, JavaException, RuntimeError) as e:
         # Either response too large OR socket closed is acceptable
-        assert "Response too large" in str(e) or "Socket closed" in str(e)
+        err_str = str(e).lower()
+        assert "too large" in err_str or "socket closed" in err_str
 
 
 def test_moderate_response_works(client):
@@ -125,9 +127,10 @@ def test_exact_response_limit_boundary(client):
         result = sb.toString()
         # If succeeded, response fit in 4KB
         assert len(result) == 4300
-    except RuntimeError as e:
+    except (PayloadTooLargeError, JavaException, RuntimeError) as e:
         # If failed, it should be a size-related error
-        assert "Response too large" in str(e) or "Socket closed" in str(e)
+        err_str = str(e).lower()
+        assert "too large" in err_str or "socket closed" in err_str
 
 
 def test_arrow_payload_size_validation(client):
@@ -166,7 +169,7 @@ def test_send_arrow_table_batched_empty_table(client):
     table = pa.table({"col": pa.array([], type=pa.int64())})
 
     # Empty tables produce an empty Arrow stream which Java rejects
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(JavaRuntimeException) as exc_info:
         client.send_arrow_table_batched(table)
 
     assert "Arrow Stream Empty" in str(exc_info.value)

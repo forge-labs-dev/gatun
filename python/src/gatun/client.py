@@ -1,3 +1,4 @@
+import array
 import logging
 import mmap
 import os
@@ -6,6 +7,7 @@ import struct
 import weakref
 
 import flatbuffers
+import numpy as np
 import pyarrow as pa
 
 from gatun.generated.org.gatun.protocol import Command as Cmd
@@ -22,6 +24,8 @@ from gatun.generated.org.gatun.protocol import (
     ListVal,
     MapVal,
     MapEntry,
+    ArrayVal,
+    ElementType,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,129 @@ class PayloadTooLargeError(Exception):
             f"maximum {max_size:,} bytes. Consider increasing memory size "
             f"when connecting (e.g., gatun.connect(memory='64MB'))"
         )
+
+
+# --- Java Exception Hierarchy ---
+# These exceptions mirror common Java exceptions for better error handling
+
+
+class JavaException(Exception):
+    """Base class for all Java exceptions.
+
+    Attributes:
+        java_class: The fully qualified Java exception class name
+        message: The exception message
+        stack_trace: The full Java stack trace as a string
+    """
+
+    def __init__(self, java_class: str, message: str, stack_trace: str):
+        self.java_class = java_class
+        self.message = message
+        self.stack_trace = stack_trace
+        super().__init__(stack_trace)
+
+
+class JavaSecurityException(JavaException):
+    """Raised when a security violation occurs (e.g., accessing blocked class)."""
+
+    pass
+
+
+class JavaIllegalArgumentException(JavaException):
+    """Raised when an illegal argument is passed to a Java method."""
+
+    pass
+
+
+class JavaNoSuchMethodException(JavaException):
+    """Raised when a method cannot be found."""
+
+    pass
+
+
+class JavaNoSuchFieldException(JavaException):
+    """Raised when a field cannot be found."""
+
+    pass
+
+
+class JavaClassNotFoundException(JavaException):
+    """Raised when a class cannot be found."""
+
+    pass
+
+
+class JavaNullPointerException(JavaException):
+    """Raised when null is dereferenced in Java."""
+
+    pass
+
+
+class JavaIndexOutOfBoundsException(JavaException):
+    """Raised when an index is out of bounds."""
+
+    pass
+
+
+class JavaNumberFormatException(JavaException):
+    """Raised when a string cannot be parsed as a number."""
+
+    pass
+
+
+class JavaRuntimeException(JavaException):
+    """Raised for generic Java runtime exceptions."""
+
+    pass
+
+
+# Mapping from Java exception class names to Python exception classes
+_JAVA_EXCEPTION_MAP: dict[str, type[JavaException]] = {
+    "java.lang.SecurityException": JavaSecurityException,
+    "java.lang.IllegalArgumentException": JavaIllegalArgumentException,
+    "java.lang.NoSuchMethodException": JavaNoSuchMethodException,
+    "java.lang.NoSuchFieldException": JavaNoSuchFieldException,
+    "java.lang.ClassNotFoundException": JavaClassNotFoundException,
+    "java.lang.NullPointerException": JavaNullPointerException,
+    "java.lang.IndexOutOfBoundsException": JavaIndexOutOfBoundsException,
+    "java.lang.ArrayIndexOutOfBoundsException": JavaIndexOutOfBoundsException,
+    "java.lang.StringIndexOutOfBoundsException": JavaIndexOutOfBoundsException,
+    "java.lang.NumberFormatException": JavaNumberFormatException,
+    "java.lang.RuntimeException": JavaRuntimeException,
+    "org.gatun.PayloadTooLargeException": PayloadTooLargeError,
+}
+
+
+def _raise_java_exception(error_type: str, error_msg: str) -> None:
+    """Raise the appropriate Python exception for a Java error.
+
+    Args:
+        error_type: The fully qualified Java exception class name
+        error_msg: The full error message including stack trace
+    """
+    import re
+
+    # Handle PayloadTooLargeException specially - parse sizes from message
+    if error_type == "org.gatun.PayloadTooLargeException":
+        # Message format: "Response too large: X bytes exceeds Y byte limit"
+        match = re.search(r"(\d+) bytes exceeds (\d+) byte", error_msg)
+        if match:
+            payload_size = int(match.group(1))
+            max_size = int(match.group(2))
+        else:
+            payload_size = 0
+            max_size = 0
+        raise PayloadTooLargeError(payload_size, max_size, "Response")
+
+    # Get the exception class, defaulting to JavaException
+    exc_class = _JAVA_EXCEPTION_MAP.get(error_type, JavaException)
+
+    # Extract just the message (first line before stack trace)
+    message = error_msg.split("\n")[0] if error_msg else ""
+    if ": " in message:
+        message = message.split(": ", 1)[1]
+
+    raise exc_class(error_type, message, error_msg)
 
 
 def _recv_exactly(sock, n):
@@ -207,6 +334,9 @@ class GatunClient:
         # JVM view for package-style access
         self._jvm = None
 
+        # Callback registry: callback_id -> callable
+        self._callbacks: dict[int, callable] = {}
+
     @property
     def jvm(self):
         """Access Java classes via package navigation.
@@ -326,27 +456,142 @@ class GatunClient:
                 val = self._unpack_value(val_arg.ValType(), val_arg.Val())
                 result[key] = val
             return result
+        elif val_type == Value.Value.ArrayVal:
+            union_obj = ArrayVal.ArrayVal()
+            union_obj.Init(val_table.Bytes, val_table.Pos)
+            return self._unpack_array(union_obj)
 
         return None
 
+    def _unpack_array(self, array_val):
+        """Unpack an ArrayVal FlatBuffer to a Python list."""
+        elem_type = array_val.ElementType()
+
+        if elem_type == ElementType.ElementType.Int:
+            return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
+        elif elem_type == ElementType.ElementType.Long:
+            return [array_val.LongValues(i) for i in range(array_val.LongValuesLength())]
+        elif elem_type == ElementType.ElementType.Double:
+            return [array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())]
+        elif elem_type == ElementType.ElementType.Float:
+            # Float was widened to double
+            return [array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())]
+        elif elem_type == ElementType.ElementType.Bool:
+            return [array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())]
+        elif elem_type == ElementType.ElementType.Byte:
+            return bytes([array_val.ByteValues(i) for i in range(array_val.ByteValuesLength())])
+        elif elem_type == ElementType.ElementType.Short:
+            # Short was widened to int
+            return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
+        elif elem_type == ElementType.ElementType.String:
+            result = []
+            for i in range(array_val.ObjectValuesLength()):
+                item = array_val.ObjectValues(i)
+                result.append(self._unpack_value(item.ValType(), item.Val()))
+            return result
+        else:
+            # Object array
+            result = []
+            for i in range(array_val.ObjectValuesLength()):
+                item = array_val.ObjectValues(i)
+                result.append(self._unpack_value(item.ValType(), item.Val()))
+            return result
+
     def _read_response(self):
-        # 1. Read Length
-        sz_data = _recv_exactly(self.sock, 4)
-        sz = struct.unpack("<I", sz_data)[0]
+        while True:
+            # 1. Read Length
+            sz_data = _recv_exactly(self.sock, 4)
+            sz = struct.unpack("<I", sz_data)[0]
 
-        # 2. Read Data from SHM
-        self.shm.seek(self.response_offset)
-        resp_buf = self.shm.read(sz)
+            # 2. Read Data from SHM
+            self.shm.seek(self.response_offset)
+            resp_buf = self.shm.read(sz)
 
-        # 3. Parse FlatBuffer
-        resp = Response.Response.GetRootAsResponse(resp_buf, 0)
+            # 3. Parse FlatBuffer
+            resp = Response.Response.GetRootAsResponse(resp_buf, 0)
 
-        if resp.IsError():
-            error_msg = resp.ErrorMsg().decode("utf-8")
-            raise RuntimeError(f"Java Error: {error_msg}")
+            # Check if this is a callback request from Java
+            if resp.IsCallback():
+                self._handle_callback(resp)
+                # After handling callback, continue reading for the actual response
+                continue
 
-        # 4. Unpack the return value
-        return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())
+            if resp.IsError():
+                error_msg = resp.ErrorMsg().decode("utf-8")
+                error_type_bytes = resp.ErrorType()
+                error_type = (
+                    error_type_bytes.decode("utf-8")
+                    if error_type_bytes
+                    else "java.lang.RuntimeException"
+                )
+                _raise_java_exception(error_type, error_msg)
+
+            # 4. Unpack the return value
+            return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())
+
+    def _handle_callback(self, resp):
+        """Handle a callback invocation request from Java."""
+        callback_id = resp.CallbackId()
+        method_name_bytes = resp.CallbackMethod()
+        method_name = method_name_bytes.decode("utf-8") if method_name_bytes else "invoke"
+
+        # Unpack callback arguments
+        args = []
+        for i in range(resp.CallbackArgsLength()):
+            arg = resp.CallbackArgs(i)
+            args.append(self._unpack_value(arg.ValType(), arg.Val()))
+
+        # Look up the callback function
+        callback_fn = self._callbacks.get(callback_id)
+        if callback_fn is None:
+            # Send error response
+            self._send_callback_response(callback_id, None, True, f"Callback {callback_id} not found")
+            return
+
+        # Execute the callback
+        try:
+            result = callback_fn(*args)
+            self._send_callback_response(callback_id, result, False, None)
+        except Exception as e:
+            self._send_callback_response(callback_id, None, True, str(e))
+
+    def _send_callback_response(self, callback_id: int, result, is_error: bool, error_msg: str | None):
+        """Send the result of a callback execution back to Java."""
+        builder = flatbuffers.Builder(1024)
+
+        # Build arguments: [result, is_error]
+        arg_offsets = []
+
+        # First arg: the result value
+        result_offset = self._build_argument(builder, result)
+        arg_offsets.append(result_offset)
+
+        # Second arg: is_error flag
+        error_offset = self._build_argument(builder, is_error)
+        arg_offsets.append(error_offset)
+
+        # Build arguments vector
+        Cmd.CommandStartArgsVector(builder, len(arg_offsets))
+        for offset in reversed(arg_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        args_vec = builder.EndVector()
+
+        # Build target_name (error message if error)
+        target_name_off = None
+        if error_msg:
+            target_name_off = builder.CreateString(error_msg)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.CallbackResponse)
+        Cmd.CommandAddTargetId(builder, callback_id)
+        if target_name_off:
+            Cmd.CommandAddTargetName(builder, target_name_off)
+        Cmd.CommandAddArgs(builder, args_vec)
+        cmd_offset = Cmd.CommandEnd(builder)
+        builder.Finish(cmd_offset)
+
+        # Send it (don't wait for response - Java is waiting for this)
+        self._send_raw(builder.Output(), wait_for_response=False)
 
     def create_object(self, class_name, *args):
         builder = flatbuffers.Builder(1024)
@@ -499,6 +744,73 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
+    def register_callback(self, callback_fn: callable, interface_name: str) -> "JavaObject":
+        """Register a Python callable as a Java interface implementation.
+
+        This creates a Java dynamic proxy that implements the specified interface.
+        When Java code calls methods on this proxy, the calls are forwarded to
+        the Python callback function.
+
+        Args:
+            callback_fn: A Python callable that will handle method invocations.
+                        It receives the method arguments and should return a value.
+            interface_name: Fully qualified Java interface name
+                           (e.g., "java.util.function.Function")
+
+        Returns:
+            A JavaObject representing the proxy that implements the interface.
+
+        Example:
+            # Create a Comparator for sorting
+            def my_compare(a, b):
+                return a - b
+
+            comparator = client.register_callback(my_compare, "java.util.Comparator")
+            arr = client.create_object("java.util.ArrayList")
+            arr.add(3)
+            arr.add(1)
+            arr.add(2)
+            client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
+        """
+        builder = flatbuffers.Builder(256)
+        interface_off = builder.CreateString(interface_name)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.RegisterCallback)
+        Cmd.CommandAddTargetName(builder, interface_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        # Send command and get back the proxy object
+        result = self._send_raw(builder.Output())
+
+        if isinstance(result, JavaObject):
+            # Get the callback_id from the response - it's stored as the object_id
+            # We need to also store our callback function
+            # The Java side assigns callback_id = object_id for simplicity
+            callback_id = result.object_id
+            self._callbacks[callback_id] = callback_fn
+
+        return result
+
+    def unregister_callback(self, callback_id: int):
+        """Unregister a previously registered callback.
+
+        Args:
+            callback_id: The callback ID to unregister
+        """
+        # Remove from local registry
+        self._callbacks.pop(callback_id, None)
+
+        builder = flatbuffers.Builder(64)
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.UnregisterCallback)
+        Cmd.CommandAddTargetId(builder, callback_id)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        self._send_raw(builder.Output())
+
     def _build_argument(self, builder, value):
         """Convert a Python value to a FlatBuffer Argument."""
         val_type, val_off = self._build_value(builder, value)
@@ -560,12 +872,155 @@ class GatunClient:
             MapVal.Start(builder)
             MapVal.AddEntries(builder, entries_vec)
             return Value.Value.MapVal, MapVal.End(builder)
+        elif isinstance(value, np.ndarray):
+            # Convert numpy array to ArrayVal
+            return self._build_array(builder, value)
+        elif isinstance(value, (bytes, bytearray)):
+            # Convert bytes to byte array
+            return self._build_byte_array(builder, value)
+        elif isinstance(value, array.array):
+            # Convert Python array.array to ArrayVal
+            return self._build_typed_array(builder, value)
         elif value is None:
             from gatun.generated.org.gatun.protocol import NullVal
             NullVal.Start(builder)
             return Value.Value.NullVal, NullVal.End(builder)
         else:
             raise TypeError(f"Unsupported argument type: {type(value)}")
+
+    def _build_array(self, builder, arr):
+        """Build an ArrayVal from a numpy array."""
+        dtype = arr.dtype
+
+        if dtype == np.int32:
+            vec_off = builder.CreateNumpyVector(arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.int64:
+            vec_off = builder.CreateNumpyVector(arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
+            ArrayVal.AddLongValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.float64:
+            vec_off = builder.CreateNumpyVector(arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.float32:
+            # Widen float32 to float64 for transmission
+            vec_off = builder.CreateNumpyVector(arr.astype(np.float64))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.bool_:
+            vec_off = builder.CreateNumpyVector(arr.astype(np.uint8))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Bool)
+            ArrayVal.AddBoolValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.int8 or dtype == np.uint8:
+            vec_off = builder.CreateNumpyVector(arr.astype(np.int8))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
+            ArrayVal.AddByteValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif dtype == np.int16:
+            # Widen short to int for transmission
+            vec_off = builder.CreateNumpyVector(arr.astype(np.int32))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif arr.dtype.kind == 'U' or arr.dtype.kind == 'O':
+            # String array or object array - use object_values
+            item_offsets = []
+            for item in arr:
+                item_offsets.append(self._build_argument(builder, item))
+            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+            for offset in reversed(item_offsets):
+                builder.PrependUOffsetTRelative(offset)
+            vec_off = builder.EndVector()
+            ArrayVal.Start(builder)
+            if arr.dtype.kind == 'U':
+                ArrayVal.AddElementType(builder, ElementType.ElementType.String)
+            else:
+                ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
+            ArrayVal.AddObjectValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        else:
+            # Fallback: convert to object array
+            item_offsets = []
+            for item in arr:
+                item_offsets.append(self._build_argument(builder, item))
+            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+            for offset in reversed(item_offsets):
+                builder.PrependUOffsetTRelative(offset)
+            vec_off = builder.EndVector()
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
+            ArrayVal.AddObjectValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+
+    def _build_byte_array(self, builder, data):
+        """Build an ArrayVal from bytes or bytearray."""
+        vec_off = builder.CreateByteVector(data)
+        ArrayVal.Start(builder)
+        ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
+        ArrayVal.AddByteValues(builder, vec_off)
+        return Value.Value.ArrayVal, ArrayVal.End(builder)
+
+    def _build_typed_array(self, builder, arr):
+        """Build an ArrayVal from Python array.array."""
+        typecode = arr.typecode
+        # Convert array.array to numpy for CreateNumpyVector
+        if typecode == 'i':  # int (usually 32-bit)
+            np_arr = np.array(arr, dtype=np.int32)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif typecode == 'l' or typecode == 'q':  # long
+            np_arr = np.array(arr, dtype=np.int64)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
+            ArrayVal.AddLongValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif typecode == 'd':  # double
+            np_arr = np.array(arr, dtype=np.float64)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif typecode == 'f':  # float -> widen to double
+            np_arr = np.array(arr, dtype=np.float64)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif typecode == 'b' or typecode == 'B':  # byte
+            vec_off = builder.CreateByteVector(arr.tobytes())
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
+            ArrayVal.AddByteValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif typecode == 'h' or typecode == 'H':  # short -> widen to int
+            np_arr = np.array(arr, dtype=np.int32)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        else:
+            raise TypeError(f"Unsupported array.array typecode: {typecode}")
 
     def free_object(self, object_id):
         """Sends FreeObject to release a Java object."""

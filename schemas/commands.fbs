@@ -13,7 +13,23 @@ enum Action : byte {
   SendArrowBatch = 5,
   InvokeStaticMethod = 6,
   GetField = 7,
-  SetField = 8
+  SetField = 8,
+  RegisterCallback = 9,    // Python registers a callback, gets callback_id
+  UnregisterCallback = 10, // Python unregisters a callback
+  CallbackResponse = 11    // Python sends result of callback execution back to Java
+}
+
+// Element types for arrays
+enum ElementType : byte {
+  Int = 0,
+  Long = 1,
+  Double = 2,
+  Float = 3,
+  Bool = 4,
+  String = 5,
+  Object = 6,  // For Object[] or typed arrays of objects
+  Byte = 7,
+  Short = 8
 }
 
 // Support all return types
@@ -25,7 +41,9 @@ union Value {
   ObjectRef,
   NullVal,
   ListVal,
-  MapVal
+  MapVal,
+  ArrayVal,
+  CallbackRef  // Reference to a Python callback function
 }
 
 table StringVal { v:string; }
@@ -34,6 +52,13 @@ table DoubleVal { v:double; }
 table BoolVal { v:bool; }
 table ObjectRef { id:long; }
 table NullVal {}
+
+// Reference to a Python callback function
+// When Java invokes this, it triggers a callback request to Python
+table CallbackRef {
+  id: long;              // Callback ID assigned by Python
+  interface_name: string; // Java interface to implement (e.g., "java.util.Comparator")
+}
 
 // For auto-convert: Java List -> Python list
 table ListVal {
@@ -48,6 +73,20 @@ table MapEntry {
 
 table MapVal {
   entries: [MapEntry];
+}
+
+// For Java arrays (int[], String[], Object[], etc.)
+// Uses typed vectors for efficiency with primitives
+table ArrayVal {
+  element_type: ElementType;
+  // Primitive arrays - only one is populated based on element_type
+  int_values: [int];       // For int[] and short[] (widened)
+  long_values: [long];     // For long[]
+  double_values: [double]; // For double[] and float[] (widened)
+  bool_values: [bool];     // For boolean[]
+  byte_values: [byte];     // For byte[]
+  // Object arrays (String[], Object[], etc.)
+  object_values: [Argument];  // For String[] and Object[]
 }
 
 table Argument {
@@ -70,8 +109,29 @@ table Response {
   // If is_error is true, this holds the stack trace
   error_msg: string;
 
-  // If is_error is false, this holds the data
+  // If is_error is true, this holds the exception class name
+  // e.g., "java.lang.NumberFormatException", "java.lang.SecurityException"
+  error_type: string;
+
+  // If is_error is false and not a callback, this holds the return data
   return_val: Value;
+
+  // If true, this is a callback invocation request (Java calling Python)
+  is_callback: bool;
+
+  // For callback invocations:
+  callback_id: long;       // Which Python callback to invoke
+  callback_method: string; // Method name being called (e.g., "compare", "apply")
+  callback_args: [Argument]; // Arguments to pass to the callback
+}
+
+// Callback result from Python -> Java (sent as a follow-up Command)
+// Uses Action.Ping with callback_result populated
+table CallbackResult {
+  callback_id: long;    // Which callback this is a response for
+  return_val: Value;    // Return value from Python callback
+  is_error: bool;       // True if callback raised an exception
+  error_msg: string;    // Error message if is_error
 }
 
 root_type Command;
