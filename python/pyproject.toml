@@ -1,0 +1,27 @@
+[project]
+name = "gatun"
+version = "0.1.0"
+description = "Modern Python client for Project Gatun"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flatbuffers>=23.5.26",
+    "pyarrow>=22.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "gatun_build_backend"
+backend-path = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.14.9",
+]
+
+[tool.setuptools.package-data]
+gatun = ["jars/*.jar"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,60 @@
+namespace org.gatun.protocol;
+
+// Protocol version - increment when making breaking changes
+// This should be checked during handshake to ensure client/server compatibility
+// Current version: 1
+
+enum Action : byte {
+  Ping = 0,
+  ComputeSum = 1,
+  CreateObject = 2,
+  InvokeMethod = 3,
+  FreeObject = 4,
+  SendArrowBatch = 5,
+  InvokeStaticMethod = 6,
+  GetField = 7,
+  SetField = 8
+}
+
+// Support all return types
+union Value {
+  StringVal,
+  IntVal,
+  DoubleVal,
+  BoolVal,
+  ObjectRef,
+  NullVal
+}
+
+table StringVal { v:string; }
+table IntVal { v:long; }      // Java 'int' or 'long' -> 64-bit int
+table DoubleVal { v:double; }
+table BoolVal { v:bool; }
+table ObjectRef { id:long; }
+table NullVal {}
+
+table Argument {
+  val: Value;
+}
+
+// Request from Python -> Java
+table Command {
+  action: Action;
+  target_name: string;
+  target_id: long;
+  args: [Argument];
+}
+
+// Response from Java -> Python
+table Response {
+  // If true, Python should raise an exception
+  is_error: bool;
+
+  // If is_error is true, this holds the stack trace
+  error_msg: string;
+
+  // If is_error is false, this holds the data
+  return_val: Value;
+}
+
+root_type Command;
