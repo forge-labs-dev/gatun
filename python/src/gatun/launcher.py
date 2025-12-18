@@ -4,6 +4,9 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
+
+from gatun.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +15,7 @@ MODULE_DIR = Path(__file__).parent.resolve()
 JAR_PATH = MODULE_DIR / "jars" / "gatun-server-all.jar"
 
 # JVM Flags required for Apache Arrow & Netty (Java 21+)
-JVM_FLAGS = [
+DEFAULT_JVM_FLAGS = [
     "--enable-preview",
     "--add-opens=java.base/java.nio=ALL-UNNAMED",
     "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
@@ -41,18 +44,29 @@ class GatunSession:
             self.process = None
 
 
-def launch_gateway(memory="16MB", socket_path=None):
+def launch_gateway(memory: Optional[str] = None, socket_path: Optional[str] = None):
     """
     Launches the embedded Java server.
 
     Args:
-        memory (str): Memory size (e.g., "512MB", "1GB").
-        socket_path (str): Path to the Unix socket. Defaults to ~/gatun.sock.
+        memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
+        socket_path: Path to the Unix socket. Defaults to config value or ~/gatun.sock.
+
+    Configuration can be set in pyproject.toml:
+        [tool.gatun]
+        memory = "64MB"
+        socket_path = "/tmp/gatun.sock"
+        jvm_flags = ["-Xmx512m"]
     """
+    config = get_config()
+
     if not JAR_PATH.exists():
         raise RuntimeError(f"Gatun JAR not found at {JAR_PATH}. Did you run 'uv sync'?")
 
-    # 1. Parse Memory
+    # 1. Apply config defaults, then parse memory
+    if memory is None:
+        memory = config.memory
+
     size_str = memory.upper()
     if size_str.endswith("GB"):
         mem_bytes = int(float(size_str[:-2]) * 1024 * 1024 * 1024)
@@ -63,18 +77,20 @@ def launch_gateway(memory="16MB", socket_path=None):
 
     # 2. Setup Paths
     if socket_path is None:
-        socket_path = os.path.expanduser("~/gatun.sock")
+        socket_path = config.socket_path or os.path.expanduser("~/gatun.sock")
 
-    # 3. Construct Command
+    # 3. Construct Command with config JVM flags
     # java [FLAGS] -jar [JAR] [MEM_SIZE] [SOCKET_PATH]
-    cmd = ["java"] + JVM_FLAGS + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
+    jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags
+    cmd = ["java"] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
 
     process = subprocess.Popen(cmd, stdout=None, stderr=None, text=True)
 
     # 4. Wait for Socket (Handshake)
-    retries = 50
+    max_retries = int(config.startup_timeout / 0.1)
+    retries = max_retries
     while retries > 0:
         if os.path.exists(socket_path):
             break

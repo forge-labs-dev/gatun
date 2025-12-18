@@ -23,7 +23,9 @@ union Value {
   DoubleVal,
   BoolVal,
   ObjectRef,
-  NullVal
+  NullVal,
+  ListVal,
+  MapVal
 }
 
 table StringVal { v:string; }
@@ -32,6 +34,21 @@ table DoubleVal { v:double; }
 table BoolVal { v:bool; }
 table ObjectRef { id:long; }
 table NullVal {}
+
+// For auto-convert: Java List -> Python list
+table ListVal {
+  items: [Argument];  // Reuse Argument to hold nested Values
+}
+
+// For auto-convert: Java Map -> Python dict
+table MapEntry {
+  key: Argument;
+  value: Argument;
+}
+
+table MapVal {
+  entries: [MapEntry];
+}
 
 table Argument {
   val: Value;

@@ -64,20 +64,46 @@ FlatBuffers code is generated from `schemas/commands.fbs`:
 
 ## Supported Operations
 
-### Object Creation
+### JVM View API (Recommended)
+The `client.jvm` property provides package-style navigation similar to Py4J:
+```python
+# Access classes via package path
+ArrayList = client.jvm.java.util.ArrayList
+HashMap = client.jvm.java.util.HashMap
+
+# Instantiate classes
+my_list = ArrayList()           # No-arg constructor
+my_list = ArrayList(100)        # With initial capacity
+
+# Call static methods
+result = client.jvm.java.lang.Integer.parseInt("42")  # 42
+result = client.jvm.java.lang.Math.max(10, 20)        # 20
+
+# Chain operations
+sb = client.jvm.java.lang.StringBuilder("Hello")
+sb.append(" World")
+print(sb.toString())  # "Hello World"
+```
+
+The JVM view uses Java naming conventions (UpperCase = class, lowerCase = method) to distinguish between class instantiation and static method calls.
+
+### Low-Level API
+For direct control, use the explicit methods:
+
+#### Object Creation
 ```python
 client.create_object("java.util.ArrayList")           # No-arg constructor
 client.create_object("java.util.ArrayList", 100)      # With initial capacity
 client.create_object("java.lang.StringBuilder", "Hello")  # With string arg
 ```
 
-### Method Invocation
+#### Method Invocation
 ```python
 obj.method_name(arg1, arg2, ...)  # Via __getattr__ proxy
 client.invoke_method(object_id, "methodName", arg1, arg2, ...)  # Direct
 ```
 
-### Static Method Invocation
+#### Static Method Invocation
 ```python
 client.invoke_static_method("java.lang.String", "valueOf", 42)  # "42"
 client.invoke_static_method("java.lang.Integer", "parseInt", "123")  # 123
