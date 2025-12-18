@@ -1,3 +1,4 @@
+import platform
 import re
 import subprocess
 import shutil
@@ -19,7 +20,11 @@ logger = logging.getLogger("gatun.backend")
 # --- Config ---
 BACKEND_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = BACKEND_DIR.parent
-GRADLEW = PROJECT_ROOT / "gradlew"
+# Use gradlew.bat on Windows, gradlew on Unix
+if platform.system() == "Windows":
+    GRADLEW = PROJECT_ROOT / "gradlew.bat"
+else:
+    GRADLEW = PROJECT_ROOT / "gradlew"
 JAVA_SRC_DIR = PROJECT_ROOT / "gatun-core" / "src"
 BUILD_SCRIPT = PROJECT_ROOT / "gatun-core" / "build.gradle.kts"
 
