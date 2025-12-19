@@ -227,9 +227,14 @@ def copy_arrow_table_to_arena(
     """Copy an Arrow table's buffers into the payload arena.
 
     This is the key function for zero-copy transfer. It:
-    1. Extracts all buffers from the table's columns
-    2. Copies each buffer into the arena
-    3. Returns buffer descriptors for the protocol message
+    1. Combines chunked columns into single arrays (required for protocol)
+    2. Extracts all buffers from the table's columns
+    3. Copies each buffer into the arena
+    4. Returns buffer descriptors for the protocol message
+
+    Note: Tables with chunked columns are combined into single chunks before
+    copying. This ensures a 1:1 mapping between schema fields and field nodes,
+    which simplifies the protocol and reconstruction logic.
 
     Args:
         table: PyArrow Table to copy
@@ -243,20 +248,26 @@ def copy_arrow_table_to_arena(
     buffer_infos: list[BufferInfo] = []
     field_nodes: list[tuple[int, int]] = []
 
-    for column in table.columns:
-        for chunk in column.chunks:
-            # Record field node info
-            field_nodes.append((len(chunk), chunk.null_count))
+    # Combine chunks to ensure one chunk per column
+    # This is required because our protocol assumes 1:1 field-to-node mapping
+    table = table.combine_chunks()
 
-            # Copy each buffer
-            for buf in chunk.buffers():
-                if buf is None:
-                    # Null buffer (e.g., no validity bitmap when no nulls)
-                    # We still need a placeholder - use zero-length buffer
-                    info = BufferInfo(offset=0, length=0, buffer=None)
-                else:
-                    info = arena.allocate_and_copy(buf)
-                buffer_infos.append(info)
+    for column in table.columns:
+        # After combine_chunks(), each column has exactly one chunk
+        chunk = column.chunks[0]
+
+        # Record field node info
+        field_nodes.append((len(chunk), chunk.null_count))
+
+        # Copy each buffer
+        for buf in chunk.buffers():
+            if buf is None:
+                # Null buffer (e.g., no validity bitmap when no nulls)
+                # We still need a placeholder - use zero-length buffer
+                info = BufferInfo(offset=0, length=0, buffer=None)
+            else:
+                info = arena.allocate_and_copy(buf)
+            buffer_infos.append(info)
 
     return buffer_infos, field_nodes
 

@@ -255,3 +255,85 @@ def test_get_arrow_data_with_nulls(client):
         assert recv_col == orig_col, f"Mismatch in column {name}"
 
     arena.close()
+
+
+def test_send_arrow_buffers_chunked_table(client):
+    """Test zero-copy transfer with chunked columns.
+
+    Arrow tables can have multiple chunks per column (e.g., from concatenation
+    or reading large files). The protocol should handle these correctly by
+    combining chunks before transfer.
+    """
+
+    # Create a chunked table by concatenating multiple tables
+    table1 = pa.table({
+        "id": pa.array([1, 2, 3], type=pa.int64()),
+        "name": pa.array(["Alice", "Bob", "Charlie"]),
+    })
+    table2 = pa.table({
+        "id": pa.array([4, 5], type=pa.int64()),
+        "name": pa.array(["David", "Eve"]),
+    })
+    table3 = pa.table({
+        "id": pa.array([6], type=pa.int64()),
+        "name": pa.array(["Frank"]),
+    })
+
+    # Concatenate creates a table with multiple chunks per column
+    chunked_table = pa.concat_tables([table1, table2, table3])
+
+    # Verify the table is actually chunked
+    assert chunked_table.column("id").num_chunks == 3
+    assert chunked_table.column("name").num_chunks == 3
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending chunked Arrow table: {chunked_table.num_rows} rows, "
+          f"{chunked_table.column('id').num_chunks} chunks per column")
+
+    response = client.send_arrow_buffers(chunked_table, arena, schema_cache)
+    print(f"Java Response: {response}")
+    assert f"Received {chunked_table.num_rows} rows" in str(response)
+
+    arena.close()
+
+
+def test_get_arrow_data_chunked_roundtrip(client):
+    """Test roundtrip of chunked table (Python -> Java -> Python)."""
+
+    # Create a chunked table
+    table1 = pa.table({
+        "x": pa.array([1.0, 2.0], type=pa.float64()),
+        "y": pa.array(["a", "b"]),
+    })
+    table2 = pa.table({
+        "x": pa.array([3.0, 4.0, 5.0], type=pa.float64()),
+        "y": pa.array(["c", "d", "e"]),
+    })
+    chunked_table = pa.concat_tables([table1, table2])
+
+    # Verify it's chunked
+    assert chunked_table.column("x").num_chunks == 2
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending chunked table: {chunked_table.num_rows} rows")
+    client.send_arrow_buffers(chunked_table, arena, schema_cache)
+
+    # Get back from Java
+    received_table = client.get_arrow_data()
+
+    print(f"Received table: {received_table.num_rows} rows")
+
+    # Verify data matches (note: returned table will be unchunked)
+    assert received_table.num_rows == chunked_table.num_rows
+    assert received_table.num_columns == chunked_table.num_columns
+
+    for name in chunked_table.schema.names:
+        orig_col = chunked_table.column(name).to_pylist()
+        recv_col = received_table.column(name).to_pylist()
+        assert recv_col == orig_col, f"Mismatch in column {name}"
+
+    arena.close()
