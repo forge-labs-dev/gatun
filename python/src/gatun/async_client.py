@@ -647,6 +647,36 @@ class AsyncGatunClient:
 
         return await self._send_raw(builder.Output())
 
+    async def is_instance_of(self, obj, class_name: str) -> bool:
+        """Check if a Java object is an instance of a class asynchronously.
+
+        This is equivalent to Java's `instanceof` operator.
+
+        Args:
+            obj: AsyncJavaObject instance or object ID
+            class_name: Fully qualified Java class name
+                       (e.g., "java.util.List", "java.util.ArrayList")
+
+        Returns:
+            True if the object is an instance of the specified class.
+        """
+        if isinstance(obj, (JavaObject, AsyncJavaObject)):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        builder = flatbuffers.Builder(256)
+        name_off = builder.CreateString(class_name)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return await self._send_raw(builder.Output())
+
     async def register_callback(
         self, callback_fn: callable, interface_name: str
     ) -> AsyncJavaObject:

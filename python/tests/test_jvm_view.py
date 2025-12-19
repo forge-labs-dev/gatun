@@ -2,7 +2,7 @@
 
 import pytest
 
-from gatun import JavaSecurityException
+from gatun import JavaSecurityException, java_import
 
 
 def test_jvm_view_create_arraylist(client):
@@ -108,3 +108,46 @@ def test_jvm_view_reuse(client):
     assert list2.size() == 1
     assert list1.get(0) == "one"
     assert list2.get(0) == "two"
+
+
+class TestJavaImport:
+    """Tests for java_import functionality."""
+
+    def test_java_import_wildcard(self, client):
+        """Test wildcard import (java.util.*)."""
+        java_import(client.jvm, "java.util.*")
+
+        # Now ArrayList should be accessible directly
+        arr = client.jvm.ArrayList()
+        arr.add("test")
+        assert arr.size() == 1
+
+    def test_java_import_single_class(self, client):
+        """Test single class import."""
+        java_import(client.jvm, "java.lang.StringBuilder")
+
+        sb = client.jvm.StringBuilder("Hello")
+        assert sb.toString() == "Hello"
+
+    def test_java_import_static_method(self, client):
+        """Test static method access after import."""
+        java_import(client.jvm, "java.lang.*")
+
+        result = client.jvm.Integer.parseInt("42")
+        assert result == 42
+
+        result = client.jvm.Math.max(10, 20)
+        assert result == 20
+
+    def test_java_import_multiple_classes(self, client):
+        """Test importing multiple specific classes."""
+        java_import(client.jvm, "java.util.ArrayList")
+        java_import(client.jvm, "java.lang.StringBuilder")
+
+        # Use both imported classes
+        arr = client.jvm.ArrayList()
+        arr.add("hello")
+        assert arr.size() == 1
+
+        sb = client.jvm.StringBuilder("world")
+        assert sb.toString() == "world"

@@ -449,6 +449,18 @@ public class GatunServer {
             result = null;
           }
           // Note: CallbackResponse is handled directly in invokeCallback(), not here
+          else if (cmd.action() == Action.IsInstanceOf) {
+            // Check if an object is an instance of a class
+            long targetId = cmd.targetId();
+            String className = cmd.targetName();
+
+            Object target = objectRegistry.get(targetId);
+            if (target == null) throw new RuntimeException("Object " + targetId + " not found");
+
+            // Try to load the class (no allowlist check - this is read-only)
+            Class<?> clazz = Class.forName(className);
+            result = clazz.isInstance(target);
+          }
 
           // 3. Pack Success
           responseOffset = packSuccess(builder, result);

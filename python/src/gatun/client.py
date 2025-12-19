@@ -228,6 +228,48 @@ class JavaObject:
             return f"<Dead JavaObject id={self.object_id}>"
 
 
+def java_import(jvm_view: "JVMView", import_path: str) -> None:
+    """Import Java classes into the JVM view's namespace.
+
+    This is a convenience function similar to Py4J's java_import.
+    It allows accessing classes without their full package path.
+
+    Args:
+        jvm_view: A JVMView instance (typically client.jvm)
+        import_path: Package path with optional wildcard.
+                    Examples: "java.util.*", "java.util.ArrayList"
+
+    Example:
+        from gatun import java_import
+
+        java_import(client.jvm, "java.util.*")
+        # Now you can access:
+        arr = client.jvm.ArrayList()  # instead of client.jvm.java.util.ArrayList()
+
+        java_import(client.jvm, "java.lang.Math")
+        result = client.jvm.Math.max(1, 2)
+
+    Note:
+        Unlike Py4J, this doesn't actually import into a Python namespace.
+        It registers shortcuts on the JVM view so that class names can be
+        accessed directly without the full package path.
+    """
+    if not hasattr(jvm_view, "_imports"):
+        jvm_view._imports = {}
+
+    if import_path.endswith(".*"):
+        # Wildcard import - store the package prefix
+        package = import_path[:-2]  # Remove ".*"
+        jvm_view._imports[package] = True
+    else:
+        # Single class import
+        # Extract class name from full path
+        last_dot = import_path.rfind(".")
+        if last_dot != -1:
+            class_name = import_path[last_dot + 1 :]
+            jvm_view._imports[class_name] = import_path
+
+
 class JavaClass:
     """Proxy for a Java class. Supports instantiation and static method calls."""
 
@@ -259,14 +301,32 @@ class JVMView:
         ArrayList = jvm.java.util.ArrayList
         my_list = ArrayList()  # creates instance
         result = jvm.java.lang.Integer.parseInt("123")  # static method
+
+    With java_import:
+        from gatun import java_import
+        java_import(jvm, "java.util.*")
+        my_list = jvm.ArrayList()  # shortcut access
     """
 
     def __init__(self, client, package_path=""):
         self._client = client
         self._package_path = package_path
+        self._imports: dict[str, str | bool] = {}
 
     def __getattr__(self, name):
         """Navigate deeper into package hierarchy or return a JavaClass."""
+        # Check for imported classes first (only at root level)
+        if not self._package_path and hasattr(self, "_imports"):
+            # Check for direct class import (e.g., java_import(jvm, "java.util.ArrayList"))
+            if name in self._imports and isinstance(self._imports[name], str):
+                return _JVMNode(self._client, self._imports[name])
+
+            # Check for wildcard imports (e.g., java_import(jvm, "java.util.*"))
+            for package, is_wildcard in self._imports.items():
+                if is_wildcard is True:
+                    # Try the package.name path
+                    return _JVMNode(self._client, f"{package}.{name}")
+
         if self._package_path:
             new_path = f"{self._package_path}.{name}"
         else:
@@ -770,6 +830,42 @@ class GatunClient:
         Cmd.CommandAddTargetId(builder, obj_id)
         Cmd.CommandAddTargetName(builder, name_off)
         Cmd.CommandAddArgs(builder, args_vec)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def is_instance_of(self, obj, class_name: str) -> bool:
+        """Check if a Java object is an instance of a class.
+
+        This is equivalent to Java's `instanceof` operator. It checks if the
+        object is an instance of the specified class or any of its subclasses.
+
+        Args:
+            obj: JavaObject instance or object ID
+            class_name: Fully qualified Java class name
+                       (e.g., "java.util.List", "java.util.ArrayList")
+
+        Returns:
+            True if the object is an instance of the specified class.
+
+        Example:
+            arr = client.create_object("java.util.ArrayList")
+            client.is_instance_of(arr, "java.util.List")  # True
+            client.is_instance_of(arr, "java.util.Map")   # False
+        """
+        if isinstance(obj, JavaObject):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        builder = flatbuffers.Builder(256)
+        name_off = builder.CreateString(class_name)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddTargetName(builder, name_off)
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 

@@ -131,4 +131,4 @@ uv run ruff format .       # Format
 
 ## License
 
-MIT
+Apache 2.0

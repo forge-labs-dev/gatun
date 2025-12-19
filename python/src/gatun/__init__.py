@@ -5,6 +5,7 @@ from gatun.client import (
     JavaObject,
     JVMView,
     JavaClass,
+    java_import,
     PROTOCOL_VERSION,
     PayloadTooLargeError,
     JavaException,
@@ -35,6 +36,7 @@ __all__ = [
     "JavaObject",
     "JVMView",
     "JavaClass",
+    "java_import",
     # Async client
     "AsyncGatunClient",
     "AsyncJavaObject",

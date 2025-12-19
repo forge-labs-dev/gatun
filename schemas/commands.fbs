@@ -17,7 +17,8 @@ enum Action : byte {
   RegisterCallback = 9,    // Python registers a callback, gets callback_id
   UnregisterCallback = 10, // Python unregisters a callback
   CallbackResponse = 11,   // Python sends result of callback execution back to Java
-  Cancel = 12              // Python requests cancellation of a running operation
+  Cancel = 12,             // Python requests cancellation of a running operation
+  IsInstanceOf = 13        // Check if object is instance of a class
 }
 
 // Element types for arrays

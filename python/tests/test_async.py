@@ -228,3 +228,25 @@ class TestAsyncStringBuilder:
 
         result = await sb.toString()
         assert result == "Hello World"
+
+
+class TestAsyncIsInstanceOf:
+    """Test async is_instance_of functionality."""
+
+    @pytest.mark.asyncio
+    async def test_is_instance_of_same_class(self, async_client):
+        """Test is_instance_of with the exact class."""
+        arr = await async_client.create_object("java.util.ArrayList")
+        assert await async_client.is_instance_of(arr, "java.util.ArrayList") is True
+
+    @pytest.mark.asyncio
+    async def test_is_instance_of_interface(self, async_client):
+        """Test is_instance_of with an interface."""
+        arr = await async_client.create_object("java.util.ArrayList")
+        assert await async_client.is_instance_of(arr, "java.util.List") is True
+
+    @pytest.mark.asyncio
+    async def test_is_instance_of_unrelated(self, async_client):
+        """Test is_instance_of with unrelated class."""
+        arr = await async_client.create_object("java.util.ArrayList")
+        assert await async_client.is_instance_of(arr, "java.util.Map") is False

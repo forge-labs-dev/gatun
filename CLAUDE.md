@@ -84,6 +84,20 @@ result = client.jvm.java.lang.Integer.parseInt("42")  # 42
 result = client.jvm.java.lang.Math.max(10, 20)        # 20
 ```
 
+### java_import (Py4J Compatible)
+Import classes for shorter access paths:
+```python
+from gatun import java_import
+
+# Wildcard import
+java_import(client.jvm, "java.util.*")
+arr = client.jvm.ArrayList()  # instead of client.jvm.java.util.ArrayList()
+
+# Single class import
+java_import(client.jvm, "java.lang.StringBuilder")
+sb = client.jvm.StringBuilder("hello")
+```
+
 ### Async Client
 ```python
 from gatun import aconnect, AsyncGatunClient
@@ -127,6 +141,15 @@ client.cancel(request_id)  # Returns True on acknowledgement
 # Maps to CancelledException in Python
 ```
 
+### is_instance_of (Py4J Compatible)
+Check if a Java object is an instance of a class (equivalent to `instanceof`):
+```python
+arr = client.create_object("java.util.ArrayList")
+client.is_instance_of(arr, "java.util.List")       # True
+client.is_instance_of(arr, "java.util.Collection") # True
+client.is_instance_of(arr, "java.util.Map")        # False
+```
+
 ### Low-Level API
 For direct control:
 ```python
@@ -136,6 +159,7 @@ client.invoke_method(object_id, "methodName", arg1)   # Direct method call
 client.invoke_static_method("java.lang.Math", "max", 10, 20)
 client.get_field(obj, "fieldName")                    # Get field value
 client.set_field(obj, "fieldName", value)             # Set field value
+client.is_instance_of(obj, "java.util.List")          # Check instance type
 ```
 
 ### Arrow Data Transfer

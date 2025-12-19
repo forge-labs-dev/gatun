@@ -171,3 +171,54 @@ def test_exception_includes_stack_trace(client):
     assert "NumberFormatException" in error_msg
     # Should contain stack trace elements (at ...)
     assert "\tat " in error_msg or "at " in error_msg
+
+
+# --- is_instance_of tests ---
+
+
+def test_is_instance_of_same_class(client):
+    """Test is_instance_of with the exact class."""
+    arr = client.create_object("java.util.ArrayList")
+    assert client.is_instance_of(arr, "java.util.ArrayList") is True
+
+
+def test_is_instance_of_interface(client):
+    """Test is_instance_of with an interface the object implements."""
+    arr = client.create_object("java.util.ArrayList")
+    # ArrayList implements List, Collection, Iterable
+    assert client.is_instance_of(arr, "java.util.List") is True
+    assert client.is_instance_of(arr, "java.util.Collection") is True
+    assert client.is_instance_of(arr, "java.lang.Iterable") is True
+
+
+def test_is_instance_of_superclass(client):
+    """Test is_instance_of with a superclass."""
+    arr = client.create_object("java.util.ArrayList")
+    # ArrayList extends AbstractList -> AbstractCollection -> Object
+    assert client.is_instance_of(arr, "java.util.AbstractList") is True
+    assert client.is_instance_of(arr, "java.lang.Object") is True
+
+
+def test_is_instance_of_unrelated_class(client):
+    """Test is_instance_of with an unrelated class returns False."""
+    arr = client.create_object("java.util.ArrayList")
+    assert client.is_instance_of(arr, "java.util.Map") is False
+    assert client.is_instance_of(arr, "java.util.HashMap") is False
+    assert client.is_instance_of(arr, "java.lang.String") is False
+
+
+def test_is_instance_of_hashmap(client):
+    """Test is_instance_of with HashMap."""
+    hm = client.create_object("java.util.HashMap")
+    assert client.is_instance_of(hm, "java.util.HashMap") is True
+    assert client.is_instance_of(hm, "java.util.Map") is True
+    assert client.is_instance_of(hm, "java.lang.Object") is True
+    assert client.is_instance_of(hm, "java.util.List") is False
+
+
+def test_is_instance_of_with_object_id(client):
+    """Test is_instance_of works with raw object ID."""
+    arr = client.create_object("java.util.ArrayList")
+    obj_id = arr.object_id
+    assert client.is_instance_of(obj_id, "java.util.ArrayList") is True
+    assert client.is_instance_of(obj_id, "java.util.List") is True
