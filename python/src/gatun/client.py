@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import array
 import logging
 import mmap
 import os
 import socket
 import struct
+from typing import TYPE_CHECKING
 import weakref
 
 import flatbuffers
 import numpy as np
 import pyarrow as pa
+
+if TYPE_CHECKING:
+    from gatun.arena import PayloadArena
 
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
@@ -26,6 +32,9 @@ from gatun.generated.org.gatun.protocol import (
     MapEntry,
     ArrayVal,
     ElementType,
+    ArrowBatchDescriptor,
+    BufferDescriptor,
+    FieldNode,
 )
 
 logger = logging.getLogger(__name__)
@@ -463,6 +472,30 @@ class GatunClient:
         except Exception as e:
             logger.error("Connection failed: %s", e)
             return False
+
+    def get_payload_arena(self) -> "PayloadArena":
+        """Get a PayloadArena view into the client's shared memory.
+
+        The returned arena writes to the payload zone of the client's shared
+        memory, which is the area that Java reads from. Use this instead of
+        creating a separate arena file when using send_arrow_buffers.
+
+        Returns:
+            PayloadArena backed by the client's shared memory payload zone.
+
+        Example:
+            arena = client.get_payload_arena()
+            schema_cache = {}
+            for table in tables:
+                arena.reset()
+                client.send_arrow_buffers(table, arena, schema_cache)
+            arena.close()  # Just clears reference, doesn't close the shm
+        """
+        from gatun.arena import PayloadArena
+
+        # Payload zone: from payload_offset to response_offset
+        payload_size = self.response_offset - self.payload_offset
+        return PayloadArena.from_mmap(self.shm, self.payload_offset, payload_size)
 
     def _send_raw(self, data: bytes, wait_for_response=True):
         """
@@ -1170,21 +1203,40 @@ class GatunClient:
             pass
 
     def send_arrow_table(self, table):
-        # 1. Calculate payload zone size and validate
+        """Send an Arrow table to Java via shared memory.
+
+        This writes Arrow IPC data directly to the shared memory file using
+        PyArrow's memory-mapped file support, avoiding Python buffer copies.
+
+        The data flow is:
+        1. Python serializes Arrow IPC directly to mmap'd shared memory file
+        2. Java reads Arrow IPC from shared memory (zero-copy read via mmap)
+
+        Note: Arrow IPC serialization still occurs (table → IPC format), but the
+        IPC bytes are written directly to shared memory without intermediate buffers.
+        True zero-copy would require sharing raw Arrow buffer pointers.
+        """
+        # 1. Calculate payload zone size
         max_payload_size = self.response_offset - self.payload_offset
 
-        # Estimate Arrow IPC size by writing to a sink first
-        sink = pa.BufferOutputStream()
-        with pa.ipc.new_stream(sink, table.schema) as writer:
-            writer.write_table(table)
-        arrow_data = sink.getvalue()
+        # 2. Open the shm file as a PyArrow memory-mapped file for direct writing
+        # This bypasses Python's mmap and writes directly via Arrow's native I/O
+        arrow_mmap = pa.memory_map(str(self.memory_path), mode="r+b")
+        try:
+            # Seek to payload offset and write IPC stream directly
+            arrow_mmap.seek(self.payload_offset)
 
-        if len(arrow_data) > max_payload_size:
-            raise PayloadTooLargeError(len(arrow_data), max_payload_size, "Arrow batch")
+            # Write IPC stream directly to the memory-mapped file
+            # Arrow writes directly to the mmap without Python buffer intermediary
+            with pa.ipc.new_stream(arrow_mmap, table.schema) as writer:
+                writer.write_table(table)
 
-        # 2. Write Arrow Data to SHM
-        self.shm.seek(self.payload_offset)
-        self.shm.write(arrow_data)
+            bytes_written = arrow_mmap.tell() - self.payload_offset
+
+            if bytes_written > max_payload_size:
+                raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
+        finally:
+            arrow_mmap.close()
 
         # 3. Build Command
         builder = flatbuffers.Builder(256)
@@ -1246,6 +1298,133 @@ class GatunClient:
             responses.append(response)
 
         return responses
+
+    def send_arrow_buffers(
+        self,
+        table: pa.Table,
+        arena: "PayloadArena",
+        schema_cache: dict[int, bool] | None = None,
+    ):
+        """Send an Arrow table via true zero-copy buffer transfer.
+
+        This method copies Arrow buffers directly into the payload shared memory
+        arena and sends buffer descriptors to Java, enabling Java to read the
+        data in-place without any additional copies.
+
+        Data flow:
+        1. Python copies Arrow buffers into payload shm (one copy)
+        2. Python sends buffer descriptors (offsets/lengths) to Java
+        3. Java wraps the shm buffers directly as ArrowBuf (zero-copy read)
+
+        Args:
+            table: PyArrow Table to send
+            arena: PayloadArena for buffer allocation
+            schema_cache: Optional dict to track which schemas Java has seen.
+                         If provided and schema hash is in cache, schema bytes
+                         are omitted from the message.
+
+        Returns:
+            Response from Java after processing the batch.
+
+        Example:
+            from gatun.arena import PayloadArena
+
+            arena = PayloadArena(Path("~/gatun_payload.shm"), 64 * 1024 * 1024)
+            schema_cache = {}
+
+            # Send multiple tables, reusing the arena
+            for table in tables:
+                arena.reset()  # Reset for each batch
+                client.send_arrow_buffers(table, arena, schema_cache)
+
+            arena.close()
+        """
+        from gatun.arena import (
+            copy_arrow_table_to_arena,
+            compute_schema_hash,
+            serialize_schema,
+        )
+
+        # 1. Copy table buffers into the arena
+        buffer_infos, field_nodes = copy_arrow_table_to_arena(table, arena)
+
+        # 2. Compute schema hash and check cache
+        schema_hash = compute_schema_hash(table.schema)
+        include_schema = schema_cache is None or schema_hash not in schema_cache
+
+        # 3. Build FlatBuffers command
+        builder = flatbuffers.Builder(1024)
+
+        # Build schema bytes vector if needed
+        schema_bytes_vec = None
+        if include_schema:
+            schema_bytes = serialize_schema(table.schema)
+            schema_bytes_vec = builder.CreateByteVector(schema_bytes)
+            if schema_cache is not None:
+                schema_cache[schema_hash] = True
+
+        # Build buffer descriptors
+        buffer_offsets = []
+        for info in buffer_infos:
+            BufferDescriptor.Start(builder)
+            BufferDescriptor.AddOffset(builder, info.offset)
+            BufferDescriptor.AddLength(builder, info.length)
+            buffer_offsets.append(BufferDescriptor.End(builder))
+
+        # Build buffers vector
+        ArrowBatchDescriptor.StartBuffersVector(builder, len(buffer_offsets))
+        for offset in reversed(buffer_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        buffers_vec = builder.EndVector()
+
+        # Build field nodes
+        node_offsets = []
+        for length, null_count in field_nodes:
+            FieldNode.Start(builder)
+            FieldNode.AddLength(builder, length)
+            FieldNode.AddNullCount(builder, null_count)
+            node_offsets.append(FieldNode.End(builder))
+
+        # Build nodes vector
+        ArrowBatchDescriptor.StartNodesVector(builder, len(node_offsets))
+        for offset in reversed(node_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        nodes_vec = builder.EndVector()
+
+        # Build ArrowBatchDescriptor
+        ArrowBatchDescriptor.Start(builder)
+        ArrowBatchDescriptor.AddSchemaHash(builder, schema_hash)
+        if schema_bytes_vec is not None:
+            ArrowBatchDescriptor.AddSchemaBytes(builder, schema_bytes_vec)
+        ArrowBatchDescriptor.AddNumRows(builder, table.num_rows)
+        ArrowBatchDescriptor.AddNodes(builder, nodes_vec)
+        ArrowBatchDescriptor.AddBuffers(builder, buffers_vec)
+        batch_descriptor = ArrowBatchDescriptor.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.SendArrowBuffers)
+        Cmd.CommandAddArrowBatch(builder, batch_descriptor)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        # 4. Send via standard path
+        return self._send_raw(builder.Output())
+
+    def reset_payload_arena(self):
+        """Signal Java to reset its view of the payload arena.
+
+        Call this after resetting the Python PayloadArena to ensure Java
+        releases any references to the old buffer contents.
+        """
+        builder = flatbuffers.Builder(64)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.ResetPayloadArena)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
 
     def _get_request_id(self) -> int:
         """Get the next request ID for cancellation support."""

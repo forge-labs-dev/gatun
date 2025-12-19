@@ -499,16 +499,21 @@ class GatunBenchmark:
     def bench_arrow_transfer(self, size_mb: int, iterations: int = 100) -> BenchmarkResult:
         """Benchmark Arrow table transfer via shared memory.
 
-        This is Gatun's killer feature: zero-copy bulk data transfer.
-        The table is written directly to shared memory and Java reads it
-        without any serialization overhead.
+        This measures Gatun's bulk data transfer using Arrow IPC format.
 
-        Timing includes the full round-trip:
-        1. Python writes Arrow IPC data to shared memory
-        2. Python signals Java via socket
-        3. Java reads Arrow batch from shared memory (validates schema, row count)
-        4. Java sends acknowledgement with row count
+        What happens:
+        1. Python serializes Arrow table to IPC format directly into shared memory
+           (using pa.memory_map for direct writes, no intermediate Python buffer)
+        2. Python signals Java via socket (tiny message)
+        3. Java reads Arrow IPC from shared memory (mmap, no copy)
+        4. Java parses IPC format and returns row count
         5. Python receives acknowledgement
+
+        Important caveats:
+        - Arrow IPC serialization still occurs (table → IPC bytes)
+        - This is NOT true zero-copy (which would share raw Arrow buffer pointers)
+        - But IPC bytes go directly to shm, and Java reads via mmap (no copies)
+        - The "handoff rate" metric shows effective throughput, not memory bandwidth
 
         Args:
             size_mb: Target size in MB for the Arrow table
@@ -833,8 +838,10 @@ def print_arrow_results(results: list[BenchmarkResult]):
     print("\n" + "=" * 100)
     print("ARROW BULK DATA TRANSFER (Gatun Only)")
     print("=" * 100)
-    print("\nThis benchmark measures zero-copy handoff latency via shared memory.")
-    print("'Handoff rate' is effective throughput = size / latency (not memory bandwidth).\n")
+    print("\nThis benchmark measures Arrow IPC transfer latency via shared memory.")
+    print("Data flow: Python serializes Arrow IPC directly to mmap → Java reads via mmap")
+    print("Note: IPC serialization still occurs; this is not true zero-copy buffer sharing.")
+    print("'Handoff rate' = size / latency (effective throughput, not memory bandwidth).\n")
 
     print(f"{'Size':<20} {'Latency (p50)':<15} {'Handoff Rate':<15} {'p95':<12} {'p99':<12}")
     print("-" * 75)

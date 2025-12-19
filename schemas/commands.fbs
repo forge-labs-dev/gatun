@@ -18,7 +18,9 @@ enum Action : byte {
   UnregisterCallback = 10, // Python unregisters a callback
   CallbackResponse = 11,   // Python sends result of callback execution back to Java
   Cancel = 12,             // Python requests cancellation of a running operation
-  IsInstanceOf = 13        // Check if object is instance of a class
+  IsInstanceOf = 13,       // Check if object is instance of a class
+  SendArrowBuffers = 14,   // Send Arrow data via buffer descriptors (true zero-copy)
+  ResetPayloadArena = 15   // Reset the payload shared memory arena
 }
 
 // Element types for arrays
@@ -95,6 +97,35 @@ table Argument {
   val: Value;
 }
 
+// --- Arrow Zero-Copy Transfer Types ---
+
+// Describes a single buffer in the payload shared memory
+table BufferDescriptor {
+  offset: uint64;      // Offset from start of payload shm
+  length: uint64;      // Buffer size in bytes
+}
+
+// Describes an Arrow field's buffer layout
+table FieldNode {
+  length: int64;       // Number of values in this field/array
+  null_count: int64;   // Number of null values
+}
+
+// Arrow batch descriptor for zero-copy transfer
+// Sent with SendArrowBuffers action
+table ArrowBatchDescriptor {
+  // Schema: serialized Arrow IPC schema bytes (cached by hash)
+  schema_hash: uint64;        // Hash of schema for caching
+  schema_bytes: [byte];       // Serialized schema (omit if Java has cached this hash)
+
+  // Layout metadata
+  num_rows: int64;            // Total number of rows
+  nodes: [FieldNode];         // Field nodes describing array structure
+
+  // Buffer locations in payload shm
+  buffers: [BufferDescriptor];
+}
+
 // Request from Python -> Java
 table Command {
   action: Action;
@@ -102,6 +133,7 @@ table Command {
   target_id: long;
   args: [Argument];
   request_id: long;  // Optional: unique ID for this request, used for cancellation
+  arrow_batch: ArrowBatchDescriptor;  // For SendArrowBuffers action
 }
 
 // Response from Java -> Python

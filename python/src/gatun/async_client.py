@@ -732,19 +732,37 @@ class AsyncGatunClient:
             pass
 
     async def send_arrow_table(self, table: pa.Table):
-        """Send an Arrow table to the Java server asynchronously."""
+        """Send an Arrow table to Java via shared memory asynchronously.
+
+        This writes Arrow IPC data directly to the shared memory file using
+        PyArrow's memory-mapped file support, avoiding Python buffer copies.
+
+        The data flow is:
+        1. Python serializes Arrow IPC directly to mmap'd shared memory file
+        2. Java reads Arrow IPC from shared memory (zero-copy read via mmap)
+
+        Note: Arrow IPC serialization still occurs (table → IPC format), but the
+        IPC bytes are written directly to shared memory without intermediate buffers.
+        """
         max_payload_size = self.response_offset - self.payload_offset
 
-        sink = pa.BufferOutputStream()
-        with pa.ipc.new_stream(sink, table.schema) as writer:
-            writer.write_table(table)
-        arrow_data = sink.getvalue()
+        # Open the shm file as a PyArrow memory-mapped file for direct writing
+        # This bypasses Python's mmap and writes directly via Arrow's native I/O
+        arrow_mmap = pa.memory_map(str(self.memory_path), mode="r+b")
+        try:
+            # Seek to payload offset and write IPC stream directly
+            arrow_mmap.seek(self.payload_offset)
 
-        if len(arrow_data) > max_payload_size:
-            raise PayloadTooLargeError(len(arrow_data), max_payload_size, "Arrow batch")
+            # Write IPC stream directly to the memory-mapped file
+            with pa.ipc.new_stream(arrow_mmap, table.schema) as writer:
+                writer.write_table(table)
 
-        self.shm.seek(self.payload_offset)
-        self.shm.write(arrow_data)
+            bytes_written = arrow_mmap.tell() - self.payload_offset
+
+            if bytes_written > max_payload_size:
+                raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
+        finally:
+            arrow_mmap.close()
 
         builder = flatbuffers.Builder(256)
         Cmd.CommandStart(builder)

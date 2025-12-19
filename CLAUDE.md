@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Gatun is a high-performance Python-to-Java bridge using shared memory (mmap) and Unix domain sockets for inter-process communication. It uses FlatBuffers for serialization and Apache Arrow for zero-copy data transfer.
+Gatun is a high-performance Python-to-Java bridge using shared memory (mmap) and Unix domain sockets for inter-process communication. It uses FlatBuffers for serialization and Apache Arrow for efficient bulk data transfer.
 
 ## Architecture
 
@@ -163,12 +163,39 @@ client.is_instance_of(obj, "java.util.List")          # Check instance type
 ```
 
 ### Arrow Data Transfer
+Two methods for transferring Arrow data:
+
+#### IPC Format (Simple)
 ```python
 import pyarrow as pa
 
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
-client.send_arrow_batch(table)
+client.send_arrow_table(table)  # Serializes to IPC, writes to shm
 ```
+
+#### Zero-Copy Buffer Transfer (Optimal)
+For maximum performance, use buffer descriptors to avoid IPC serialization:
+```python
+import pyarrow as pa
+
+table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
+
+# Get arena backed by client's shared memory
+arena = client.get_payload_arena()
+schema_cache = {}
+
+# Send multiple tables efficiently
+for batch in batches:
+    arena.reset()  # Reuse arena for each batch
+    client.send_arrow_buffers(batch, arena, schema_cache)
+
+arena.close()
+```
+
+Data flow:
+1. Python copies Arrow buffers into shared memory (one copy)
+2. Python sends buffer descriptors (offsets/lengths) to Java
+3. Java wraps buffers directly as ArrowBuf (zero-copy read)
 
 ### Supported Argument/Return Types
 - Primitives: `int`, `long`, `double`, `boolean`

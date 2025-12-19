@@ -28,8 +28,6 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.gatun.protocol.*; // Import all generated classes
 
 public class GatunServer {
@@ -93,6 +91,7 @@ public class GatunServer {
   private static final ThreadLocal<Set<Long>> cancelledRequests = ThreadLocal.withInitial(HashSet::new);
 
   private final BufferAllocator allocator = new RootAllocator();
+  private final ArrowMemoryHandler arrowHandler = new ArrowMemoryHandler(allocator);
 
   /** Holds information about a registered callback. */
   private static class CallbackInfo {
@@ -402,20 +401,27 @@ public class GatunServer {
             LOG.fine("Processing Arrow batch...");
             long payloadSize = this.responseOffset - PAYLOAD_OFFSET;
             MemorySegment payloadSlice = sharedMem.asSlice(PAYLOAD_OFFSET, payloadSize);
-            ByteBuffer arrowBuf = payloadSlice.asByteBuffer();
-
-            try (ArrowStreamReader reader =
-                new ArrowStreamReader(new ByteBufferInputStream(arrowBuf), allocator)) {
-
-              if (reader.loadNextBatch()) {
-                VectorSchemaRoot root = reader.getVectorSchemaRoot();
-                int rows = root.getRowCount();
-                LOG.fine("Arrow batch received: " + rows + " rows");
-                result = "Received " + rows + " rows";
-              } else {
-                throw new RuntimeException("Arrow Stream Empty");
-              }
+            int rows = arrowHandler.processArrowIpcBatch(payloadSlice);
+            result = "Received " + rows + " rows";
+          }
+          // --- ZERO-COPY ARROW BUFFERS ---
+          else if (cmd.action() == Action.SendArrowBuffers) {
+            ArrowBatchDescriptor batchDesc = cmd.arrowBatch();
+            if (batchDesc == null) {
+              throw new IllegalArgumentException("SendArrowBuffers requires arrow_batch descriptor");
             }
+            // For now, payload shm is the same as control shm (payloadSlice)
+            // TODO: Support separate payload shm file
+            long payloadSize = this.responseOffset - PAYLOAD_OFFSET;
+            MemorySegment payloadSlice = sharedMem.asSlice(PAYLOAD_OFFSET, payloadSize);
+            long numRows = arrowHandler.processArrowBuffers(batchDesc, payloadSlice);
+            result = "Received " + numRows + " rows via zero-copy buffers";
+          }
+          // --- RESET PAYLOAD ARENA ---
+          else if (cmd.action() == Action.ResetPayloadArena) {
+            LOG.fine("Payload arena reset requested");
+            arrowHandler.reset();
+            result = true;
           }
           // --- CALLBACK BLOCK ---
           else if (cmd.action() == Action.RegisterCallback) {
