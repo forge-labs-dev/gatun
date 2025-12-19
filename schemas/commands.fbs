@@ -20,7 +20,8 @@ enum Action : byte {
   Cancel = 12,             // Python requests cancellation of a running operation
   IsInstanceOf = 13,       // Check if object is instance of a class
   SendArrowBuffers = 14,   // Send Arrow data via buffer descriptors (true zero-copy)
-  ResetPayloadArena = 15   // Reset the payload shared memory arena
+  ResetPayloadArena = 15,  // Reset the payload shared memory arena
+  GetArrowData = 16        // Request Arrow data from Java (returns via ArrowBatchDescriptor)
 }
 
 // Element types for arrays
@@ -158,6 +159,9 @@ table Response {
   callback_id: long;       // Which Python callback to invoke
   callback_method: string; // Method name being called (e.g., "compare", "apply")
   callback_args: [Argument]; // Arguments to pass to the callback
+
+  // For Arrow data responses (Java -> Python zero-copy transfer)
+  arrow_batch: ArrowBatchDescriptor;
 }
 
 // Callback result from Python -> Java (sent as a follow-up Command)

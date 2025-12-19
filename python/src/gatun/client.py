@@ -211,6 +211,43 @@ def _recv_exactly(sock, n):
     return bytes(data)
 
 
+def _get_num_buffers_for_type(arrow_type: pa.DataType) -> int:
+    """Get the number of buffers used by an Arrow type.
+
+    Arrow types use different numbers of buffers:
+    - Fixed-width primitives (int, float, bool): 2 (validity + data)
+    - Variable-width (string, binary): 3 (validity + offsets + data)
+    - Null type: 0 (no buffers)
+
+    This is needed to correctly partition buffers when reconstructing arrays.
+    """
+    if pa.types.is_null(arrow_type):
+        return 0  # Null arrays have no buffers
+    elif pa.types.is_boolean(arrow_type):
+        return 2  # validity + packed bits
+    elif pa.types.is_primitive(arrow_type):
+        return 2  # validity + data
+    elif pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return 3  # validity + offsets + data
+    elif pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
+        return 3  # validity + offsets + data
+    elif pa.types.is_fixed_size_binary(arrow_type):
+        return 2  # validity + data
+    elif pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        return 2  # validity + offsets (child buffers handled separately)
+    elif pa.types.is_fixed_size_list(arrow_type):
+        return 1  # validity only (child buffers handled separately)
+    elif pa.types.is_struct(arrow_type):
+        return 1  # validity only (child buffers handled separately)
+    elif pa.types.is_map(arrow_type):
+        return 2  # validity + offsets
+    elif pa.types.is_dictionary(arrow_type):
+        return 2  # validity + indices (dictionary handled separately)
+    else:
+        # Default assumption for unknown types
+        return 2
+
+
 class JavaObject:
     def __init__(self, client, object_id):
         self.client = client
@@ -424,6 +461,9 @@ class GatunClient:
 
         # Request ID counter for cancellation support
         self._next_request_id = 1
+
+        # Arrow schema cache for Java -> Python transfers: hash -> Schema
+        self._arrow_schema_cache: dict[int, pa.Schema] = {}
 
     @property
     def jvm(self):
@@ -648,7 +688,12 @@ class GatunClient:
                 )
                 _raise_java_exception(error_type, error_msg)
 
-            # 4. Unpack the return value
+            # 4. Check for Arrow batch response
+            arrow_batch = resp.ArrowBatch()
+            if arrow_batch is not None and arrow_batch.NumRows() >= 0:
+                return self._unpack_arrow_batch(arrow_batch)
+
+            # 5. Unpack the return value
             return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())
 
     def _handle_callback(self, resp):
@@ -676,6 +721,83 @@ class GatunClient:
             self._send_callback_response(callback_id, result, False, None)
         except Exception as e:
             self._send_callback_response(callback_id, None, True, str(e))
+
+    def _unpack_arrow_batch(self, arrow_batch) -> pa.Table:
+        """Unpack an ArrowBatchDescriptor from Java into a PyArrow Table.
+
+        This reconstructs an Arrow table from buffer descriptors in the payload
+        shared memory zone. The buffers are wrapped as zero-copy PyArrow buffers.
+
+        Args:
+            arrow_batch: ArrowBatchDescriptor FlatBuffer object
+
+        Returns:
+            PyArrow Table reconstructed from the buffer descriptors
+        """
+        from gatun.arena import deserialize_schema
+
+        import ctypes
+
+        schema_hash = arrow_batch.SchemaHash()
+        num_rows = arrow_batch.NumRows()
+
+        # Get or deserialize schema
+        schema = self._arrow_schema_cache.get(schema_hash)
+        if schema is None:
+            schema_bytes_len = arrow_batch.SchemaBytesLength()
+            if schema_bytes_len == 0:
+                raise RuntimeError(
+                    f"No schema available for hash {schema_hash} and none cached"
+                )
+            schema_bytes = bytes(arrow_batch.SchemaBytesAsNumpy())
+            schema = deserialize_schema(schema_bytes)
+            self._arrow_schema_cache[schema_hash] = schema
+
+        # Get base address of payload zone in shared memory
+        base_address = ctypes.addressof(ctypes.c_char.from_buffer(self.shm))
+        payload_base = base_address + self.payload_offset
+
+        # Build PyArrow buffers from buffer descriptors
+        buffers = []
+        for i in range(arrow_batch.BuffersLength()):
+            buf_desc = arrow_batch.Buffers(i)
+            offset = buf_desc.Offset()
+            length = buf_desc.Length()
+
+            if length == 0:
+                # Zero-length buffer (e.g., no validity bitmap when no nulls)
+                buffers.append(None)
+            else:
+                # Create zero-copy buffer backed by shared memory
+                buf_address = payload_base + offset
+                buf = pa.foreign_buffer(buf_address, length, base=self.shm)
+                buffers.append(buf)
+
+        # Build field nodes as (length, null_count) tuples
+        field_nodes = []
+        for i in range(arrow_batch.NodesLength()):
+            node = arrow_batch.Nodes(i)
+            field_nodes.append((node.Length(), node.NullCount()))
+
+        # Reconstruct arrays from buffers using schema
+        arrays = []
+        buffer_idx = 0
+
+        for i, field in enumerate(schema):
+            # Number of buffers per type varies
+            num_buffers = _get_num_buffers_for_type(field.type)
+            field_buffers = buffers[buffer_idx : buffer_idx + num_buffers]
+            buffer_idx += num_buffers
+
+            # Get field node for this field
+            length, null_count = field_nodes[i] if i < len(field_nodes) else (num_rows, 0)
+
+            # Reconstruct the array
+            arr = pa.Array.from_buffers(field.type, length, field_buffers, null_count)
+            arrays.append(arr)
+
+        # Build table from arrays
+        return pa.Table.from_arrays(arrays, schema=schema)
 
     def _send_callback_response(
         self, callback_id: int, result, is_error: bool, error_msg: str | None
@@ -1421,6 +1543,36 @@ class GatunClient:
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.ResetPayloadArena)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def get_arrow_data(self) -> pa.Table:
+        """Retrieve Arrow data from Java via zero-copy transfer.
+
+        This method requests the current Arrow data held by the Java server
+        (e.g., data previously sent via send_arrow_buffers). Java writes the
+        Arrow buffers to the payload shared memory zone and sends buffer
+        descriptors back, which are used to reconstruct the table in Python.
+
+        Returns:
+            PyArrow Table containing the data from Java.
+
+        Raises:
+            RuntimeError: If no Arrow data is available on the Java side.
+
+        Example:
+            # Send data to Java
+            client.send_arrow_buffers(table, arena, schema_cache)
+
+            # Get it back (useful for testing or round-trip operations)
+            table_from_java = client.get_arrow_data()
+        """
+        builder = flatbuffers.Builder(64)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetArrowData)
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 

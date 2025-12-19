@@ -153,3 +153,105 @@ def test_payload_arena_basic():
         arena.close()
     finally:
         arena_path.unlink(missing_ok=True)
+
+
+def test_get_arrow_data_roundtrip(client):
+    """Test Java -> Python Arrow transfer via get_arrow_data."""
+
+    # 1. Create Arrow data and send to Java
+    original_table = pa.table({
+        "id": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
+        "name": pa.array(["Alice", "Bob", "Charlie", "David", "Eve"]),
+        "score": pa.array([95.5, 87.3, 92.1, 78.9, 99.0], type=pa.float64()),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending Arrow table to Java: {original_table.num_rows} rows")
+    client.send_arrow_buffers(original_table, arena, schema_cache)
+
+    # 2. Request the data back from Java
+    print("Requesting Arrow data back from Java...")
+    received_table = client.get_arrow_data()
+
+    # 3. Verify the data matches
+    print(f"Received table: {received_table.num_rows} rows, {received_table.num_columns} columns")
+
+    assert received_table.num_rows == original_table.num_rows
+    assert received_table.num_columns == original_table.num_columns
+    assert received_table.schema == original_table.schema
+
+    # Verify data content
+    for name in original_table.schema.names:
+        orig_col = original_table.column(name).to_pylist()
+        recv_col = received_table.column(name).to_pylist()
+        assert recv_col == orig_col, f"Mismatch in column {name}"
+
+    arena.close()
+
+
+def test_get_arrow_data_various_types(client):
+    """Test Java -> Python Arrow transfer with various data types."""
+
+    original_table = pa.table({
+        "int8_col": pa.array([1, 2, 3], type=pa.int8()),
+        "int16_col": pa.array([100, 200, 300], type=pa.int16()),
+        "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
+        "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
+        "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
+        "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
+        "string_col": pa.array(["hello", "world", "test"]),
+        "bool_col": pa.array([True, False, True]),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending Arrow table with various types: {original_table.num_rows} rows")
+    client.send_arrow_buffers(original_table, arena, schema_cache)
+
+    received_table = client.get_arrow_data()
+
+    print(f"Received table: {received_table.num_rows} rows")
+
+    assert received_table.num_rows == original_table.num_rows
+    assert received_table.num_columns == original_table.num_columns
+
+    # Verify each column
+    for name in original_table.schema.names:
+        orig_col = original_table.column(name).to_pylist()
+        recv_col = received_table.column(name).to_pylist()
+        assert recv_col == orig_col, f"Mismatch in column {name}"
+
+    arena.close()
+
+
+def test_get_arrow_data_with_nulls(client):
+    """Test Java -> Python Arrow transfer with null values."""
+
+    original_table = pa.table({
+        "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
+        "nullable_string": pa.array(["a", None, "c", "d", None]),
+        "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending Arrow table with nulls: {original_table.num_rows} rows")
+    client.send_arrow_buffers(original_table, arena, schema_cache)
+
+    received_table = client.get_arrow_data()
+
+    print(f"Received table: {received_table.num_rows} rows")
+
+    assert received_table.num_rows == original_table.num_rows
+
+    # Verify null positions are preserved
+    for name in original_table.schema.names:
+        orig_col = original_table.column(name).to_pylist()
+        recv_col = received_table.column(name).to_pylist()
+        assert recv_col == orig_col, f"Mismatch in column {name}"
+
+    arena.close()

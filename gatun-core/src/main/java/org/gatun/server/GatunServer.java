@@ -28,6 +28,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.gatun.protocol.*; // Import all generated classes
 
 public class GatunServer {
@@ -422,6 +423,31 @@ public class GatunServer {
             LOG.fine("Payload arena reset requested");
             arrowHandler.reset();
             result = true;
+          }
+          // --- GET ARROW DATA (Java -> Python) ---
+          else if (cmd.action() == Action.GetArrowData) {
+            VectorSchemaRoot currentRoot = arrowHandler.getCurrentRoot();
+            if (currentRoot == null) {
+              throw new RuntimeException("No Arrow data available");
+            }
+            // Write Arrow buffers to payload zone
+            long payloadSize = this.responseOffset - PAYLOAD_OFFSET;
+            MemorySegment payloadSlice = sharedMem.asSlice(PAYLOAD_OFFSET, payloadSize);
+            ArrowMemoryHandler.ArrowWriteResult writeResult =
+                arrowHandler.writeArrowBuffers(currentRoot, payloadSlice, null);
+            // Pack and send Arrow response (handled specially below)
+            responseOffset = packArrowResponse(builder, writeResult);
+            // Skip normal packSuccess
+            builder.finish(responseOffset);
+            ByteBuffer resBuf = builder.dataBuffer();
+            int resSize = resBuf.remaining();
+            MemorySegment responseSlice = sharedMem.asSlice(this.responseOffset, resSize);
+            responseSlice.copyFrom(MemorySegment.ofBuffer(resBuf));
+            lengthBuf.putInt(resSize);
+            lengthBuf.flip();
+            client.write(lengthBuf);
+            lengthBuf.clear();
+            continue;  // Skip normal response handling
           }
           // --- CALLBACK BLOCK ---
           else if (cmd.action() == Action.RegisterCallback) {
@@ -1246,6 +1272,56 @@ public class GatunServer {
     Response.addIsError(builder, true);
     Response.addErrorMsg(builder, errOff);
     Response.addErrorType(builder, typeOff);
+    return Response.endResponse(builder);
+  }
+
+  /**
+   * Pack an Arrow write result into a response with ArrowBatchDescriptor.
+   */
+  private int packArrowResponse(FlatBufferBuilder builder, ArrowMemoryHandler.ArrowWriteResult result) {
+    // Build schema bytes vector if present
+    int schemaBytesVec = 0;
+    if (result.schemaBytes != null) {
+      schemaBytesVec = ArrowBatchDescriptor.createSchemaBytesVector(builder, result.schemaBytes);
+    }
+
+    // Build buffer descriptors
+    int[] bufferOffsets = new int[result.bufferDescriptors.size()];
+    for (int i = 0; i < result.bufferDescriptors.size(); i++) {
+      long[] desc = result.bufferDescriptors.get(i);
+      BufferDescriptor.startBufferDescriptor(builder);
+      BufferDescriptor.addOffset(builder, desc[0]);
+      BufferDescriptor.addLength(builder, desc[1]);
+      bufferOffsets[i] = BufferDescriptor.endBufferDescriptor(builder);
+    }
+    int buffersVec = ArrowBatchDescriptor.createBuffersVector(builder, bufferOffsets);
+
+    // Build field nodes
+    int[] nodeOffsets = new int[result.fieldNodes.size()];
+    for (int i = 0; i < result.fieldNodes.size(); i++) {
+      long[] node = result.fieldNodes.get(i);
+      FieldNode.startFieldNode(builder);
+      FieldNode.addLength(builder, node[0]);
+      FieldNode.addNullCount(builder, node[1]);
+      nodeOffsets[i] = FieldNode.endFieldNode(builder);
+    }
+    int nodesVec = ArrowBatchDescriptor.createNodesVector(builder, nodeOffsets);
+
+    // Build ArrowBatchDescriptor
+    ArrowBatchDescriptor.startArrowBatchDescriptor(builder);
+    ArrowBatchDescriptor.addSchemaHash(builder, result.schemaHash);
+    if (schemaBytesVec != 0) {
+      ArrowBatchDescriptor.addSchemaBytes(builder, schemaBytesVec);
+    }
+    ArrowBatchDescriptor.addNumRows(builder, result.numRows);
+    ArrowBatchDescriptor.addNodes(builder, nodesVec);
+    ArrowBatchDescriptor.addBuffers(builder, buffersVec);
+    int batchDescOffset = ArrowBatchDescriptor.endArrowBatchDescriptor(builder);
+
+    // Build Response with arrow_batch
+    Response.startResponse(builder);
+    Response.addIsError(builder, false);
+    Response.addArrowBatch(builder, batchDescOffset);
     return Response.endResponse(builder);
   }
 

@@ -83,14 +83,17 @@ client.jvm.java.util.Collections.sort(arr, comparator)
 ```python
 import pyarrow as pa
 
-# Simple: IPC format
+# Simple: IPC format (Python -> Java)
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
 client.send_arrow_table(table)
 
-# Optimal: Zero-copy buffer transfer
+# Zero-copy buffer transfer (Python -> Java)
 arena = client.get_payload_arena()
 schema_cache = {}
 client.send_arrow_buffers(table, arena, schema_cache)
+
+# Zero-copy buffer transfer (Java -> Python)
+received_table = client.get_arrow_data()
 arena.close()
 ```
 

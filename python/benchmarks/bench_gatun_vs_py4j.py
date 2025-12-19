@@ -549,7 +549,112 @@ class GatunBenchmark:
         # Calculate effective handoff rate
         # actual_size_mb / (p50_us / 1e6) = MB/s, then / 1024 = GB/s
         handoff_rate_gbs = (actual_size_mb / (result.p50_us / 1_000_000)) / 1024
-        result.name = f"gatun_arrow_{size_mb}mb ({actual_size_mb:.1f}MB @ {handoff_rate_gbs:.2f} GB/s)"
+        result.name = f"gatun_arrow_ipc_{size_mb}mb ({actual_size_mb:.1f}MB @ {handoff_rate_gbs:.2f} GB/s)"
+
+        return result
+
+    def bench_arrow_zero_copy(self, size_mb: int, iterations: int = 100) -> BenchmarkResult:
+        """Benchmark Arrow zero-copy buffer transfer via shared memory.
+
+        This measures Gatun's true zero-copy data transfer using buffer descriptors.
+
+        What happens (Python -> Java):
+        1. Python copies Arrow buffers into shared memory (one memcpy)
+        2. Python sends buffer descriptors (offsets/lengths) to Java
+        3. Java wraps buffers directly as ArrowBuf (zero-copy on Java side)
+
+        This is faster than IPC format because:
+        - No IPC serialization overhead
+        - No parsing on Java side (direct buffer access)
+        - Schema cached after first transfer
+
+        Args:
+            size_mb: Target size in MB for the Arrow table
+            iterations: Number of iterations (fewer for large sizes)
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        # Create a table of approximately the target size
+        rows = (size_mb * 1024 * 1024) // 20
+
+        data = {
+            "id": np.arange(rows, dtype=np.int64),
+            "value": np.random.random(rows).astype(np.float64),
+        }
+        table = pa.table(data)
+        actual_size_mb = table.nbytes / (1024 * 1024)
+
+        # Get arena and schema cache (reused across iterations)
+        arena = self.client.get_payload_arena()
+        schema_cache: dict[int, pa.Schema] = {}
+
+        def transfer():
+            arena.reset()
+            return self.client.send_arrow_buffers(table, arena, schema_cache)
+
+        result = run_benchmark(
+            f"gatun_arrow_zerocopy_{size_mb}mb",
+            transfer,
+            iterations,
+            warmup=min(10, iterations // 2),
+            batch=1,
+        )
+
+        arena.close()
+
+        handoff_rate_gbs = (actual_size_mb / (result.p50_us / 1_000_000)) / 1024
+        result.name = f"gatun_arrow_zerocopy_{size_mb}mb ({actual_size_mb:.1f}MB @ {handoff_rate_gbs:.2f} GB/s)"
+
+        return result
+
+    def bench_arrow_roundtrip(self, size_mb: int, iterations: int = 100) -> BenchmarkResult:
+        """Benchmark Arrow bidirectional transfer (Python -> Java -> Python).
+
+        This measures a complete roundtrip: send data to Java, then retrieve it back.
+
+        What happens:
+        1. Python -> Java: Zero-copy buffer transfer
+        2. Java -> Python: Java writes buffers to shm, Python wraps as PyArrow
+
+        Args:
+            size_mb: Target size in MB for the Arrow table
+            iterations: Number of iterations (fewer for large sizes)
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        # Create a table of approximately the target size
+        rows = (size_mb * 1024 * 1024) // 20
+
+        data = {
+            "id": np.arange(rows, dtype=np.int64),
+            "value": np.random.random(rows).astype(np.float64),
+        }
+        table = pa.table(data)
+        actual_size_mb = table.nbytes / (1024 * 1024)
+
+        arena = self.client.get_payload_arena()
+        schema_cache: dict[int, pa.Schema] = {}
+
+        def transfer():
+            arena.reset()
+            self.client.send_arrow_buffers(table, arena, schema_cache)
+            return self.client.get_arrow_data()
+
+        result = run_benchmark(
+            f"gatun_arrow_roundtrip_{size_mb}mb",
+            transfer,
+            iterations,
+            warmup=min(10, iterations // 2),
+            batch=1,
+        )
+
+        arena.close()
+
+        # Throughput is 2x data size for roundtrip
+        handoff_rate_gbs = (2 * actual_size_mb / (result.p50_us / 1_000_000)) / 1024
+        result.name = f"gatun_arrow_roundtrip_{size_mb}mb ({actual_size_mb:.1f}MB @ {handoff_rate_gbs:.2f} GB/s)"
 
         return result
 
@@ -833,36 +938,80 @@ def print_comparison(gatun_results: list[BenchmarkResult], py4j_results: list[Be
             print(f"{name:<25} {gr.ops_per_sec:<15,.0f} {'N/A':<15}")
 
 
-def print_arrow_results(results: list[BenchmarkResult]):
-    """Print Arrow benchmark results with throughput focus."""
+def print_arrow_results(results: dict[str, list[BenchmarkResult]]):
+    """Print Arrow benchmark results with throughput focus and comparison."""
     print("\n" + "=" * 100)
     print("ARROW BULK DATA TRANSFER (Gatun Only)")
     print("=" * 100)
-    print("\nThis benchmark measures Arrow IPC transfer latency via shared memory.")
-    print("Data flow: Python serializes Arrow IPC directly to mmap → Java reads via mmap")
-    print("Note: IPC serialization still occurs; this is not true zero-copy buffer sharing.")
-    print("'Handoff rate' = size / latency (effective throughput, not memory bandwidth).\n")
 
-    print(f"{'Size':<20} {'Latency (p50)':<15} {'Handoff Rate':<15} {'p95':<12} {'p99':<12}")
-    print("-" * 75)
+    # Print method descriptions
+    print("\nMethods compared:")
+    print("  IPC:       Arrow IPC serialization → shared memory → Java parses IPC")
+    print("  Zero-copy: Buffer copy to shm → send descriptors → Java wraps buffers directly")
+    print("  Roundtrip: Zero-copy send + Java writes back → Python wraps buffers")
+    print("\n'Handoff rate' = data size / latency (effective throughput).\n")
 
-    for r in results:
-        # Extract size from name like "gatun_arrow_8mb (8.5MB @ 2.1 GB/s)"
-        name_parts = r.name.split(" ")
-        size_part = name_parts[0].replace("gatun_arrow_", "").upper()
+    # Get all unique sizes
+    all_sizes = set()
+    for result_list in results.values():
+        for r in result_list:
+            # Extract size from name like "gatun_arrow_ipc_8mb (8.5MB @ ...)"
+            # Split first by space to get base name, then by underscore
+            base_name = r.name.split(" ")[0]  # "gatun_arrow_ipc_8mb"
+            parts = base_name.split("_")
+            for part in parts:
+                if part.endswith("mb"):
+                    all_sizes.add(int(part[:-2]))
+    sizes = sorted(all_sizes)
 
-        # Calculate effective handoff rate from actual data
-        # Name format: "gatun_arrow_Xmb (Y.YMB @ Z.ZZ GB/s)"
-        if "(" in r.name and "@" in r.name:
-            info = r.name.split("(")[1].rstrip(")")
-            actual_mb = float(info.split("MB")[0])
-            # MB / (µs / 1e6) = MB/s, then / 1024 = GB/s
-            handoff_rate_gbs = (actual_mb / (r.p50_us / 1_000_000)) / 1024
-            rate_str = f"{handoff_rate_gbs:.2f} GB/s"
-        else:
-            rate_str = "N/A"
+    # Build lookup by (method, size)
+    lookup: dict[tuple[str, int], BenchmarkResult] = {}
+    for method, result_list in results.items():
+        for r in result_list:
+            base_name = r.name.split(" ")[0]
+            for part in base_name.split("_"):
+                if part.endswith("mb"):
+                    size = int(part[:-2])
+                    lookup[(method, size)] = r
+                    break
 
-        print(f"{size_part:<20} {r.p50_us:>10.0f} µs   {rate_str:<15} {r.p95_us:>8.0f} µs   {r.p99_us:>8.0f} µs")
+    # Print comparison table
+    print(f"{'Size':<10} {'Method':<12} {'Latency (p50)':<15} {'Handoff Rate':<15} {'p95':<10} {'p99':<10}")
+    print("-" * 80)
+
+    for size in sizes:
+        first_in_group = True
+        for method in ["ipc", "zerocopy", "roundtrip"]:
+            r = lookup.get((method, size))
+            if r is None:
+                continue
+
+            # Extract actual size and rate from name
+            if "(" in r.name and "@" in r.name:
+                info = r.name.split("(")[1].rstrip(")")
+                actual_mb = float(info.split("MB")[0])
+                handoff_rate_gbs = (actual_mb / (r.p50_us / 1_000_000)) / 1024
+                rate_str = f"{handoff_rate_gbs:.2f} GB/s"
+            else:
+                rate_str = "N/A"
+
+            size_str = f"{size}MB" if first_in_group else ""
+            method_display = {"ipc": "IPC", "zerocopy": "Zero-copy", "roundtrip": "Roundtrip"}[method]
+            print(f"{size_str:<10} {method_display:<12} {r.p50_us:>10.0f} µs   {rate_str:<15} {r.p95_us:>6.0f} µs   {r.p99_us:>6.0f} µs")
+            first_in_group = False
+        print()
+
+    # Print speedup comparison (zero-copy vs IPC)
+    print("=" * 80)
+    print("SPEEDUP: Zero-copy vs IPC (Python -> Java only)")
+    print("-" * 80)
+
+    for size in sizes:
+        ipc_r = lookup.get(("ipc", size))
+        zc_r = lookup.get(("zerocopy", size))
+        if ipc_r and zc_r:
+            speedup = ipc_r.p50_us / zc_r.p50_us
+            print(f"  {size}MB: {speedup:.2f}x faster with zero-copy")
 
 
 def run_gatun_benchmarks() -> list[BenchmarkResult]:
@@ -894,19 +1043,28 @@ def run_gatun_benchmarks() -> list[BenchmarkResult]:
     return results
 
 
-def run_arrow_benchmarks(memory_mb: int = 128) -> list[BenchmarkResult]:
+def run_arrow_benchmarks(memory_mb: int = 128, mode: str = "all") -> dict[str, list[BenchmarkResult]]:
     """Run Arrow bulk transfer benchmarks (Gatun only).
 
     Args:
         memory_mb: Shared memory size in MB. Determines max transfer size.
+        mode: Which benchmarks to run:
+            - "all": IPC, zero-copy, and roundtrip
+            - "ipc": IPC format only
+            - "zerocopy": Zero-copy buffers only
+            - "roundtrip": Bidirectional transfer only
 
     Returns:
-        List of benchmark results for different transfer sizes.
+        Dict with keys "ipc", "zerocopy", "roundtrip" mapping to result lists.
     """
     import numpy as np  # noqa: F401 - verify numpy is available
 
     socket_path = f"/tmp/gatun_arrow_bench_{os.getpid()}.sock"
-    results = []
+    results: dict[str, list[BenchmarkResult]] = {
+        "ipc": [],
+        "zerocopy": [],
+        "roundtrip": [],
+    }
 
     try:
         # Clean up any stale files
@@ -926,17 +1084,16 @@ def run_arrow_benchmarks(memory_mb: int = 128) -> list[BenchmarkResult]:
         bench.socket_path = socket_path
 
         # Calculate max payload size (memory - command zone - response zone)
-        # Command zone: 4KB, Response zone: 4KB, so payload ~ memory - 8KB
-        max_payload_mb = memory_mb - 1  # Leave some margin
+        # For roundtrip, we need to split payload in half (Python->Java uses first half,
+        # Java->Python uses second half), so effective max is memory/2
+        max_payload_mb = memory_mb // 2 - 1  # Leave some margin
 
-        # Test sizes: 1MB, 8MB, then scale up based on available memory
+        # Test sizes: scale based on available memory
         sizes = [1, 8]
         if max_payload_mb >= 32:
             sizes.append(32)
         if max_payload_mb >= 64:
             sizes.append(64)
-        if max_payload_mb >= 100:
-            sizes.append(100)
 
         print(f"Running Arrow benchmarks for sizes: {sizes} MB...")
         for size_mb in sizes:
@@ -944,14 +1101,35 @@ def run_arrow_benchmarks(memory_mb: int = 128) -> list[BenchmarkResult]:
                 print(f"  Skipping {size_mb}MB (exceeds {max_payload_mb}MB payload limit)")
                 continue
 
-            print(f"  Testing {size_mb}MB transfer...")
             # Fewer iterations for larger sizes
             iterations = max(10, 100 // size_mb)
-            try:
-                result = bench.bench_arrow_transfer(size_mb, iterations=iterations)
-                results.append(result)
-            except Exception as e:
-                print(f"  Error with {size_mb}MB: {e}")
+
+            # IPC format
+            if mode in ("all", "ipc"):
+                print(f"  IPC {size_mb}MB transfer...")
+                try:
+                    result = bench.bench_arrow_transfer(size_mb, iterations=iterations)
+                    results["ipc"].append(result)
+                except Exception as e:
+                    print(f"    Error: {e}")
+
+            # Zero-copy buffers
+            if mode in ("all", "zerocopy"):
+                print(f"  Zero-copy {size_mb}MB transfer...")
+                try:
+                    result = bench.bench_arrow_zero_copy(size_mb, iterations=iterations)
+                    results["zerocopy"].append(result)
+                except Exception as e:
+                    print(f"    Error: {e}")
+
+            # Roundtrip (bidirectional)
+            if mode in ("all", "roundtrip"):
+                print(f"  Roundtrip {size_mb}MB transfer...")
+                try:
+                    result = bench.bench_arrow_roundtrip(size_mb, iterations=iterations)
+                    results["roundtrip"].append(result)
+                except Exception as e:
+                    print(f"    Error: {e}")
 
     finally:
         # Cleanup
@@ -1069,8 +1247,12 @@ def main():
     # Arrow-only mode
     if args.arrow:
         arrow_results = run_arrow_benchmarks(memory_mb=args.arrow_memory)
-        if arrow_results:
+        # Check if any results were collected
+        has_results = any(len(v) > 0 for v in arrow_results.values())
+        if has_results:
             print_arrow_results(arrow_results)
+        else:
+            print("No Arrow benchmark results collected.")
         return
 
     all_gatun_runs = []

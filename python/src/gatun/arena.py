@@ -280,3 +280,8 @@ def compute_schema_hash(schema: pa.Schema) -> int:
 def serialize_schema(schema: pa.Schema) -> bytes:
     """Serialize an Arrow schema for transmission."""
     return schema.serialize().to_pybytes()
+
+
+def deserialize_schema(schema_bytes: bytes) -> pa.Schema:
+    """Deserialize an Arrow schema from IPC format bytes."""
+    return pa.ipc.read_schema(pa.BufferReader(schema_bytes))

@@ -192,10 +192,21 @@ for batch in batches:
 arena.close()
 ```
 
-Data flow:
+Data flow (Python -> Java):
 1. Python copies Arrow buffers into shared memory (one copy)
 2. Python sends buffer descriptors (offsets/lengths) to Java
 3. Java wraps buffers directly as ArrowBuf (zero-copy read)
+
+#### Retrieving Arrow Data from Java
+```python
+# After sending data to Java, you can retrieve it back:
+received_table = client.get_arrow_data()
+```
+
+Data flow (Java -> Python):
+1. Java copies Arrow buffers to shared memory
+2. Java sends buffer descriptors (offsets/lengths) to Python
+3. Python wraps buffers directly as PyArrow buffers (zero-copy read)
 
 ### Supported Argument/Return Types
 - Primitives: `int`, `long`, `double`, `boolean`
