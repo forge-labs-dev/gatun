@@ -65,6 +65,59 @@ def test_send_arrow_buffers(client):
     arena.close()
 
 
+def test_send_arrow_buffers_various_types(client):
+    """Test zero-copy transfer with various Arrow types."""
+
+    # Create table with multiple Arrow types
+    table = pa.table({
+        # Integer types
+        "int8_col": pa.array([1, 2, 3], type=pa.int8()),
+        "int16_col": pa.array([100, 200, 300], type=pa.int16()),
+        "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
+        "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
+        # Float types
+        "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
+        "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
+        # String type
+        "string_col": pa.array(["hello", "world", "test"]),
+        # Boolean type
+        "bool_col": pa.array([True, False, True]),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending Arrow buffers with various types: {table.num_rows} rows, {table.num_columns} columns")
+
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    print(f"Java Response: {response}")
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    arena.close()
+
+
+def test_send_arrow_buffers_with_nulls(client):
+    """Test zero-copy transfer with null values."""
+
+    # Create table with null values
+    table = pa.table({
+        "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
+        "nullable_string": pa.array(["a", None, "c", "d", None]),
+        "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending Arrow buffers with nulls: {table.num_rows} rows")
+
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    print(f"Java Response: {response}")
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    arena.close()
+
+
 def test_payload_arena_basic():
     """Test PayloadArena allocation and reset."""
 

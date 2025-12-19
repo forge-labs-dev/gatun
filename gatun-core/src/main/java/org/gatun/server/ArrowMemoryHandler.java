@@ -14,21 +14,13 @@ import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.OwnershipTransferResult;
 import org.apache.arrow.memory.ReferenceManager;
-import org.apache.arrow.vector.BigIntVector;
-import org.apache.arrow.vector.BitVector;
-import org.apache.arrow.vector.FieldVector;
-import org.apache.arrow.vector.Float4Vector;
-import org.apache.arrow.vector.Float8Vector;
-import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.SmallIntVector;
-import org.apache.arrow.vector.TinyIntVector;
-import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorLoader;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ReadChannel;
+import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
+import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
-import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.gatun.protocol.ArrowBatchDescriptor;
 import org.gatun.protocol.BufferDescriptor;
@@ -40,7 +32,7 @@ import org.gatun.protocol.FieldNode;
  * <p>This class manages:
  * <ul>
  *   <li>Arrow IPC batch reading from shared memory</li>
- *   <li>Zero-copy buffer reconstruction from buffer descriptors</li>
+ *   <li>Zero-copy buffer reconstruction from buffer descriptors using VectorLoader</li>
  *   <li>Schema caching for repeated transfers</li>
  * </ul>
  */
@@ -54,6 +46,9 @@ public class ArrowMemoryHandler {
 
   // Current VectorSchemaRoot from buffer reconstruction (kept for reference until reset)
   private VectorSchemaRoot currentRoot = null;
+
+  // VectorLoader for efficient batch loading
+  private VectorLoader vectorLoader = null;
 
   public ArrowMemoryHandler(BufferAllocator allocator) {
     this.allocator = allocator;
@@ -99,8 +94,9 @@ public class ArrowMemoryHandler {
 
     @Override
     public ArrowBuf retain(ArrowBuf srcBuffer, BufferAllocator targetAllocator) {
-      // For foreign memory, we don't support transfer to another allocator
-      throw new UnsupportedOperationException("Cannot retain foreign memory buffer to another allocator");
+      // For foreign memory, return the same buffer - we don't actually manage ownership
+      // VectorLoader calls this when loading buffers into vectors
+      return srcBuffer;
     }
 
     @Override
@@ -158,7 +154,7 @@ public class ArrowMemoryHandler {
    * Process zero-copy Arrow buffers from buffer descriptors.
    *
    * <p>This method receives buffer locations in payload shared memory and
-   * reconstructs Arrow vectors by wrapping those buffers directly (zero-copy on Java side).
+   * reconstructs Arrow vectors using VectorLoader (zero-copy on Java side).
    *
    * @param batchDesc The Arrow batch descriptor containing buffer locations
    * @param payloadShm Memory segment for the payload shared memory
@@ -206,236 +202,57 @@ public class ArrowMemoryHandler {
       long offset = bufDesc.offset();
       long length = bufDesc.length();
 
-      if (length == 0) {
-        // Zero-length buffer (e.g., no validity bitmap)
-        arrowBuffers.add(null);
-      } else {
-        // Create ArrowBuf backed by the shared memory region
-        long bufferAddress = baseAddress + offset;
-        ReferenceManager refManager = new ForeignMemoryReferenceManager(length);
-        ArrowBuf arrowBuf = new ArrowBuf(refManager, null, length, bufferAddress);
-        arrowBuffers.add(arrowBuf);
-      }
+      // Create ArrowBuf backed by the shared memory region
+      // Note: VectorLoader requires non-null buffers, so we create empty buffers for zero-length
+      long bufferAddress = baseAddress + offset;
+      ReferenceManager refManager = new ForeignMemoryReferenceManager(length);
+      ArrowBuf arrowBuf = new ArrowBuf(refManager, null, length, bufferAddress);
+      arrowBuffers.add(arrowBuf);
 
       LOG.finest(String.format("  Buffer %d: offset=%d, length=%d, address=0x%x",
-          i, offset, length, baseAddress + offset));
+          i, offset, length, bufferAddress));
     }
 
-    // 4. Log field nodes for debugging
+    // 4. Build ArrowFieldNode list from FieldNode descriptors
+    List<ArrowFieldNode> fieldNodes = new ArrayList<>();
     for (int i = 0; i < numNodes; i++) {
       FieldNode node = batchDesc.nodes(i);
+      fieldNodes.add(new ArrowFieldNode(node.length(), node.nullCount()));
       LOG.finest(String.format("  Node %d: length=%d, null_count=%d",
           i, node.length(), node.nullCount()));
     }
 
-    // 5. Reconstruct vectors from buffers
-    // Each field consumes buffers based on its type (validity + data for primitives,
-    // validity + offsets + data for variable-width types)
-    List<FieldVector> vectors = new ArrayList<>();
-    int bufferIndex = 0;
-    int nodeIndex = 0;
+    // 5. Create ArrowRecordBatch from buffers and field nodes
+    ArrowRecordBatch recordBatch = new ArrowRecordBatch(
+        (int) numRows,
+        fieldNodes,
+        arrowBuffers
+    );
 
-    for (Field field : schema.getFields()) {
-      ArrowType type = field.getType();
-      FieldNode node = batchDesc.nodes(nodeIndex++);
-      int valueCount = (int) node.length();
-
-      FieldVector vector = reconstructVector(field, type, arrowBuffers, bufferIndex, valueCount);
-      if (vector != null) {
-        vectors.add(vector);
-        // Advance buffer index based on type
-        bufferIndex += getBufferCount(type);
-      } else {
-        LOG.warning("Failed to reconstruct vector for field: " + field.getName() + " type=" + type);
-      }
+    // 6. Create or reuse VectorSchemaRoot and load with VectorLoader
+    if (currentRoot != null) {
+      currentRoot.close();
     }
+    currentRoot = VectorSchemaRoot.create(schema, allocator);
+    vectorLoader = new VectorLoader(currentRoot);
+    vectorLoader.load(recordBatch);
 
-    // 6. Build VectorSchemaRoot
-    if (!vectors.isEmpty()) {
-      // Close any existing root
-      if (currentRoot != null) {
-        currentRoot.close();
-      }
-      currentRoot = new VectorSchemaRoot(schema, vectors, (int) numRows);
-      LOG.fine("Reconstructed VectorSchemaRoot with " + vectors.size() + " vectors, " + numRows + " rows");
-    }
+    LOG.fine("Loaded VectorSchemaRoot with " + schema.getFields().size() +
+             " fields, " + numRows + " rows using VectorLoader");
 
-    // 7. Verify by reading sample data
-    StringBuilder verification = new StringBuilder();
-    verification.append("Reconstructed ").append(vectors.size()).append(" vectors");
-
-    if (currentRoot != null && currentRoot.getRowCount() > 0) {
-      for (int i = 0; i < Math.min(vectors.size(), 2); i++) {
-        FieldVector vec = vectors.get(i);
+    // 7. Verify by reading sample data (for debugging)
+    if (LOG.isLoggable(java.util.logging.Level.FINE) && currentRoot.getRowCount() > 0) {
+      StringBuilder verification = new StringBuilder();
+      verification.append("Sample data: ");
+      for (int i = 0; i < Math.min(schema.getFields().size(), 2); i++) {
         String fieldName = schema.getFields().get(i).getName();
-        Object firstVal = vec.getObject(0);
-        verification.append(String.format(", %s[0]=%s", fieldName, firstVal));
+        Object firstVal = currentRoot.getVector(fieldName).getObject(0);
+        verification.append(String.format("%s[0]=%s ", fieldName, firstVal));
       }
+      LOG.fine(verification.toString());
     }
-
-    LOG.fine(verification.toString());
 
     return numRows;
-  }
-
-  /**
-   * Reconstruct a FieldVector from ArrowBuf wrappers.
-   */
-  private FieldVector reconstructVector(Field field, ArrowType type, List<ArrowBuf> buffers,
-                                        int bufferIndex, int valueCount) {
-    try {
-      if (type instanceof ArrowType.Int intType) {
-        return reconstructIntVector(field.getName(), intType, buffers, bufferIndex, valueCount);
-      } else if (type instanceof ArrowType.FloatingPoint fpType) {
-        return reconstructFloatVector(field.getName(), fpType, buffers, bufferIndex, valueCount);
-      } else if (type instanceof ArrowType.Utf8) {
-        return reconstructVarCharVector(field.getName(), buffers, bufferIndex, valueCount);
-      } else if (type instanceof ArrowType.Bool) {
-        return reconstructBitVector(field.getName(), buffers, bufferIndex, valueCount);
-      } else {
-        LOG.fine("Unsupported Arrow type for reconstruction: " + type.getTypeID().name());
-        return null;
-      }
-    } catch (Exception e) {
-      LOG.warning("Error reconstructing vector " + field.getName() + ": " + e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Reconstruct an integer vector (Int8, Int16, Int32, Int64).
-   */
-  private FieldVector reconstructIntVector(String name, ArrowType.Int intType,
-                                           List<ArrowBuf> buffers, int bufferIndex, int valueCount) {
-    int bitWidth = intType.getBitWidth();
-    ArrowBuf validityBuf = buffers.get(bufferIndex);
-    ArrowBuf dataBuf = buffers.get(bufferIndex + 1);
-
-    switch (bitWidth) {
-      case 8 -> {
-        TinyIntVector vec = new TinyIntVector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      case 16 -> {
-        SmallIntVector vec = new SmallIntVector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      case 32 -> {
-        IntVector vec = new IntVector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      case 64 -> {
-        BigIntVector vec = new BigIntVector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      default -> {
-        LOG.warning("Unsupported int bit width: " + bitWidth);
-        return null;
-      }
-    }
-  }
-
-  /**
-   * Reconstruct a floating point vector (Float32, Float64).
-   */
-  private FieldVector reconstructFloatVector(String name, ArrowType.FloatingPoint fpType,
-                                             List<ArrowBuf> buffers, int bufferIndex, int valueCount) {
-    ArrowBuf validityBuf = buffers.get(bufferIndex);
-    ArrowBuf dataBuf = buffers.get(bufferIndex + 1);
-
-    switch (fpType.getPrecision()) {
-      case SINGLE -> {
-        Float4Vector vec = new Float4Vector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      case DOUBLE -> {
-        Float8Vector vec = new Float8Vector(name, allocator);
-        vec.allocateNew(valueCount);
-        loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-        return vec;
-      }
-      default -> {
-        LOG.warning("Unsupported float precision: " + fpType.getPrecision());
-        return null;
-      }
-    }
-  }
-
-  /**
-   * Reconstruct a VarChar (String) vector.
-   */
-  private FieldVector reconstructVarCharVector(String name, List<ArrowBuf> buffers,
-                                               int bufferIndex, int valueCount) {
-    ArrowBuf validityBuf = buffers.get(bufferIndex);
-    ArrowBuf offsetBuf = buffers.get(bufferIndex + 1);
-    ArrowBuf dataBuf = buffers.get(bufferIndex + 2);
-
-    VarCharVector vec = new VarCharVector(name, allocator);
-    vec.allocateNew(valueCount);
-
-    // Load buffers - VarChar has 3 buffers: validity, offsets, data
-    if (validityBuf != null) {
-      vec.getValidityBuffer().setBytes(0, validityBuf, 0, validityBuf.capacity());
-    }
-    if (offsetBuf != null) {
-      vec.getOffsetBuffer().setBytes(0, offsetBuf, 0, offsetBuf.capacity());
-    }
-    if (dataBuf != null) {
-      vec.getDataBuffer().setBytes(0, dataBuf, 0, dataBuf.capacity());
-    }
-    vec.setValueCount(valueCount);
-
-    return vec;
-  }
-
-  /**
-   * Reconstruct a BitVector (Boolean).
-   */
-  private FieldVector reconstructBitVector(String name, List<ArrowBuf> buffers,
-                                           int bufferIndex, int valueCount) {
-    ArrowBuf validityBuf = buffers.get(bufferIndex);
-    ArrowBuf dataBuf = buffers.get(bufferIndex + 1);
-
-    BitVector vec = new BitVector(name, allocator);
-    vec.allocateNew(valueCount);
-    loadBuffersIntoVector(vec, validityBuf, dataBuf, valueCount);
-
-    return vec;
-  }
-
-  /**
-   * Load validity and data buffers into a fixed-width vector.
-   */
-  private void loadBuffersIntoVector(FieldVector vec, ArrowBuf validityBuf,
-                                     ArrowBuf dataBuf, int valueCount) {
-    if (validityBuf != null) {
-      vec.getValidityBuffer().setBytes(0, validityBuf, 0, validityBuf.capacity());
-    }
-    if (dataBuf != null) {
-      vec.getDataBuffer().setBytes(0, dataBuf, 0, dataBuf.capacity());
-    }
-    vec.setValueCount(valueCount);
-  }
-
-  /**
-   * Get the number of buffers for a given Arrow type.
-   */
-  private int getBufferCount(ArrowType type) {
-    if (type instanceof ArrowType.Utf8 || type instanceof ArrowType.Binary ||
-        type instanceof ArrowType.LargeUtf8 || type instanceof ArrowType.LargeBinary) {
-      return 3; // validity + offsets + data
-    }
-    return 2; // validity + data for fixed-width types
   }
 
   /**
@@ -466,6 +283,7 @@ public class ArrowMemoryHandler {
       currentRoot.close();
       currentRoot = null;
     }
+    vectorLoader = null;
     // Note: We keep the schema cache since schemas are typically stable
     LOG.fine("Arrow memory handler reset");
   }
