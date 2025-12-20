@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+import ctypes
 import logging
 import mmap
 import os
@@ -1327,47 +1328,43 @@ class GatunClient:
     def send_arrow_table(self, table):
         """Send an Arrow table to Java via shared memory.
 
-        This writes Arrow IPC data directly to the shared memory file using
-        PyArrow's memory-mapped file support, avoiding Python buffer copies.
+        This writes Arrow IPC data to the shared memory mmap using a single
+        memmove, avoiding the overhead of opening a new memory-mapped file.
 
         The data flow is:
-        1. Python serializes Arrow IPC directly to mmap'd shared memory file
-        2. Java reads Arrow IPC from shared memory (zero-copy read via mmap)
+        1. Python serializes Arrow IPC to a buffer (Arrow's efficient internal format)
+        2. Buffer is copied to shared memory via ctypes.memmove (single copy)
+        3. Java reads Arrow IPC from shared memory (zero-copy read via mmap)
 
-        Note: Arrow IPC serialization still occurs (table → IPC format), but the
-        IPC bytes are written directly to shared memory without intermediate buffers.
-        True zero-copy would require sharing raw Arrow buffer pointers.
+        Note: Arrow IPC serialization still occurs (table → IPC format).
+        For true zero-copy, use send_arrow_buffers() instead.
         """
-        # 1. Calculate payload zone size
         max_payload_size = self.response_offset - self.payload_offset
 
-        # 2. Open the shm file as a PyArrow memory-mapped file for direct writing
-        # This bypasses Python's mmap and writes directly via Arrow's native I/O
-        arrow_mmap = pa.memory_map(str(self.memory_path), mode="r+b")
-        try:
-            # Seek to payload offset and write IPC stream directly
-            arrow_mmap.seek(self.payload_offset)
+        # Serialize to an in-memory buffer first
+        # Arrow's IPC serialization is already optimized and this is fast
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
 
-            # Write IPC stream directly to the memory-mapped file
-            # Arrow writes directly to the mmap without Python buffer intermediary
-            with pa.ipc.new_stream(arrow_mmap, table.schema) as writer:
-                writer.write_table(table)
+        ipc_buffer = sink.getvalue()
+        bytes_written = ipc_buffer.size
 
-            bytes_written = arrow_mmap.tell() - self.payload_offset
+        if bytes_written > max_payload_size:
+            raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
 
-            if bytes_written > max_payload_size:
-                raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
-        finally:
-            arrow_mmap.close()
+        # Copy IPC data to shared memory payload zone using single memmove
+        payload_base = ctypes.addressof(ctypes.c_char.from_buffer(self.shm))
+        payload_addr = payload_base + self.payload_offset
+        ctypes.memmove(payload_addr, ipc_buffer.address, bytes_written)
 
-        # 3. Build Command
+        # Build Command
         builder = flatbuffers.Builder(256)
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.SendArrowBatch)
         command = Cmd.CommandEnd(builder)
         builder.Finish(command)
 
-        # 4. Send via standard path
         return self._send_raw(builder.Output())
 
     def send_arrow_table_batched(self, table, batch_size=None):
