@@ -735,7 +735,7 @@ class GatunClient:
         Returns:
             PyArrow Table reconstructed from the buffer descriptors
         """
-        from gatun.arena import deserialize_schema
+        from gatun.arena import deserialize_schema, _validate_flat_schema
 
         import ctypes
 
@@ -752,6 +752,8 @@ class GatunClient:
                 )
             schema_bytes = bytes(arrow_batch.SchemaBytesAsNumpy())
             schema = deserialize_schema(schema_bytes)
+            # Validate schema doesn't contain nested types (not yet supported)
+            _validate_flat_schema(schema)
             self._arrow_schema_cache[schema_hash] = schema
 
         # Get base address of payload zone in shared memory

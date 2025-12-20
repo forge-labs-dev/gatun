@@ -231,16 +231,63 @@ class PayloadArena:
         return False
 
 
+# Nested Arrow types that require recursive buffer handling (not yet supported)
+_NESTED_TYPES = (
+    pa.ListType,
+    pa.LargeListType,
+    pa.FixedSizeListType,
+    pa.StructType,
+    pa.MapType,
+    pa.UnionType,
+    pa.DictionaryType,
+)
+
+
+class UnsupportedArrowTypeError(TypeError):
+    """Raised when an Arrow schema contains unsupported nested types."""
+
+    pass
+
+
+def _validate_flat_schema(schema: pa.Schema) -> None:
+    """Validate that schema contains only flat (non-nested) types.
+
+    The zero-copy buffer protocol currently only supports flat primitive types:
+    int8/16/32/64, uint8/16/32/64, float16/32/64, bool, string, binary, and
+    fixed-size binary. Nested types (list, struct, map, union, dictionary)
+    require recursive field node and buffer handling which is not yet implemented.
+
+    Args:
+        schema: Arrow schema to validate
+
+    Raises:
+        UnsupportedArrowTypeError: If schema contains nested types
+    """
+    unsupported = []
+    for field in schema:
+        if isinstance(field.type, _NESTED_TYPES):
+            unsupported.append(f"{field.name}: {field.type}")
+
+    if unsupported:
+        raise UnsupportedArrowTypeError(
+            f"Arrow zero-copy transfer does not yet support nested types. "
+            f"Unsupported columns: {', '.join(unsupported)}. "
+            f"Use send_arrow_table() for tables with nested types, or convert "
+            f"nested columns to flat representations."
+        )
+
+
 def copy_arrow_table_to_arena(
     table: pa.Table, arena: PayloadArena
 ) -> tuple[list[BufferInfo], list[tuple[int, int]]]:
     """Copy an Arrow table's buffers into the payload arena.
 
     This is the key function for zero-copy transfer. It:
-    1. Combines chunked columns into single arrays (required for protocol)
-    2. Extracts all buffers from the table's columns
-    3. Copies each buffer into the arena
-    4. Returns buffer descriptors for the protocol message
+    1. Validates schema contains only flat types (no nested types)
+    2. Combines chunked columns into single arrays (required for protocol)
+    3. Extracts all buffers from the table's columns
+    4. Copies each buffer into the arena
+    5. Returns buffer descriptors for the protocol message
 
     Note: Tables with chunked columns are combined into single chunks before
     copying. This ensures a 1:1 mapping between schema fields and field nodes,
@@ -254,7 +301,13 @@ def copy_arrow_table_to_arena(
         Tuple of:
         - List of BufferInfo for each buffer
         - List of (length, null_count) tuples for each field node
+
+    Raises:
+        UnsupportedArrowTypeError: If table contains nested types (list, struct, etc.)
     """
+    # Validate schema before processing
+    _validate_flat_schema(table.schema)
+
     buffer_infos: list[BufferInfo] = []
     field_nodes: list[tuple[int, int]] = []
 

@@ -29,7 +29,7 @@ from gatun.async_client import (
 )
 from gatun.config import GatunConfig, get_config, load_config, reset_config
 from gatun.launcher import launch_gateway, GatunSession
-from gatun.arena import PayloadArena
+from gatun.arena import PayloadArena, UnsupportedArrowTypeError
 
 __all__ = [
     # Sync client
@@ -70,6 +70,7 @@ __all__ = [
     "reset_config",
     # Arrow zero-copy
     "PayloadArena",
+    "UnsupportedArrowTypeError",
 ]
 
 

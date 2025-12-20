@@ -2,8 +2,9 @@ import tempfile
 from pathlib import Path
 
 import pyarrow as pa
+import pytest
 
-from gatun import PayloadArena
+from gatun import PayloadArena, UnsupportedArrowTypeError
 
 
 def test_send_pyarrow_table(client):
@@ -335,5 +336,66 @@ def test_get_arrow_data_chunked_roundtrip(client):
         orig_col = chunked_table.column(name).to_pylist()
         recv_col = received_table.column(name).to_pylist()
         assert recv_col == orig_col, f"Mismatch in column {name}"
+
+    arena.close()
+
+
+def test_nested_types_rejected(client):
+    """Test that nested Arrow types are rejected with clear error message."""
+    # Table with list column (nested type)
+    table_with_list = pa.table({
+        "id": pa.array([1, 2, 3], type=pa.int64()),
+        "values": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32())),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
+        client.send_arrow_buffers(table_with_list, arena, schema_cache)
+
+    assert "nested types" in str(exc_info.value).lower()
+    assert "values" in str(exc_info.value)
+
+    arena.close()
+
+
+def test_nested_struct_rejected(client):
+    """Test that struct type is rejected."""
+    # Table with struct column
+    struct_type = pa.struct([("x", pa.int32()), ("y", pa.int32())])
+    table_with_struct = pa.table({
+        "id": pa.array([1, 2], type=pa.int64()),
+        "point": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}], type=struct_type),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
+        client.send_arrow_buffers(table_with_struct, arena, schema_cache)
+
+    assert "nested types" in str(exc_info.value).lower()
+    assert "point" in str(exc_info.value)
+
+    arena.close()
+
+
+def test_nested_map_rejected(client):
+    """Test that map type is rejected."""
+    # Table with map column
+    table_with_map = pa.table({
+        "id": pa.array([1, 2], type=pa.int64()),
+        "attrs": pa.array([{"a": 1, "b": 2}, {"c": 3}], type=pa.map_(pa.string(), pa.int32())),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
+        client.send_arrow_buffers(table_with_map, arena, schema_cache)
+
+    assert "nested types" in str(exc_info.value).lower()
+    assert "attrs" in str(exc_info.value)
 
     arena.close()
