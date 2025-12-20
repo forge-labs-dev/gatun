@@ -33,6 +33,9 @@ from gatun.config import GatunConfig, get_config, load_config, reset_config
 from gatun.launcher import launch_gateway, GatunSession
 from gatun.arena import PayloadArena, UnsupportedArrowTypeError
 
+# Py4J compatibility layer (for PySpark integration)
+from gatun import py4j_compat as py4j_compat
+
 __all__ = [
     # Sync client
     "GatunClient",
@@ -75,6 +78,8 @@ __all__ = [
     "UnsupportedArrowTypeError",
     "StaleArenaError",
     "ArrowTableView",
+    # Py4J compatibility
+    "py4j_compat",
 ]
 
 

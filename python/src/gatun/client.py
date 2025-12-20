@@ -568,10 +568,12 @@ class JVMView:
                 return _JVMNode(self._client, self._imports[name])
 
             # Check for wildcard imports (e.g., java_import(jvm, "java.util.*"))
-            for package, is_wildcard in self._imports.items():
-                if is_wildcard is True:
-                    # Try the package.name path
-                    return _JVMNode(self._client, f"{package}.{name}")
+            # Only apply wildcards for uppercase names (class names per Java convention)
+            if name and name[0].isupper():
+                for package, is_wildcard in self._imports.items():
+                    if is_wildcard is True:
+                        # Try the package.name path
+                        return _JVMNode(self._client, f"{package}.{name}")
 
         if self._package_path:
             new_path = f"{self._package_path}.{name}"

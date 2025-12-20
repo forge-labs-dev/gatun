@@ -70,6 +70,25 @@ public class GatunServer {
           "java.lang.StringBuilder",
           "java.lang.StringBuffer");
 
+  // --- SECURITY: Prefixes for allowed class packages (e.g., for Spark integration) ---
+  private static final Set<String> ALLOWED_PREFIXES =
+      Set.of(
+          "org.apache.spark.",  // Apache Spark
+          "scala."              // Scala standard library
+      );
+
+  private static boolean isClassAllowed(String className) {
+    if (ALLOWED_CLASSES.contains(className)) {
+      return true;
+    }
+    for (String prefix : ALLOWED_PREFIXES) {
+      if (className.startsWith(prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // --- THE OBJECT REGISTRY ---
   private final Map<Long, Object> objectRegistry = new ConcurrentHashMap<>();
   private final AtomicLong objectIdCounter = new AtomicLong(1);
@@ -242,7 +261,7 @@ public class GatunServer {
 
           if (cmd.action() == Action.CreateObject) {
             String className = cmd.targetName();
-            if (!ALLOWED_CLASSES.contains(className)) {
+            if (!isClassAllowed(className)) {
               throw new SecurityException("Class not allowed: " + className);
             }
             Class<?> clazz = Class.forName(className);
@@ -329,7 +348,7 @@ public class GatunServer {
             String className = fullName.substring(0, lastDot);
             String methodName = fullName.substring(lastDot + 1);
 
-            if (!ALLOWED_CLASSES.contains(className)) {
+            if (!isClassAllowed(className)) {
               throw new SecurityException("Class not allowed: " + className);
             }
 
