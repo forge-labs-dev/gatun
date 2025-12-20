@@ -319,6 +319,13 @@ def copy_arrow_table_to_arena(
         # After combine_chunks(), each column has exactly one chunk
         chunk = column.chunks[0]
 
+        # Normalize sliced arrays to offset 0
+        # Sliced arrays have non-zero offsets, which means their buffers contain
+        # data before the slice that shouldn't be accessed. We use concat_arrays
+        # to create a new array with offset 0 and compacted buffers.
+        if chunk.offset != 0:
+            chunk = pa.concat_arrays([chunk])
+
         # Record field node info
         field_nodes.append((len(chunk), chunk.null_count))
 

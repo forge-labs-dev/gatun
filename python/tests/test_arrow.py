@@ -471,3 +471,79 @@ def test_arrow_table_view_repr(client):
     assert "STALE" in repr_after
 
     arena.close()
+
+
+def test_sliced_table_roundtrip(client):
+    """Test that sliced arrays (with non-zero offsets) are handled correctly.
+
+    Arrow arrays can have non-zero offsets when created via slicing. The protocol
+    must normalize these to offset 0 before copying, otherwise the buffer data
+    would be misaligned and reconstruction would fail.
+    """
+    # Create a table and slice it to create arrays with non-zero offsets
+    full_table = pa.table({
+        "id": pa.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], type=pa.int64()),
+        "name": pa.array(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]),
+        "value": pa.array([0.0, 1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9], type=pa.float64()),
+    })
+
+    # Slice to get rows 3-6 (4 rows) - this creates arrays with offset=3
+    sliced_table = full_table.slice(3, 4)
+
+    # Verify the table is actually sliced with non-zero offsets
+    for col in sliced_table.columns:
+        chunk = col.chunks[0]
+        assert chunk.offset == 3, f"Expected offset 3, got {chunk.offset}"
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending sliced table: {sliced_table.num_rows} rows (offset=3)")
+    response = client.send_arrow_buffers(sliced_table, arena, schema_cache)
+    print(f"Java Response: {response}")
+    assert f"Received {sliced_table.num_rows} rows" in str(response)
+
+    # Roundtrip: get data back from Java
+    received_table = client.get_arrow_data()
+
+    print(f"Received table: {received_table.num_rows} rows")
+
+    # Verify data content matches the sliced portion
+    assert received_table.num_rows == 4
+    assert received_table.column("id").to_pylist() == [3, 4, 5, 6]
+    assert received_table.column("name").to_pylist() == ["d", "e", "f", "g"]
+    assert received_table.column("value").to_pylist() == [3.3, 4.4, 5.5, 6.6]
+
+    arena.close()
+
+
+def test_sliced_table_with_nulls_roundtrip(client):
+    """Test sliced arrays with null values are handled correctly."""
+    # Create a table with nulls and slice it
+    full_table = pa.table({
+        "id": pa.array([0, 1, None, 3, 4, None, 6, 7, 8, None], type=pa.int64()),
+        "name": pa.array(["a", None, "c", "d", None, "f", "g", None, "i", "j"]),
+    })
+
+    # Slice rows 2-7 (6 rows) - includes various null positions
+    sliced_table = full_table.slice(2, 6)
+
+    # Verify non-zero offset
+    for col in sliced_table.columns:
+        chunk = col.chunks[0]
+        assert chunk.offset == 2
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending sliced table with nulls: {sliced_table.num_rows} rows")
+    response = client.send_arrow_buffers(sliced_table, arena, schema_cache)
+    assert f"Received {sliced_table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify null positions are preserved correctly
+    assert received_table.column("id").to_pylist() == [None, 3, 4, None, 6, 7]
+    assert received_table.column("name").to_pylist() == ["c", "d", None, "f", "g", None]
+
+    arena.close()
