@@ -615,13 +615,21 @@ class _JVMNode:
         self._parent_looks_like_class = parent_looks_like_class
 
     def __getattr__(self, name):
-        """Navigate deeper or access static method."""
+        """Navigate deeper or access static method/field."""
         new_path = f"{self._path}.{name}"
         # Get the last segment of the current path to check if it looks like a class
         last_segment = self._path.rsplit(".", 1)[-1] if "." in self._path else self._path
         # If current segment starts with uppercase, it likely is a class
         # so the accessed attribute is likely a static method/field
         parent_looks_like_class = last_segment and last_segment[0].isupper()
+
+        # Heuristic: if parent is a class AND name is ALL_UPPERCASE (like MAX_VALUE, EMPTY_LIST),
+        # it's likely a static field - fetch it immediately
+        if parent_looks_like_class and name.isupper() and "_" in name:
+            # This looks like a constant field (e.g., MAX_VALUE, EMPTY_LIST)
+            # Fetch it immediately
+            return self._client.get_static_field(self._path, name)
+
         return _JVMNode(self._client, new_path, parent_looks_like_class=parent_looks_like_class)
 
     def __call__(self, *args):
@@ -1198,6 +1206,59 @@ class GatunClient:
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.SetField)
         Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddTargetName(builder, name_off)
+        Cmd.CommandAddArgs(builder, args_vec)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def get_static_field(self, class_name: str, field_name: str):
+        """Get a static field value from a Java class.
+
+        Args:
+            class_name: Fully qualified class name (e.g., "java.lang.Integer")
+            field_name: Name of the static field (e.g., "MAX_VALUE")
+
+        Returns:
+            The field value
+
+        Example:
+            >>> client.get_static_field("java.lang.Integer", "MAX_VALUE")
+            2147483647
+        """
+        builder = flatbuffers.Builder(256)
+        full_name = f"{class_name}.{field_name}"
+        name_off = builder.CreateString(full_name)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetStaticField)
+        Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def set_static_field(self, class_name: str, field_name: str, value):
+        """Set a static field value on a Java class.
+
+        Args:
+            class_name: Fully qualified class name
+            field_name: Name of the static field
+            value: Value to set
+        """
+        builder = flatbuffers.Builder(256)
+        full_name = f"{class_name}.{field_name}"
+        name_off = builder.CreateString(full_name)
+
+        # Build argument for the value
+        arg_offset = self._build_argument(builder, value)
+        Cmd.CommandStartArgsVector(builder, 1)
+        builder.PrependUOffsetTRelative(arg_offset)
+        args_vec = builder.EndVector()
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.SetStaticField)
         Cmd.CommandAddTargetName(builder, name_off)
         Cmd.CommandAddArgs(builder, args_vec)
         cmd = Cmd.CommandEnd(builder)

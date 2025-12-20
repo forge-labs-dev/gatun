@@ -206,3 +206,84 @@ class TestUppercaseStaticMethods:
         assert result is not None
         # Verify it's a list with 3 elements
         assert len(result) == 3
+
+
+class TestStaticFields:
+    """Tests for static field access (e.g., Integer.MAX_VALUE).
+
+    This tests the GetStaticField action which allows accessing
+    static fields on Java classes via the JVM view.
+    """
+
+    def test_integer_max_value(self, client):
+        """Test accessing Integer.MAX_VALUE static field."""
+        result = client.jvm.java.lang.Integer.MAX_VALUE
+        assert result == 2147483647
+        assert isinstance(result, int)
+
+    def test_integer_min_value(self, client):
+        """Test accessing Integer.MIN_VALUE static field."""
+        result = client.jvm.java.lang.Integer.MIN_VALUE
+        assert result == -2147483648
+
+    def test_long_max_value(self, client):
+        """Test accessing Long.MAX_VALUE static field."""
+        result = client.jvm.java.lang.Long.MAX_VALUE
+        assert result == 9223372036854775807
+
+    def test_double_positive_infinity(self, client):
+        """Test accessing Double.POSITIVE_INFINITY static field."""
+        import math
+
+        result = client.jvm.java.lang.Double.POSITIVE_INFINITY
+        assert math.isinf(result)
+        assert result > 0
+
+    def test_collections_empty_list(self, client):
+        """Test accessing Collections.EMPTY_LIST static field."""
+        result = client.jvm.java.util.Collections.EMPTY_LIST
+        assert result == []
+        assert isinstance(result, list)
+
+    def test_collections_empty_map(self, client):
+        """Test accessing Collections.EMPTY_MAP static field."""
+        result = client.jvm.java.util.Collections.EMPTY_MAP
+        assert result == {}
+        assert isinstance(result, dict)
+
+
+class TestPrimitiveWidening:
+    """Tests for primitive widening conversions (int -> double).
+
+    This tests that int arguments are properly widened to double
+    when calling methods that expect double parameters.
+    """
+
+    def test_math_pow_with_ints(self, client):
+        """Test Math.pow with int arguments (should widen to double)."""
+        result = client.jvm.java.lang.Math.pow(2, 10)
+        assert result == 1024.0
+        assert isinstance(result, float)
+
+    def test_math_pow_with_floats(self, client):
+        """Test Math.pow with float arguments (normal case)."""
+        result = client.jvm.java.lang.Math.pow(2.0, 10.0)
+        assert result == 1024.0
+
+    def test_math_pow_mixed_args(self, client):
+        """Test Math.pow with mixed int/float arguments."""
+        result = client.jvm.java.lang.Math.pow(2, 3.0)
+        assert result == 8.0
+
+        result = client.jvm.java.lang.Math.pow(2.0, 3)
+        assert result == 8.0
+
+    def test_math_sqrt_with_int(self, client):
+        """Test Math.sqrt with int argument."""
+        result = client.jvm.java.lang.Math.sqrt(16)
+        assert result == 4.0
+
+    def test_math_floor_with_int(self, client):
+        """Test Math.floor with int argument."""
+        result = client.jvm.java.lang.Math.floor(5)
+        assert result == 5.0

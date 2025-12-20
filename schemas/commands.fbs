@@ -21,7 +21,9 @@ enum Action : byte {
   IsInstanceOf = 13,       // Check if object is instance of a class
   SendArrowBuffers = 14,   // Send Arrow data via buffer descriptors (true zero-copy)
   ResetPayloadArena = 15,  // Reset the payload shared memory arena
-  GetArrowData = 16        // Request Arrow data from Java (returns via ArrowBatchDescriptor)
+  GetArrowData = 16,       // Request Arrow data from Java (returns via ArrowBatchDescriptor)
+  GetStaticField = 17,     // Get static field value: target_name = "pkg.Class.FIELD"
+  SetStaticField = 18      // Set static field value: target_name = "pkg.Class.FIELD", args[0] = value
 }
 
 // Element types for arrays

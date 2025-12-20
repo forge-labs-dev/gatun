@@ -511,6 +511,57 @@ public class GatunServer {
             // Try to load the class (no allowlist check - this is read-only)
             Class<?> clazz = Class.forName(className);
             result = clazz.isInstance(target);
+          } else if (cmd.action() == Action.GetStaticField) {
+            // Get static field: target_name = "pkg.Class.FIELD"
+            String fullName = cmd.targetName();
+            int lastDot = fullName.lastIndexOf('.');
+            if (lastDot == -1) {
+              throw new IllegalArgumentException("Invalid static field format: " + fullName);
+            }
+            String className = fullName.substring(0, lastDot);
+            String fieldName = fullName.substring(lastDot + 1);
+
+            if (!isClassAllowed(className)) {
+              throw new SecurityException("Class not allowed: " + className);
+            }
+
+            Class<?> clazz = Class.forName(className);
+            java.lang.reflect.Field field = clazz.getField(fieldName);
+            result = field.get(null);  // null for static field
+
+            // Wrap returned objects in registry
+            if (result != null && !isAutoConvertible(result)) {
+              long newId = objectIdCounter.getAndIncrement();
+              objectRegistry.put(newId, result);
+              sessionObjectIds.add(newId);
+              result = new ObjectRefT(newId);
+            }
+          } else if (cmd.action() == Action.SetStaticField) {
+            // Set static field: target_name = "pkg.Class.FIELD", args[0] = value
+            String fullName = cmd.targetName();
+            int lastDot = fullName.lastIndexOf('.');
+            if (lastDot == -1) {
+              throw new IllegalArgumentException("Invalid static field format: " + fullName);
+            }
+            String className = fullName.substring(0, lastDot);
+            String fieldName = fullName.substring(lastDot + 1);
+
+            if (!isClassAllowed(className)) {
+              throw new SecurityException("Class not allowed: " + className);
+            }
+
+            if (cmd.argsLength() != 1) {
+              throw new IllegalArgumentException("SetStaticField requires exactly one argument");
+            }
+
+            Argument arg = cmd.args(0);
+            Object[] converted = convertArgument(arg);
+            Object value = converted[0];
+
+            Class<?> clazz = Class.forName(className);
+            java.lang.reflect.Field field = clazz.getField(fieldName);
+            field.set(null, value);  // null for static field
+            result = null;
           }
 
           // 3. Pack Success
@@ -950,10 +1001,14 @@ public class GatunServer {
     if (paramType == Object.class) return true;
     // Handle argType=Object matching any reference type (String args come as Object.class)
     if (argType == Object.class && !paramType.isPrimitive()) return true;
-    // Handle primitive boxing
+    // Handle primitive widening conversions (Java allows these implicitly)
     if (paramType == int.class && argType == int.class) return true;
     if (paramType == long.class && (argType == int.class || argType == long.class)) return true;
-    if (paramType == double.class && (argType == double.class || argType == float.class))
+    // Allow int/long -> double widening (e.g., Math.pow(2, 10) should work)
+    if (paramType == double.class
+        && (argType == double.class || argType == float.class || argType == int.class || argType == long.class))
+      return true;
+    if (paramType == float.class && (argType == float.class || argType == int.class || argType == long.class))
       return true;
     if (paramType == boolean.class && argType == boolean.class) return true;
     return false;
