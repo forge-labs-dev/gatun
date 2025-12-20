@@ -159,6 +159,9 @@ class PayloadArena:
     def allocate_and_copy(self, data: bytes | pa.Buffer) -> BufferInfo:
         """Allocate a buffer and copy data into it.
 
+        Uses a single memcpy/memmove to copy data directly into shared memory,
+        avoiding intermediate Python bytes objects for Arrow buffers.
+
         Args:
             data: Data to copy (bytes or PyArrow Buffer)
 
@@ -167,19 +170,26 @@ class PayloadArena:
         """
         if isinstance(data, pa.Buffer):
             size = data.size
-            data_bytes = data.to_pybytes()
         else:
             size = len(data)
-            data_bytes = data
+
+        if size == 0:
+            return BufferInfo(offset=0, length=0, buffer=None)
 
         info = self.allocate(size)
 
-        # Copy data into the shared memory buffer
-        # We use the mmap directly for the copy
-        # Account for base offset when using a slice of a larger mmap
+        # Copy data into the shared memory buffer using a single memcpy
         base_offset = getattr(self, "_base_offset", 0)
-        self._mmap.seek(base_offset + info.offset)
-        self._mmap.write(data_bytes)
+        dst_addr = self._base_address + info.offset
+
+        if isinstance(data, pa.Buffer):
+            # Direct copy from Arrow buffer's native memory - single memcpy
+            # Arrow buffers expose their address via .address property
+            ctypes.memmove(dst_addr, data.address, size)
+        else:
+            # For Python bytes, use mmap.write (still efficient)
+            self._mmap.seek(base_offset + info.offset)
+            self._mmap.write(data)
 
         return info
 
