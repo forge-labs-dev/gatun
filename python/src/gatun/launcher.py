@@ -4,7 +4,6 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
 
 from gatun.config import get_config
 
@@ -44,13 +43,19 @@ class GatunSession:
             self.process = None
 
 
-def launch_gateway(memory: Optional[str] = None, socket_path: Optional[str] = None):
+def launch_gateway(
+    memory: str | None = None,
+    socket_path: str | None = None,
+    classpath: list[str] | None = None,
+):
     """
     Launches the embedded Java server.
 
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
         socket_path: Path to the Unix socket. Defaults to config value or ~/gatun.sock.
+        classpath: Additional JAR files or directories to add to the classpath.
+                   This allows loading external classes (e.g., Spark JARs).
 
     Configuration can be set in pyproject.toml:
         [tool.gatun]
@@ -80,9 +85,22 @@ def launch_gateway(memory: Optional[str] = None, socket_path: Optional[str] = No
         socket_path = config.socket_path or os.path.expanduser("~/gatun.sock")
 
     # 3. Construct Command with config JVM flags
-    # java [FLAGS] -jar [JAR] [MEM_SIZE] [SOCKET_PATH]
     jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags
-    cmd = ["java"] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
+
+    if classpath:
+        # Use -cp with main class to allow additional classpath entries
+        # java [FLAGS] -cp [CLASSPATH] org.gatun.server.GatunServer [MEM_SIZE] [SOCKET_PATH]
+        all_jars = [str(JAR_PATH)] + classpath
+        cp = os.pathsep.join(all_jars)
+        cmd = (
+            ["java"]
+            + jvm_flags
+            + ["-cp", cp, "org.gatun.server.GatunServer", str(mem_bytes), socket_path]
+        )
+    else:
+        # Use -jar for simplicity when no extra classpath needed
+        # java [FLAGS] -jar [JAR] [MEM_SIZE] [SOCKET_PATH]
+        cmd = ["java"] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
 
