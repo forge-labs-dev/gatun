@@ -62,9 +62,31 @@ The build backend (`python/gatun_build_backend.py`) automatically regenerates Fl
 - Java 21 with preview features required (`--enable-preview`)
 - Arrow memory requires JVM flags: `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`
 - Python client uses `weakref.finalize` for automatic Java object cleanup
-- Default socket path: `~/gatun.sock`, shared memory: `~/gatun.sock.shm`
+- Socket path: Generated randomly in `/tmp/gatun_<pid>_<random>.sock` by default
 - Use `T | None` syntax instead of `Optional[T]`
 - Python 3.13+ only (no fallback imports like `tomli`)
+
+## Quick Start
+
+```python
+from gatun import connect
+
+# Start server and connect
+client = connect()
+
+# Create Java objects via JVM view
+ArrayList = client.jvm.java.util.ArrayList
+my_list = ArrayList()
+my_list.add("hello")
+my_list.add("world")
+print(my_list.size())  # 2
+
+# Call static methods
+result = client.jvm.java.lang.Integer.parseInt("42")  # 42
+
+# Clean up
+client.close()
+```
 
 ## Supported Operations
 
@@ -82,6 +104,11 @@ my_list = ArrayList(100)        # With initial capacity
 # Call static methods
 result = client.jvm.java.lang.Integer.parseInt("42")  # 42
 result = client.jvm.java.lang.Math.max(10, 20)        # 20
+result = client.jvm.java.lang.Math.sqrt(16.0)         # 4.0 (note: use floats for double params)
+
+# String operations
+result = client.jvm.java.lang.String.valueOf(123)     # "123"
+result = client.jvm.java.lang.String.format("Hello %s!", "World")  # "Hello World!"
 ```
 
 ### java_import (Py4J Compatible)
@@ -98,15 +125,76 @@ java_import(client.jvm, "java.lang.StringBuilder")
 sb = client.jvm.StringBuilder("hello")
 ```
 
+### Collections Examples
+```python
+# HashMap
+hm = client.jvm.java.util.HashMap()
+hm.put("key1", "value1")
+hm.put("key2", 42)
+hm.get("key1")  # "value1"
+hm.size()       # 2
+
+# TreeMap (sorted keys)
+tm = client.jvm.java.util.TreeMap()
+tm.put("zebra", 1)
+tm.put("apple", 2)
+tm.firstKey()  # "apple"
+tm.lastKey()   # "zebra"
+
+# HashSet (no duplicates)
+hs = client.jvm.java.util.HashSet()
+hs.add("a")
+hs.add("b")
+hs.add("a")  # duplicate ignored
+hs.size()    # 2
+hs.contains("a")  # True
+
+# StringBuilder for efficient string building
+sb = client.jvm.java.lang.StringBuilder("Hello")
+sb.append(" ")
+sb.append("World!")
+sb.toString()  # "Hello World!"
+
+# Collections utility methods
+java_import(client.jvm, "java.util.*")
+arr = client.jvm.ArrayList()
+arr.add("banana")
+arr.add("apple")
+arr.add("cherry")
+client.jvm.Collections.sort(arr)     # Sorts in place
+client.jvm.Collections.reverse(arr)  # Reverses in place
+
+# Arrays.asList returns a Python list (auto-converted)
+result = client.jvm.java.util.Arrays.asList("a", "b", "c")  # ['a', 'b', 'c']
+```
+
+### Passing Python Collections
+Python lists and dicts are automatically converted to Java collections:
+```python
+arr = client.jvm.java.util.ArrayList()
+arr.add([1, 2, 3])                    # Converted to Java List
+arr.add({"name": "Alice", "age": 30}) # Converted to Java Map
+```
+
 ### Async Client
 ```python
-from gatun import aconnect, AsyncGatunClient
+from gatun import aconnect
+import asyncio
 
 async def main():
     client = await aconnect()
+
+    # All operations are async
     arr = await client.jvm.java.util.ArrayList()
     await arr.add("hello")
+    size = await arr.size()  # 1
+
+    # Static methods
+    result = await client.jvm.java.lang.Integer.parseInt("42")  # 42
+
     await client.close()
+
+asyncio.run(main())
 ```
 
 ### Python Callbacks
@@ -116,7 +204,13 @@ def compare(a, b):
     return -1 if a < b else (1 if a > b else 0)
 
 comparator = client.register_callback(compare, "java.util.Comparator")
+
+arr = client.jvm.java.util.ArrayList()
+arr.add(3)
+arr.add(1)
+arr.add(2)
 client.jvm.java.util.Collections.sort(arr, comparator)
+# arr is now [1, 2, 3]
 ```
 
 Async callbacks are also supported:
@@ -170,7 +264,7 @@ Two methods for transferring Arrow data:
 import pyarrow as pa
 
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
-client.send_arrow_table(table)  # Serializes to IPC, writes to shm
+result = client.send_arrow_table(table)  # "Received 3 rows"
 ```
 
 #### Zero-Copy Buffer Transfer (Optimal)
@@ -196,17 +290,6 @@ Data flow (Python -> Java):
 1. Python copies Arrow buffers into shared memory (one copy)
 2. Python sends buffer descriptors (offsets/lengths) to Java
 3. Java wraps buffers directly as ArrowBuf (zero-copy read)
-
-#### Retrieving Arrow Data from Java
-```python
-# After sending data to Java, you can retrieve it back:
-received_table = client.get_arrow_data()
-```
-
-Data flow (Java -> Python):
-1. Java copies Arrow buffers to shared memory
-2. Java sends buffer descriptors (offsets/lengths) to Python
-3. Python wraps buffers directly as PyArrow buffers (zero-copy read)
 
 ### Supported Argument/Return Types
 - Primitives: `int`, `long`, `double`, `boolean`
@@ -235,9 +318,10 @@ Java exceptions are mapped to Python exceptions:
 
 ### Class Allowlist
 Only these classes can be instantiated or used for static methods (hardcoded in GatunServer.java):
-- Collections: `java.util.ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`, `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `Collections`
+- Collections: `java.util.ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`, `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `Collections`, `Arrays`
 - Strings: `java.lang.String`, `StringBuilder`, `StringBuffer`
 - Primitives: `java.lang.Integer`, `Long`, `Double`, `Boolean`, `Math`
+- Spark/Scala: Classes under `org.apache.spark.*` and `scala.*` prefixes are allowed
 
 Attempting to use non-allowlisted classes (e.g., `Runtime`, `ProcessBuilder`) raises `SecurityException`.
 
@@ -252,7 +336,7 @@ Configure via `pyproject.toml`:
 ```toml
 [tool.gatun]
 memory = "64MB"
-socket_path = "/tmp/gatun.sock"
+socket_path = "/tmp/gatun.sock"  # Optional: fixed path instead of random
 ```
 
 Or environment variables:
@@ -261,7 +345,37 @@ GATUN_MEMORY=64MB
 GATUN_SOCKET_PATH=/tmp/gatun.sock
 ```
 
+## Py4J Compatibility Layer
+
+For migrating from Py4J (e.g., PySpark integration):
+```python
+from gatun.py4j_compat import JavaGateway, launch_gateway, java_import
+
+# Launch gateway (starts Gatun server)
+gateway = launch_gateway()
+
+# Or use context manager
+with JavaGateway() as gateway:
+    ArrayList = gateway.jvm.java.util.ArrayList
+    arr = ArrayList()
+    arr.add("hello")
+```
+
 ## Logging
 
 - Java: `java.util.logging` (Logger for `GatunServer`)
 - Python: `logging` module (loggers for `gatun.client` and `gatun.launcher`)
+
+## Method Overload Resolution
+
+Gatun uses specificity scoring to resolve overloaded Java methods:
+1. Exact type matches get highest priority
+2. Compatible types (e.g., `String` matching `CharSequence`) get medium priority
+3. `Object` parameters get lowest priority
+4. Non-varargs methods are preferred over varargs
+
+Note: For methods with `double` parameters (like `Math.pow`), pass Python floats:
+```python
+Math.pow(2.0, 10.0)  # Works: 1024.0
+Math.pow(2, 10)      # May fail: int args don't match double params
+```
