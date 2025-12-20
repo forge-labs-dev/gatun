@@ -231,7 +231,7 @@ class PayloadArena:
         return False
 
 
-# Nested Arrow types that require recursive buffer handling (not yet supported)
+# Nested Arrow types that require recursive field node extraction
 _NESTED_TYPES = (
     pa.ListType,
     pa.LargeListType,
@@ -239,42 +239,114 @@ _NESTED_TYPES = (
     pa.StructType,
     pa.MapType,
     pa.UnionType,
-    pa.DictionaryType,
 )
+
+# Dictionary type needs special handling (not yet supported)
+_UNSUPPORTED_TYPES = (pa.DictionaryType,)
 
 
 class UnsupportedArrowTypeError(TypeError):
-    """Raised when an Arrow schema contains unsupported nested types."""
+    """Raised when an Arrow schema contains unsupported types."""
 
     pass
 
 
-def _validate_flat_schema(schema: pa.Schema) -> None:
-    """Validate that schema contains only flat (non-nested) types.
+def _validate_supported_schema(schema: pa.Schema) -> None:
+    """Validate that schema contains only supported types.
 
-    The zero-copy buffer protocol currently only supports flat primitive types:
-    int8/16/32/64, uint8/16/32/64, float16/32/64, bool, string, binary, and
-    fixed-size binary. Nested types (list, struct, map, union, dictionary)
-    require recursive field node and buffer handling which is not yet implemented.
+    Currently supports:
+    - Primitive types: int, float, bool, string, binary, etc.
+    - Date/time types: date32, date64, timestamp, time32, time64, duration
+    - Nested types: list, large_list, fixed_size_list, struct, map, union
+
+    Not yet supported:
+    - Dictionary (requires separate dictionary/indices handling)
 
     Args:
         schema: Arrow schema to validate
 
     Raises:
-        UnsupportedArrowTypeError: If schema contains nested types
+        UnsupportedArrowTypeError: If schema contains unsupported types
     """
     unsupported = []
-    for field in schema:
-        if isinstance(field.type, _NESTED_TYPES):
-            unsupported.append(f"{field.name}: {field.type}")
+    _check_type_recursive(schema, unsupported)
 
     if unsupported:
         raise UnsupportedArrowTypeError(
-            f"Arrow zero-copy transfer does not yet support nested types. "
-            f"Unsupported columns: {', '.join(unsupported)}. "
-            f"Use send_arrow_table() for tables with nested types, or convert "
-            f"nested columns to flat representations."
+            f"Arrow zero-copy transfer does not support these types: "
+            f"{', '.join(unsupported)}. "
+            f"Use send_arrow_table() for tables with unsupported types."
         )
+
+
+def _check_type_recursive(
+    schema_or_type: pa.Schema | pa.DataType, unsupported: list[str], path: str = ""
+) -> None:
+    """Recursively check types for unsupported ones."""
+    if isinstance(schema_or_type, pa.Schema):
+        for field in schema_or_type:
+            field_path = field.name if not path else f"{path}.{field.name}"
+            _check_type_recursive(field.type, unsupported, field_path)
+    elif isinstance(schema_or_type, _UNSUPPORTED_TYPES):
+        unsupported.append(f"{path}: {schema_or_type}")
+    elif isinstance(schema_or_type, pa.ListType):
+        _check_type_recursive(schema_or_type.value_type, unsupported, f"{path}[]")
+    elif isinstance(schema_or_type, pa.LargeListType):
+        _check_type_recursive(schema_or_type.value_type, unsupported, f"{path}[]")
+    elif isinstance(schema_or_type, pa.FixedSizeListType):
+        _check_type_recursive(schema_or_type.value_type, unsupported, f"{path}[]")
+    elif isinstance(schema_or_type, pa.StructType):
+        for i in range(schema_or_type.num_fields):
+            field = schema_or_type.field(i)
+            field_path = f"{path}.{field.name}" if path else field.name
+            _check_type_recursive(field.type, unsupported, field_path)
+    elif isinstance(schema_or_type, pa.MapType):
+        _check_type_recursive(schema_or_type.key_type, unsupported, f"{path}.key")
+        _check_type_recursive(schema_or_type.item_type, unsupported, f"{path}.value")
+    elif isinstance(schema_or_type, pa.UnionType):
+        for i in range(schema_or_type.num_fields):
+            field = schema_or_type.field(i)
+            _check_type_recursive(field.type, unsupported, f"{path}.{field.name}")
+
+
+def _extract_field_nodes_recursive(
+    array: pa.Array, field_nodes: list[tuple[int, int]]
+) -> None:
+    """Extract field nodes from an array in depth-first pre-order.
+
+    Arrow IPC format requires field nodes in depth-first pre-order traversal.
+    For nested types, we emit the parent node first, then recurse into children.
+
+    Args:
+        array: The Arrow array to extract nodes from
+        field_nodes: List to append (length, null_count) tuples to
+    """
+    # Emit this array's field node
+    field_nodes.append((len(array), array.null_count))
+
+    # Recurse into children based on type
+    arr_type = array.type
+
+    if isinstance(arr_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
+        # List types have a single child: the values array
+        _extract_field_nodes_recursive(array.values, field_nodes)
+
+    elif isinstance(arr_type, pa.StructType):
+        # Struct types have multiple children: one per field
+        for i in range(arr_type.num_fields):
+            _extract_field_nodes_recursive(array.field(i), field_nodes)
+
+    elif isinstance(arr_type, pa.MapType):
+        # Map is internally list<struct<key, value>>
+        # The .values property gives us the struct array (entries)
+        # which contains the key and value child arrays
+        # Field nodes: map -> struct (entries) -> key, value
+        _extract_field_nodes_recursive(array.values, field_nodes)
+
+    elif isinstance(arr_type, pa.UnionType):
+        # Union types have multiple children: one per type code
+        for i in range(arr_type.num_fields):
+            _extract_field_nodes_recursive(array.field(i), field_nodes)
 
 
 def copy_arrow_table_to_arena(
@@ -283,11 +355,14 @@ def copy_arrow_table_to_arena(
     """Copy an Arrow table's buffers into the payload arena.
 
     This is the key function for zero-copy transfer. It:
-    1. Validates schema contains only flat types (no nested types)
+    1. Validates schema contains only supported types
     2. Combines chunked columns into single arrays (required for protocol)
-    3. Extracts all buffers from the table's columns
+    3. Extracts all buffers from the table's columns (including nested children)
     4. Copies each buffer into the arena
     5. Returns buffer descriptors for the protocol message
+
+    Supports nested types (list, struct, map, union) by recursively extracting
+    field nodes in depth-first pre-order, matching Arrow IPC format.
 
     Note: Tables with chunked columns are combined into single chunks before
     copying. This ensures a 1:1 mapping between schema fields and field nodes,
@@ -303,10 +378,10 @@ def copy_arrow_table_to_arena(
         - List of (length, null_count) tuples for each field node
 
     Raises:
-        UnsupportedArrowTypeError: If table contains nested types (list, struct, etc.)
+        UnsupportedArrowTypeError: If table contains unsupported types (e.g., dictionary)
     """
     # Validate schema before processing
-    _validate_flat_schema(table.schema)
+    _validate_supported_schema(table.schema)
 
     buffer_infos: list[BufferInfo] = []
     field_nodes: list[tuple[int, int]] = []
@@ -326,10 +401,11 @@ def copy_arrow_table_to_arena(
         if chunk.offset != 0:
             chunk = pa.concat_arrays([chunk])
 
-        # Record field node info
-        field_nodes.append((len(chunk), chunk.null_count))
+        # Extract field nodes recursively (depth-first pre-order)
+        # This handles nested types like list<int32>, struct<x:int32, y:string>, etc.
+        _extract_field_nodes_recursive(chunk, field_nodes)
 
-        # Copy each buffer
+        # Copy each buffer (buffers() already returns flattened list for nested types)
         for buf in chunk.buffers():
             if buf is None:
                 # Null buffer (e.g., no validity bitmap when no nulls)

@@ -340,10 +340,9 @@ def test_get_arrow_data_chunked_roundtrip(client):
     arena.close()
 
 
-def test_nested_types_rejected(client):
-    """Test that nested Arrow types are rejected with clear error message."""
-    # Table with list column (nested type)
-    table_with_list = pa.table({
+def test_list_type_roundtrip(client):
+    """Test that list<int32> type is transferred correctly."""
+    table = pa.table({
         "id": pa.array([1, 2, 3], type=pa.int64()),
         "values": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32())),
     })
@@ -351,20 +350,26 @@ def test_nested_types_rejected(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
-        client.send_arrow_buffers(table_with_list, arena, schema_cache)
+    print(f"\nSending table with list column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
 
-    assert "nested types" in str(exc_info.value).lower()
-    assert "values" in str(exc_info.value)
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data
+    assert received_table.column("id").to_pylist() == [1, 2, 3]
+    assert received_table.column("values").to_pylist() == [[1, 2], [3, 4, 5], [6]]
 
     arena.close()
 
 
-def test_nested_struct_rejected(client):
-    """Test that struct type is rejected."""
-    # Table with struct column
+def test_struct_type_roundtrip(client):
+    """Test that struct type is transferred correctly."""
     struct_type = pa.struct([("x", pa.int32()), ("y", pa.int32())])
-    table_with_struct = pa.table({
+    table = pa.table({
         "id": pa.array([1, 2], type=pa.int64()),
         "point": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}], type=struct_type),
     })
@@ -372,19 +377,25 @@ def test_nested_struct_rejected(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
-        client.send_arrow_buffers(table_with_struct, arena, schema_cache)
+    print(f"\nSending table with struct column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
 
-    assert "nested types" in str(exc_info.value).lower()
-    assert "point" in str(exc_info.value)
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data
+    assert received_table.column("id").to_pylist() == [1, 2]
+    assert received_table.column("point").to_pylist() == [{"x": 1, "y": 2}, {"x": 3, "y": 4}]
 
     arena.close()
 
 
-def test_nested_map_rejected(client):
-    """Test that map type is rejected."""
-    # Table with map column
-    table_with_map = pa.table({
+def test_map_type_roundtrip(client):
+    """Test that map type is transferred correctly."""
+    table = pa.table({
         "id": pa.array([1, 2], type=pa.int64()),
         "attrs": pa.array([{"a": 1, "b": 2}, {"c": 3}], type=pa.map_(pa.string(), pa.int32())),
     })
@@ -392,11 +403,72 @@ def test_nested_map_rejected(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
-        client.send_arrow_buffers(table_with_map, arena, schema_cache)
+    print(f"\nSending table with map column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
 
-    assert "nested types" in str(exc_info.value).lower()
-    assert "attrs" in str(exc_info.value)
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data - maps may reorder keys, so convert to dict for comparison
+    orig_attrs = table.column("attrs").to_pylist()
+    recv_attrs = received_table.column("attrs").to_pylist()
+    for orig, recv in zip(orig_attrs, recv_attrs):
+        assert dict(orig) == dict(recv)
+
+    arena.close()
+
+
+def test_nested_list_of_structs_roundtrip(client):
+    """Test deeply nested type: list<struct<x:int32, y:string>>."""
+    inner_struct = pa.struct([("x", pa.int32()), ("y", pa.string())])
+    table = pa.table({
+        "id": pa.array([1, 2], type=pa.int64()),
+        "items": pa.array(
+            [[{"x": 1, "y": "a"}, {"x": 2, "y": "b"}], [{"x": 3, "y": "c"}]],
+            type=pa.list_(inner_struct),
+        ),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending table with list<struct> column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data
+    expected = [
+        [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}],
+        [{"x": 3, "y": "c"}],
+    ]
+    assert received_table.column("items").to_pylist() == expected
+
+    arena.close()
+
+
+def test_dictionary_type_rejected(client):
+    """Test that dictionary type is rejected (not yet supported)."""
+    # Dictionary encoding requires special handling
+    table = pa.table({
+        "id": pa.array([1, 2, 3], type=pa.int64()),
+        "category": pa.array(["a", "b", "a"]).dictionary_encode(),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    with pytest.raises(UnsupportedArrowTypeError) as exc_info:
+        client.send_arrow_buffers(table, arena, schema_cache)
+
+    assert "dictionary" in str(exc_info.value).lower()
 
     arena.close()
 

@@ -303,13 +303,16 @@ class ArrowTableView:
         return f"<ArrowTableView rows={self.num_rows} cols={self.num_columns} epoch={self._epoch} ({epoch_status})>"
 
 
-def _get_num_buffers_for_type(arrow_type: pa.DataType) -> int:
-    """Get the number of buffers used by an Arrow type.
+def _get_own_buffer_count(arrow_type: pa.DataType) -> int:
+    """Get the number of buffers owned directly by this Arrow type (not children).
 
-    Arrow types use different numbers of buffers:
+    Arrow types use different numbers of buffers for their own data:
     - Fixed-width primitives (int, float, bool): 2 (validity + data)
     - Variable-width (string, binary): 3 (validity + offsets + data)
     - Null type: 0 (no buffers)
+    - List types: 2 (validity + offsets) - child buffers are separate
+    - Struct types: 1 (validity only) - child buffers are separate
+    - Map types: 2 (validity + offsets) - child buffers are separate
 
     This is needed to correctly partition buffers when reconstructing arrays.
     """
@@ -326,18 +329,123 @@ def _get_num_buffers_for_type(arrow_type: pa.DataType) -> int:
     elif pa.types.is_fixed_size_binary(arrow_type):
         return 2  # validity + data
     elif pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-        return 2  # validity + offsets (child buffers handled separately)
+        return 2  # validity + offsets (child buffers handled via recursion)
     elif pa.types.is_fixed_size_list(arrow_type):
-        return 1  # validity only (child buffers handled separately)
+        return 1  # validity only (child buffers handled via recursion)
     elif pa.types.is_struct(arrow_type):
-        return 1  # validity only (child buffers handled separately)
+        return 1  # validity only (child buffers handled via recursion)
     elif pa.types.is_map(arrow_type):
-        return 2  # validity + offsets
+        return 2  # validity + offsets (child buffers handled via recursion)
+    elif pa.types.is_union(arrow_type):
+        if arrow_type.mode == "sparse":
+            return 1  # type_ids only
+        else:
+            return 2  # type_ids + offsets
     elif pa.types.is_dictionary(arrow_type):
         return 2  # validity + indices (dictionary handled separately)
     else:
         # Default assumption for unknown types
         return 2
+
+
+def _reconstruct_array_recursive(
+    arrow_type: pa.DataType,
+    buffers: list,
+    field_nodes: list[tuple[int, int]],
+    buffer_idx: int,
+    node_idx: int,
+) -> tuple[pa.Array, int, int]:
+    """Recursively reconstruct an Arrow array from buffers and field nodes.
+
+    This handles nested types by recursively building child arrays first,
+    then constructing the parent array with the children.
+
+    Args:
+        arrow_type: The Arrow data type to reconstruct
+        buffers: List of all PyArrow buffers (flattened)
+        field_nodes: List of (length, null_count) tuples
+        buffer_idx: Current position in buffers list
+        node_idx: Current position in field_nodes list
+
+    Returns:
+        Tuple of (reconstructed array, next buffer index, next node index)
+    """
+    # Get this array's field node
+    length, null_count = field_nodes[node_idx]
+    node_idx += 1
+
+    # Get this type's own buffers
+    own_buffer_count = _get_own_buffer_count(arrow_type)
+    own_buffers = buffers[buffer_idx : buffer_idx + own_buffer_count]
+    buffer_idx += own_buffer_count
+
+    # Handle nested types by recursively building children
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        # List has one child: the values array
+        value_type = arrow_type.value_type
+        child_array, buffer_idx, node_idx = _reconstruct_array_recursive(
+            value_type, buffers, field_nodes, buffer_idx, node_idx
+        )
+        arr = pa.Array.from_buffers(
+            arrow_type, length, own_buffers, null_count, children=[child_array]
+        )
+
+    elif pa.types.is_fixed_size_list(arrow_type):
+        # Fixed-size list has one child: the values array
+        value_type = arrow_type.value_type
+        child_array, buffer_idx, node_idx = _reconstruct_array_recursive(
+            value_type, buffers, field_nodes, buffer_idx, node_idx
+        )
+        arr = pa.Array.from_buffers(
+            arrow_type, length, own_buffers, null_count, children=[child_array]
+        )
+
+    elif pa.types.is_struct(arrow_type):
+        # Struct has multiple children: one per field
+        children = []
+        for i in range(arrow_type.num_fields):
+            field = arrow_type.field(i)
+            child_array, buffer_idx, node_idx = _reconstruct_array_recursive(
+                field.type, buffers, field_nodes, buffer_idx, node_idx
+            )
+            children.append(child_array)
+        arr = pa.Array.from_buffers(
+            arrow_type, length, own_buffers, null_count, children=children
+        )
+
+    elif pa.types.is_map(arrow_type):
+        # Map is internally list<struct<key, value>>
+        # We need to reconstruct the struct child which contains key and value
+        # The struct type is struct<key: key_type, value: item_type>
+        struct_type = pa.struct([
+            pa.field("key", arrow_type.key_type, nullable=False),
+            pa.field("value", arrow_type.item_type),
+        ])
+        struct_array, buffer_idx, node_idx = _reconstruct_array_recursive(
+            struct_type, buffers, field_nodes, buffer_idx, node_idx
+        )
+        arr = pa.Array.from_buffers(
+            arrow_type, length, own_buffers, null_count, children=[struct_array]
+        )
+
+    elif pa.types.is_union(arrow_type):
+        # Union has multiple children: one per type code
+        children = []
+        for i in range(arrow_type.num_fields):
+            field = arrow_type.field(i)
+            child_array, buffer_idx, node_idx = _reconstruct_array_recursive(
+                field.type, buffers, field_nodes, buffer_idx, node_idx
+            )
+            children.append(child_array)
+        arr = pa.Array.from_buffers(
+            arrow_type, length, own_buffers, null_count, children=children
+        )
+
+    else:
+        # Primitive type (no children)
+        arr = pa.Array.from_buffers(arrow_type, length, own_buffers, null_count)
+
+    return arr, buffer_idx, node_idx
 
 
 class JavaObject:
@@ -832,12 +940,11 @@ class GatunClient:
         Returns:
             ArrowTableView wrapping the reconstructed table with epoch validation
         """
-        from gatun.arena import deserialize_schema, _validate_flat_schema
+        from gatun.arena import deserialize_schema, _validate_supported_schema
 
         import ctypes
 
         schema_hash = arrow_batch.SchemaHash()
-        num_rows = arrow_batch.NumRows()
         arena_epoch = arrow_batch.ArenaEpoch()
 
         # Update client's epoch to match Java's
@@ -853,8 +960,8 @@ class GatunClient:
                 )
             schema_bytes = bytes(arrow_batch.SchemaBytesAsNumpy())
             schema = deserialize_schema(schema_bytes)
-            # Validate schema doesn't contain nested types (not yet supported)
-            _validate_flat_schema(schema)
+            # Validate schema doesn't contain unsupported types (e.g., dictionary)
+            _validate_supported_schema(schema)
             self._arrow_schema_cache[schema_hash] = schema
 
         # Get base address of payload zone in shared memory
@@ -883,21 +990,15 @@ class GatunClient:
             node = arrow_batch.Nodes(i)
             field_nodes.append((node.Length(), node.NullCount()))
 
-        # Reconstruct arrays from buffers using schema
+        # Reconstruct arrays from buffers using schema (handles nested types recursively)
         arrays = []
         buffer_idx = 0
+        node_idx = 0
 
-        for i, field in enumerate(schema):
-            # Number of buffers per type varies
-            num_buffers = _get_num_buffers_for_type(field.type)
-            field_buffers = buffers[buffer_idx : buffer_idx + num_buffers]
-            buffer_idx += num_buffers
-
-            # Get field node for this field
-            length, null_count = field_nodes[i] if i < len(field_nodes) else (num_rows, 0)
-
-            # Reconstruct the array
-            arr = pa.Array.from_buffers(field.type, length, field_buffers, null_count)
+        for field in schema:
+            arr, buffer_idx, node_idx = _reconstruct_array_recursive(
+                field.type, buffers, field_nodes, buffer_idx, node_idx
+            )
             arrays.append(arr)
 
         # Build table from arrays and wrap in epoch-validating view
