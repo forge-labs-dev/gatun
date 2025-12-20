@@ -614,7 +614,7 @@ public class GatunServer {
     if (valType == Value.StringVal) {
       StringVal sv = (StringVal) arg.val(new StringVal());
       value = sv.v();
-      type = Object.class; // Use Object for flexibility with overloaded methods
+      type = String.class; // Use String for better overload resolution
     } else if (valType == Value.IntVal) {
       IntVal iv = (IntVal) arg.val(new IntVal());
       value = (int) iv.v(); // Convert long to int for common Java APIs
@@ -772,15 +772,24 @@ public class GatunServer {
       // Check for exact parameter count match (non-varargs only)
       if (!m.isVarArgs() && paramTypes.length == argTypes.length) {
         boolean match = true;
+        int specificity = 0; // Higher = more specific type matches
         for (int i = 0; i < paramTypes.length; i++) {
           if (!isAssignable(paramTypes[i], argTypes[i])) {
             match = false;
             break;
           }
+          // Score specificity: exact type match gets 10 points, Object param gets 0
+          if (paramTypes[i] == argTypes[i]) {
+            specificity += 10;
+          } else if (paramTypes[i] != Object.class && paramTypes[i].isAssignableFrom(argTypes[i])) {
+            // Specific type that accepts our arg gets 5 points
+            specificity += 5;
+          }
+          // Object.class as param type gets 0 points (least specific)
         }
         if (match) {
-          // Score: prefer non-varargs (score = 1000), then by specificity
-          int score = 1000;
+          // Score: base 1000 for non-varargs, plus specificity bonus
+          int score = 1000 + specificity;
           if (bestScore < score) {
             bestMatch = m;
             bestArgs = args;
@@ -878,7 +887,11 @@ public class GatunServer {
       // Fall through to search
     }
 
-    // Search for compatible constructor (handles Object params, boxing, varargs, etc.)
+    // Search for compatible constructor with specificity scoring
+    java.lang.reflect.Constructor<?> bestMatch = null;
+    Object[] bestArgs = null;
+    int bestScore = Integer.MIN_VALUE;
+
     for (java.lang.reflect.Constructor<?> c : clazz.getConstructors()) {
       Class<?>[] paramTypes = c.getParameterTypes();
 
@@ -886,7 +899,12 @@ public class GatunServer {
       if (c.isVarArgs() && argTypes.length >= paramTypes.length - 1) {
         Object[] result = tryVarargsMatch(paramTypes, argTypes, args);
         if (result != null) {
-          return new Object[] {c, result};
+          int score = 100; // Varargs gets lower priority
+          if (bestScore < score) {
+            bestMatch = c;
+            bestArgs = result;
+            bestScore = score;
+          }
         }
       }
 
@@ -894,13 +912,31 @@ public class GatunServer {
       if (paramTypes.length != argTypes.length) continue;
 
       boolean match = true;
+      int specificity = 0;
       for (int i = 0; i < paramTypes.length; i++) {
         if (!isAssignable(paramTypes[i], argTypes[i])) {
           match = false;
           break;
         }
+        // Score specificity: exact type match gets 10 points
+        if (paramTypes[i] == argTypes[i]) {
+          specificity += 10;
+        } else if (paramTypes[i] != Object.class && paramTypes[i].isAssignableFrom(argTypes[i])) {
+          specificity += 5;
+        }
       }
-      if (match) return new Object[] {c, args};
+      if (match) {
+        int score = 1000 + specificity;
+        if (bestScore < score) {
+          bestMatch = c;
+          bestArgs = args;
+          bestScore = score;
+        }
+      }
+    }
+
+    if (bestMatch != null) {
+      return new Object[] {bestMatch, bestArgs};
     }
 
     throw new NoSuchMethodException(

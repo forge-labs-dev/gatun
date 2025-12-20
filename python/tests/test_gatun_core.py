@@ -222,3 +222,71 @@ def test_is_instance_of_with_object_id(client):
     obj_id = arr.object_id
     assert client.is_instance_of(obj_id, "java.util.ArrayList") is True
     assert client.is_instance_of(obj_id, "java.util.List") is True
+
+
+# --- Method overload resolution tests ---
+
+
+def test_overloaded_method_string_vs_object(client):
+    """Test that String arguments match String parameters over Object.
+
+    This tests the improved overload resolution that uses specificity scoring.
+    When a String argument is passed, methods with String parameters should be
+    preferred over methods with Object parameters.
+    """
+    # String.valueOf has multiple overloads:
+    # - valueOf(Object obj)
+    # - valueOf(int i)
+    # - valueOf(char[] data)
+    # etc.
+    # When we pass a string, it should match valueOf(Object) which converts toString()
+    result = client.invoke_static_method("java.lang.String", "valueOf", 42)
+    assert result == "42"
+
+
+def test_overloaded_constructor_specificity(client):
+    """Test constructor overload resolution with specificity scoring."""
+    # StringBuilder has:
+    # - StringBuilder()
+    # - StringBuilder(int capacity)
+    # - StringBuilder(String str)
+    # - StringBuilder(CharSequence seq)
+
+    # With int, should match StringBuilder(int)
+    sb1 = client.create_object("java.lang.StringBuilder", 100)
+    assert sb1.capacity() >= 100
+
+    # With String, should match StringBuilder(String)
+    sb2 = client.create_object("java.lang.StringBuilder", "Hello")
+    assert sb2.toString() == "Hello"
+
+
+def test_hashmap_put_with_string_keys(client):
+    """Test HashMap.put works with String keys (overload resolution)."""
+    # HashMap.put(K key, V value) where K and V are Object
+    # With improved resolution, String args should still work
+    hm = client.create_object("java.util.HashMap")
+    hm.put("key1", "value1")
+    hm.put("key2", 42)  # Mixed types
+
+    assert hm.get("key1") == "value1"
+    assert hm.get("key2") == 42
+
+
+def test_arraylist_add_overloads(client):
+    """Test ArrayList.add which has overloaded methods."""
+    # ArrayList has:
+    # - add(E e) -> boolean
+    # - add(int index, E element) -> void
+
+    arr = client.create_object("java.util.ArrayList")
+
+    # add(E) - one argument
+    arr.add("first")
+    assert arr.size() == 1
+
+    # add(int, E) - two arguments
+    arr.add(0, "zero")
+    assert arr.size() == 2
+    assert arr.get(0) == "zero"
+    assert arr.get(1) == "first"

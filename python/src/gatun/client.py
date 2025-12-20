@@ -602,26 +602,33 @@ class _JVMNode:
     - Called with no args or object args -> constructor
     - Called after method-like access -> static method
 
-    We detect method calls by checking if the name looks like a method (starts lowercase)
-    vs a class (starts uppercase). This is a heuristic based on Java naming conventions.
+    Method detection uses a heuristic: if the current path segment looks like a class
+    (starts uppercase) and we're accessing an attribute, treat it as a static method.
+    This handles both camelCase methods like `parseInt` and SCREAMING_CASE methods
+    like `INT()` commonly used in Scala APIs (e.g., Encoders.INT()).
     """
 
-    def __init__(self, client, path, is_method=False):
+    def __init__(self, client, path, parent_looks_like_class=False):
         self._client = client
         self._path = path
-        self._is_method = is_method
+        # If parent looks like a class, this node is likely a static method/field
+        self._parent_looks_like_class = parent_looks_like_class
 
     def __getattr__(self, name):
         """Navigate deeper or access static method."""
         new_path = f"{self._path}.{name}"
-        # Heuristic: if name starts with lowercase, it's likely a method
-        is_method = name[0].islower() if name else False
-        return _JVMNode(self._client, new_path, is_method=is_method)
+        # Get the last segment of the current path to check if it looks like a class
+        last_segment = self._path.rsplit(".", 1)[-1] if "." in self._path else self._path
+        # If current segment starts with uppercase, it likely is a class
+        # so the accessed attribute is likely a static method/field
+        parent_looks_like_class = last_segment and last_segment[0].isupper()
+        return _JVMNode(self._client, new_path, parent_looks_like_class=parent_looks_like_class)
 
     def __call__(self, *args):
         """Instantiate as a class or invoke as a static method."""
-        if self._is_method:
+        if self._parent_looks_like_class:
             # This is a static method call: java.lang.Integer.parseInt("42")
+            # or Encoders.INT() - the parent segment looks like a class name
             # Split path into class and method
             last_dot = self._path.rfind(".")
             if last_dot == -1:

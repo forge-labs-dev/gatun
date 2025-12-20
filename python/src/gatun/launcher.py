@@ -1,7 +1,9 @@
 import atexit
 import logging
 import os
+import secrets
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -42,6 +44,14 @@ class GatunSession:
                 self.process.kill()
             self.process = None
 
+        # Clean up socket and shared memory files
+        for path in [self.socket_path, f"{self.socket_path}.shm"]:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                pass  # Ignore cleanup errors
+
 
 def launch_gateway(
     memory: str | None = None,
@@ -53,14 +63,15 @@ def launch_gateway(
 
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
-        socket_path: Path to the Unix socket. Defaults to config value or ~/gatun.sock.
+        socket_path: Path to the Unix socket. If not specified, generates a unique
+                     path in the system temp directory to allow concurrent sessions.
         classpath: Additional JAR files or directories to add to the classpath.
                    This allows loading external classes (e.g., Spark JARs).
 
     Configuration can be set in pyproject.toml:
         [tool.gatun]
         memory = "64MB"
-        socket_path = "/tmp/gatun.sock"
+        socket_path = "/tmp/gatun.sock"  # Optional: fixed path for single session
         jvm_flags = ["-Xmx512m"]
     """
     config = get_config()
@@ -80,9 +91,15 @@ def launch_gateway(
     else:
         mem_bytes = int(size_str)  # Assume bytes
 
-    # 2. Setup Paths
+    # 2. Setup Paths - use random temp file if not specified
     if socket_path is None:
-        socket_path = config.socket_path or os.path.expanduser("~/gatun.sock")
+        socket_path = config.socket_path
+    if socket_path is None:
+        # Generate unique socket path to allow multiple concurrent sessions
+        random_suffix = secrets.token_hex(8)
+        socket_path = os.path.join(
+            tempfile.gettempdir(), f"gatun_{os.getpid()}_{random_suffix}.sock"
+        )
 
     # 3. Construct Command with config JVM flags
     jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags

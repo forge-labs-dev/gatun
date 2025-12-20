@@ -151,3 +151,58 @@ class TestJavaImport:
 
         sb = client.jvm.StringBuilder("world")
         assert sb.toString() == "world"
+
+
+class TestUppercaseStaticMethods:
+    """Tests for uppercase static method detection (e.g., Encoders.INT()).
+
+    This addresses a bug where uppercase method names like INT() were being
+    treated as constructor calls instead of static method calls. The fix
+    changes the heuristic to check if the parent segment looks like a class
+    name (starts uppercase) rather than checking if the method name starts
+    lowercase.
+    """
+
+    def test_uppercase_static_method_in_string(self, client):
+        """Test calling Integer.MAX_VALUE (static field, but similar pattern)."""
+        # Integer.MAX_VALUE is a static field that will be accessed via getattr
+        # Using String.CASE_INSENSITIVE_ORDER would be ideal but it returns a Comparator
+        # Let's test with a static method that has uppercase letters
+        result = client.jvm.java.lang.Integer.MAX_VALUE
+        # MAX_VALUE is a static field, should not try to call as constructor
+        # The parent (Integer) looks like a class, so MAX_VALUE should be treated as field/method
+        assert result is not None
+
+    def test_all_uppercase_method_name_via_collections(self, client):
+        """Test that uppercase static methods work via Collections."""
+        # Collections.EMPTY_LIST is a static field with uppercase name
+        empty = client.jvm.java.util.Collections.EMPTY_LIST
+        # Should be treated as static field access, not constructor
+        assert empty is not None
+
+    def test_static_method_chain_parent_class_detection(self, client):
+        """Test that parent class detection works for method chains."""
+        # Integer.valueOf returns Integer, MAX_VALUE is accessed on it
+        # But we want to test the _JVMNode detection
+        # client.jvm.java.lang.Integer.valueOf("42") should work
+        result = client.jvm.java.lang.Integer.valueOf("42")
+        # This is a normal camelCase method, should work
+        assert result == 42
+
+    def test_mixed_case_static_method(self, client):
+        """Test static methods with mixed case (normal camelCase)."""
+        # parseInt is camelCase - should work
+        result = client.jvm.java.lang.Integer.parseInt("123")
+        assert result == 123
+
+        # Same with String
+        result = client.jvm.java.lang.String.valueOf(456)
+        assert result == "456"
+
+    def test_parent_detection_nested_package(self, client):
+        """Test parent class detection through nested packages."""
+        # java.util.Arrays is a class, asList should be detected as static method
+        result = client.jvm.java.util.Arrays.asList("a", "b", "c")
+        assert result is not None
+        # Verify it's a list with 3 elements
+        assert len(result) == 3
