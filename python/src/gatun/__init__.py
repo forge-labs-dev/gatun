@@ -19,6 +19,8 @@ from gatun.client import (
     JavaNumberFormatException,
     JavaRuntimeException,
     CancelledException,
+    StaleArenaError,
+    ArrowTableView,
 )
 from gatun.async_client import (
     AsyncGatunClient,
@@ -71,6 +73,8 @@ __all__ = [
     # Arrow zero-copy
     "PayloadArena",
     "UnsupportedArrowTypeError",
+    "StaleArenaError",
+    "ArrowTableView",
 ]
 
 

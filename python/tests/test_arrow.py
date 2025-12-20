@@ -4,7 +4,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from gatun import PayloadArena, UnsupportedArrowTypeError
+from gatun import PayloadArena, UnsupportedArrowTypeError, StaleArenaError
 
 
 def test_send_pyarrow_table(client):
@@ -397,5 +397,77 @@ def test_nested_map_rejected(client):
 
     assert "nested types" in str(exc_info.value).lower()
     assert "attrs" in str(exc_info.value)
+
+    arena.close()
+
+
+def test_stale_arena_error(client):
+    """Test that StaleArenaError is raised when accessing data after arena reset."""
+
+    # 1. Send data and get it back
+    original_table = pa.table({
+        "id": pa.array([1, 2, 3], type=pa.int64()),
+        "value": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    client.send_arrow_buffers(original_table, arena, schema_cache)
+    table_view = client.get_arrow_data()
+
+    # 2. Verify we can access data before reset
+    assert table_view.num_rows == 3
+    assert table_view.column("id").to_pylist() == [1, 2, 3]
+
+    # 3. Copy data before reset (safe pattern)
+    safe_data = table_view.to_pydict()
+    assert safe_data["id"] == [1, 2, 3]
+
+    # 4. Reset the arena
+    arena.reset()
+    client.reset_payload_arena()
+
+    # 5. Verify StaleArenaError is raised when accessing data after reset
+    with pytest.raises(StaleArenaError) as exc_info:
+        table_view.column("id")
+
+    assert "stale" in str(exc_info.value).lower()
+    assert "epoch" in str(exc_info.value).lower()
+
+    # 6. Safe metadata access still works
+    assert table_view.num_rows == 3  # num_rows doesn't touch buffer data
+    assert table_view.schema == original_table.schema
+
+    # 7. Safe data copy still works (was done before reset)
+    assert safe_data["value"] == [10.0, 20.0, 30.0]
+
+    arena.close()
+
+
+def test_arrow_table_view_repr(client):
+    """Test ArrowTableView repr shows epoch status."""
+
+    original_table = pa.table({
+        "x": pa.array([1, 2], type=pa.int64()),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    client.send_arrow_buffers(original_table, arena, schema_cache)
+    table_view = client.get_arrow_data()
+
+    # Before reset: should show "valid"
+    repr_before = repr(table_view)
+    assert "valid" in repr_before
+    assert "rows=2" in repr_before
+
+    # After reset: should show "STALE"
+    arena.reset()
+    client.reset_payload_arena()
+
+    repr_after = repr(table_view)
+    assert "STALE" in repr_after
 
     arena.close()

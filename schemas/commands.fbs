@@ -125,6 +125,11 @@ table ArrowBatchDescriptor {
 
   // Buffer locations in payload shm
   buffers: [BufferDescriptor];
+
+  // Arena epoch for lifetime safety
+  // Incremented on each reset_payload_arena() call
+  // Tables with stale epoch are invalid after arena reset
+  arena_epoch: uint64;
 }
 
 // Request from Python -> Java

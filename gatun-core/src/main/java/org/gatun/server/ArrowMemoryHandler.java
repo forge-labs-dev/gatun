@@ -53,8 +53,18 @@ public class ArrowMemoryHandler {
   // VectorLoader for efficient batch loading
   private VectorLoader vectorLoader = null;
 
+  // Arena epoch for lifetime safety - incremented on each reset
+  private long arenaEpoch = 0;
+
   public ArrowMemoryHandler(BufferAllocator allocator) {
     this.allocator = allocator;
+  }
+
+  /**
+   * Get the current arena epoch.
+   */
+  public long getArenaEpoch() {
+    return arenaEpoch;
   }
 
   /**
@@ -287,8 +297,10 @@ public class ArrowMemoryHandler {
       currentRoot = null;
     }
     vectorLoader = null;
+    // Increment epoch to invalidate any tables referencing old buffers
+    arenaEpoch++;
     // Note: We keep the schema cache since schemas are typically stable
-    LOG.fine("Arrow memory handler reset");
+    LOG.fine("Arrow memory handler reset, epoch now " + arenaEpoch);
   }
 
   /**
@@ -326,16 +338,18 @@ public class ArrowMemoryHandler {
     public final List<long[]> bufferDescriptors;  // List of [offset, length]
     public final List<long[]> fieldNodes;         // List of [length, nullCount]
     public final long totalBytesWritten;
+    public final long arenaEpoch;  // Epoch for lifetime safety
 
     ArrowWriteResult(long schemaHash, byte[] schemaBytes, long numRows,
                      List<long[]> bufferDescriptors, List<long[]> fieldNodes,
-                     long totalBytesWritten) {
+                     long totalBytesWritten, long arenaEpoch) {
       this.schemaHash = schemaHash;
       this.schemaBytes = schemaBytes;
       this.numRows = numRows;
       this.bufferDescriptors = bufferDescriptors;
       this.fieldNodes = fieldNodes;
       this.totalBytesWritten = totalBytesWritten;
+      this.arenaEpoch = arenaEpoch;
     }
   }
 
@@ -416,7 +430,8 @@ public class ArrowMemoryHandler {
           root.getRowCount(),
           bufferDescriptors,
           fieldNodes,
-          currentOffset
+          currentOffset,
+          arenaEpoch
       );
     } finally {
       recordBatch.close();

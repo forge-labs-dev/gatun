@@ -212,6 +212,97 @@ def _recv_exactly(sock, n):
     return bytes(data)
 
 
+class StaleArenaError(RuntimeError):
+    """Raised when accessing Arrow data from a stale arena epoch.
+
+    This error occurs when trying to use a table returned from get_arrow_data()
+    after reset_payload_arena() has been called. The underlying shared memory
+    buffers may have been overwritten.
+    """
+
+    def __init__(self, table_epoch: int, current_epoch: int):
+        super().__init__(
+            f"Arrow table from epoch {table_epoch} is stale (current epoch: {current_epoch}). "
+            f"Tables become invalid after reset_payload_arena() is called."
+        )
+        self.table_epoch = table_epoch
+        self.current_epoch = current_epoch
+
+
+class ArrowTableView:
+    """A wrapper around pa.Table that validates arena epoch on access.
+
+    Tables returned from get_arrow_data() are backed by shared memory that
+    can be overwritten after reset_payload_arena(). This wrapper tracks the
+    epoch when the table was created and raises StaleArenaError if accessed
+    after the arena has been reset.
+
+    For most use cases, immediately copy the data you need from the table
+    or call table.to_pandas() / table.to_pydict() before resetting the arena.
+    """
+
+    def __init__(self, table: pa.Table, epoch: int, client: "GatunClient"):
+        self._table = table
+        self._epoch = epoch
+        self._client = client
+
+    def _check_epoch(self):
+        """Raise StaleArenaError if epoch has changed."""
+        current = self._client._arena_epoch
+        if self._epoch != current:
+            raise StaleArenaError(self._epoch, current)
+
+    @property
+    def table(self) -> pa.Table:
+        """Get the underlying table, validating epoch first."""
+        self._check_epoch()
+        return self._table
+
+    def to_pandas(self, **kwargs):
+        """Convert to pandas DataFrame (copies data, safe after reset)."""
+        self._check_epoch()
+        return self._table.to_pandas(**kwargs)
+
+    def to_pydict(self):
+        """Convert to Python dict (copies data, safe after reset)."""
+        self._check_epoch()
+        return self._table.to_pydict()
+
+    def to_pylist(self):
+        """Convert to list of dicts (copies data, safe after reset)."""
+        self._check_epoch()
+        return self._table.to_pylist()
+
+    @property
+    def num_rows(self) -> int:
+        """Get row count (safe, doesn't access buffer data)."""
+        return self._table.num_rows
+
+    @property
+    def num_columns(self) -> int:
+        """Get column count (safe, doesn't access buffer data)."""
+        return self._table.num_columns
+
+    @property
+    def schema(self) -> pa.Schema:
+        """Get schema (safe, doesn't access buffer data)."""
+        return self._table.schema
+
+    @property
+    def column_names(self) -> list[str]:
+        """Get column names (safe, doesn't access buffer data)."""
+        return self._table.column_names
+
+    def column(self, name: str):
+        """Get a column by name."""
+        self._check_epoch()
+        return self._table.column(name)
+
+    def __repr__(self):
+        epoch_status = "valid" if self._epoch == self._client._arena_epoch else "STALE"
+        return f"<ArrowTableView rows={self.num_rows} cols={self.num_columns} epoch={self._epoch} ({epoch_status})>"
+
+
 def _get_num_buffers_for_type(arrow_type: pa.DataType) -> int:
     """Get the number of buffers used by an Arrow type.
 
@@ -465,6 +556,9 @@ class GatunClient:
 
         # Arrow schema cache for Java -> Python transfers: hash -> Schema
         self._arrow_schema_cache: dict[int, pa.Schema] = {}
+
+        # Arena epoch for lifetime safety - tracks current valid epoch
+        self._arena_epoch: int = 0
 
     @property
     def jvm(self):
@@ -723,17 +817,20 @@ class GatunClient:
         except Exception as e:
             self._send_callback_response(callback_id, None, True, str(e))
 
-    def _unpack_arrow_batch(self, arrow_batch) -> pa.Table:
-        """Unpack an ArrowBatchDescriptor from Java into a PyArrow Table.
+    def _unpack_arrow_batch(self, arrow_batch) -> ArrowTableView:
+        """Unpack an ArrowBatchDescriptor from Java into an ArrowTableView.
 
         This reconstructs an Arrow table from buffer descriptors in the payload
         shared memory zone. The buffers are wrapped as zero-copy PyArrow buffers.
+
+        The returned ArrowTableView wraps the table and validates the arena epoch
+        on access, preventing use of stale data after reset_payload_arena().
 
         Args:
             arrow_batch: ArrowBatchDescriptor FlatBuffer object
 
         Returns:
-            PyArrow Table reconstructed from the buffer descriptors
+            ArrowTableView wrapping the reconstructed table with epoch validation
         """
         from gatun.arena import deserialize_schema, _validate_flat_schema
 
@@ -741,6 +838,10 @@ class GatunClient:
 
         schema_hash = arrow_batch.SchemaHash()
         num_rows = arrow_batch.NumRows()
+        arena_epoch = arrow_batch.ArenaEpoch()
+
+        # Update client's epoch to match Java's
+        self._arena_epoch = arena_epoch
 
         # Get or deserialize schema
         schema = self._arrow_schema_cache.get(schema_hash)
@@ -799,8 +900,9 @@ class GatunClient:
             arr = pa.Array.from_buffers(field.type, length, field_buffers, null_count)
             arrays.append(arr)
 
-        # Build table from arrays
-        return pa.Table.from_arrays(arrays, schema=schema)
+        # Build table from arrays and wrap in epoch-validating view
+        table = pa.Table.from_arrays(arrays, schema=schema)
+        return ArrowTableView(table, arena_epoch, self)
 
     def _send_callback_response(
         self, callback_id: int, result, is_error: bool, error_msg: str | None
@@ -1537,7 +1639,14 @@ class GatunClient:
 
         Call this after resetting the Python PayloadArena to ensure Java
         releases any references to the old buffer contents.
+
+        WARNING: After calling this, any ArrowTableView objects from previous
+        get_arrow_data() calls become invalid. Accessing them will raise
+        StaleArenaError. Copy the data you need before resetting.
         """
+        # Increment epoch to invalidate any outstanding ArrowTableView objects
+        self._arena_epoch += 1
+
         builder = flatbuffers.Builder(64)
 
         Cmd.CommandStart(builder)
@@ -1547,7 +1656,7 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
-    def get_arrow_data(self) -> pa.Table:
+    def get_arrow_data(self) -> ArrowTableView:
         """Retrieve Arrow data from Java via zero-copy transfer.
 
         This method requests the current Arrow data held by the Java server
@@ -1556,17 +1665,33 @@ class GatunClient:
         descriptors back, which are used to reconstruct the table in Python.
 
         Returns:
-            PyArrow Table containing the data from Java.
+            ArrowTableView wrapping the reconstructed table. The view validates
+            the arena epoch on access - if reset_payload_arena() is called after
+            receiving this table, accessing data will raise StaleArenaError.
+
+            To safely use data after reset, copy it first:
+            - table_view.to_pandas() -> pandas DataFrame
+            - table_view.to_pydict() -> Python dict
+            - table_view.to_pylist() -> list of dicts
 
         Raises:
             RuntimeError: If no Arrow data is available on the Java side.
+            StaleArenaError: If accessing data after reset_payload_arena().
 
         Example:
             # Send data to Java
             client.send_arrow_buffers(table, arena, schema_cache)
 
             # Get it back (useful for testing or round-trip operations)
-            table_from_java = client.get_arrow_data()
+            table_view = client.get_arrow_data()
+
+            # Safe: copy data before resetting
+            data = table_view.to_pydict()
+            arena.reset()
+            client.reset_payload_arena()
+
+            # Unsafe: would raise StaleArenaError after reset
+            # table_view.column("x")  # Don't do this!
         """
         builder = flatbuffers.Builder(64)
 

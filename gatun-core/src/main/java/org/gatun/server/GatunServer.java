@@ -1316,6 +1316,7 @@ public class GatunServer {
     ArrowBatchDescriptor.addNumRows(builder, result.numRows);
     ArrowBatchDescriptor.addNodes(builder, nodesVec);
     ArrowBatchDescriptor.addBuffers(builder, buffersVec);
+    ArrowBatchDescriptor.addArenaEpoch(builder, result.arenaEpoch);
     int batchDescOffset = ArrowBatchDescriptor.endArrowBatchDescriptor(builder);
 
     // Build Response with arrow_batch
