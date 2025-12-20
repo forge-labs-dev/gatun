@@ -191,11 +191,11 @@ public class GatunServer {
     try (client) {
 
       // --- HANDSHAKE: Send Protocol Version and Memory Size to Client ---
-      // Format: [4 bytes: version] [4 bytes: reserved] [8 bytes: memory size]
+      // Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
       ByteBuffer handshakeBuf = ByteBuffer.allocate(16);
       handshakeBuf.order(ByteOrder.LITTLE_ENDIAN);
       handshakeBuf.putInt(PROTOCOL_VERSION);
-      handshakeBuf.putInt(0); // Reserved for future use
+      handshakeBuf.putInt((int) arrowHandler.getArenaEpoch()); // Current epoch for synchronization
       handshakeBuf.putLong(this.memorySize);
       handshakeBuf.flip();
 

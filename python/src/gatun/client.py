@@ -704,10 +704,12 @@ class GatunClient:
             self.sock.connect(self.socket_path)
             self.sock.settimeout(5.0)
 
-            # 1. Handshake - read version and memory size
-            # Format: [4 bytes: version] [4 bytes: reserved] [8 bytes: memory size]
+            # 1. Handshake - read version, epoch, and memory size
+            # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
             handshake_data = _recv_exactly(self.sock, 16)
-            server_version, _, self.memory_size = struct.unpack("<IIQ", handshake_data)
+            server_version, arena_epoch, self.memory_size = struct.unpack(
+                "<IIQ", handshake_data
+            )
 
             # Verify protocol version
             if server_version != PROTOCOL_VERSION:
@@ -715,6 +717,9 @@ class GatunClient:
                     f"Protocol version mismatch: client={PROTOCOL_VERSION}, "
                     f"server={server_version}. Please update your client or server."
                 )
+
+            # Synchronize arena epoch with server
+            self._arena_epoch = arena_epoch
 
             # 2. Configure Offsets
             self.response_offset = self.memory_size - 4096
@@ -962,10 +967,12 @@ class GatunClient:
         import ctypes
 
         schema_hash = arrow_batch.SchemaHash()
-        arena_epoch = arrow_batch.ArenaEpoch()
+        descriptor_epoch = arrow_batch.ArenaEpoch()
 
-        # Update client's epoch to match Java's
-        self._arena_epoch = arena_epoch
+        # Validate epoch to prevent use-after-reset corruption
+        # Python and Java epochs should be synchronized via reset_payload_arena()
+        if descriptor_epoch != self._arena_epoch:
+            raise StaleArenaError(descriptor_epoch, self._arena_epoch)
 
         # Get or deserialize schema
         schema = self._arrow_schema_cache.get(schema_hash)
@@ -1020,7 +1027,7 @@ class GatunClient:
 
         # Build table from arrays and wrap in epoch-validating view
         table = pa.Table.from_arrays(arrays, schema=schema)
-        return ArrowTableView(table, arena_epoch, self)
+        return ArrowTableView(table, descriptor_epoch, self)
 
     def _send_callback_response(
         self, callback_id: int, result, is_error: bool, error_msg: str | None
@@ -1793,6 +1800,7 @@ class GatunClient:
         ArrowBatchDescriptor.AddNumRows(builder, table.num_rows)
         ArrowBatchDescriptor.AddNodes(builder, nodes_vec)
         ArrowBatchDescriptor.AddBuffers(builder, buffers_vec)
+        ArrowBatchDescriptor.AddArenaEpoch(builder, self._arena_epoch)
         batch_descriptor = ArrowBatchDescriptor.End(builder)
 
         # Build Command

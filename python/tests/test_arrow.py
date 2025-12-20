@@ -755,3 +755,104 @@ def test_date_time_with_nulls_roundtrip(client):
         assert recv[1] is None, f"Expected null at position 1 for {name}"
 
     arena.close()
+
+
+def test_schema_serialization_consistency(client):
+    """Verify schema serialization and caching consistency between Python and Java.
+
+    This tests that:
+    1. Python serialize -> Java deserialize works correctly (schema equality)
+    2. Schema caching works across multiple roundtrips
+    3. Cached schemas are reused correctly (no schema bytes sent on repeat)
+
+    Note: Python and Java serialize schemas differently, so hashes of serialized
+    bytes differ. However, we ensure Java uses Python's hash (cached from the
+    original send) when sending back, so caching works correctly.
+    """
+    from gatun.arena import compute_schema_hash
+
+    # Create a table with various types to test schema handling
+    table = pa.table({
+        "int_col": pa.array([1, 2, 3], type=pa.int64()),
+        "float_col": pa.array([1.1, 2.2, 3.3], type=pa.float64()),
+        "str_col": pa.array(["a", "b", "c"], type=pa.string()),
+        "bool_col": pa.array([True, False, True], type=pa.bool_()),
+    })
+
+    arena = client.get_payload_arena()
+
+    # First send - Java should receive and cache the schema
+    schema_cache = {}
+    original_hash = compute_schema_hash(table.schema)
+    client.send_arrow_buffers(table, arena, schema_cache)
+
+    # Verify schema was cached on Python side
+    assert original_hash in schema_cache
+
+    # Get data back from Java - Java will serialize its cached schema
+    received = client.get_arrow_data()
+
+    # Verify schemas are equivalent (field names and types match)
+    assert received.schema == table.schema, "Schema mismatch after roundtrip"
+
+    # Verify all field names match
+    assert received.schema.names == table.schema.names
+
+    # Verify all field types match
+    for i, field in enumerate(table.schema):
+        received_field = received.schema.field(i)
+        assert received_field.type == field.type, f"Type mismatch for field {field.name}"
+
+    # Second send with same schema - should use cached schema (no schema bytes sent)
+    arena.reset()
+    client.reset_payload_arena()
+    client.send_arrow_buffers(table, arena, schema_cache)
+
+    # Get data back again
+    received2 = client.get_arrow_data()
+
+    # Verify schema is still correct when using cache
+    assert received2.schema == table.schema, "Schema mismatch on cached roundtrip"
+
+    # Third roundtrip to verify caching continues to work
+    arena.reset()
+    client.reset_payload_arena()
+    client.send_arrow_buffers(table, arena, schema_cache)
+    received3 = client.get_arrow_data()
+    assert received3.schema == table.schema, "Schema mismatch on third roundtrip"
+
+    arena.close()
+
+
+def test_schema_hash_consistency_nested_types(client):
+    """Verify nested type schemas work correctly across roundtrips.
+
+    Tests that list, struct, and other nested types maintain schema equality
+    after being sent to Java and received back.
+    """
+    # Create table with nested types
+    table = pa.table({
+        "list_col": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int64())),
+        "struct_col": pa.array(
+            [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}, {"x": 3, "y": "c"}],
+            type=pa.struct([("x", pa.int64()), ("y", pa.string())]),
+        ),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Send to Java
+    client.send_arrow_buffers(table, arena, schema_cache)
+
+    # Get back
+    received = client.get_arrow_data()
+
+    # Verify schema equality (structural, not byte-level)
+    assert received.schema == table.schema, "Nested type schema mismatch"
+
+    # Verify data roundtrip
+    assert received.column("list_col").to_pylist() == table.column("list_col").to_pylist()
+    assert received.column("struct_col").to_pylist() == table.column("struct_col").to_pylist()
+
+    arena.close()

@@ -309,6 +309,109 @@ def _check_type_recursive(
             _check_type_recursive(field.type, unsupported, f"{path}.{field.name}")
 
 
+def _get_own_buffers(array: pa.Array) -> list[pa.Buffer | None]:
+    """Get only this array's own buffers (not children's buffers).
+
+    For nested types, array.buffers() includes children's buffers, but Arrow IPC
+    format requires buffers in DFS order. We extract only the parent's buffers here
+    and handle children recursively.
+
+    Buffer layout per array type (from Arrow spec):
+    - Primitive (int, float, bool, etc.): [validity, data]
+    - String/Binary: [validity, offsets, data]
+    - LargeString/LargeBinary: [validity, offsets (64-bit), data]
+    - List: [validity, offsets]
+    - LargeList: [validity, offsets (64-bit)]
+    - FixedSizeList: [validity]
+    - Struct: [validity]
+    - Map: [validity, offsets] (like List)
+    - DenseUnion: [type_ids, offsets]
+    - SparseUnion: [type_ids]
+    """
+    arr_type = array.type
+    all_buffers = array.buffers()
+
+    # For nested types, we only want the parent's buffers, not children's
+    if isinstance(arr_type, (pa.ListType, pa.LargeListType)):
+        # List: validity + offsets (2 buffers), rest are child's
+        return all_buffers[:2]
+    elif isinstance(arr_type, pa.FixedSizeListType):
+        # FixedSizeList: validity only (1 buffer)
+        return all_buffers[:1]
+    elif isinstance(arr_type, pa.StructType):
+        # Struct: validity only (1 buffer)
+        return all_buffers[:1]
+    elif isinstance(arr_type, pa.MapType):
+        # Map: validity + offsets (2 buffers)
+        return all_buffers[:2]
+    elif isinstance(arr_type, pa.UnionType):
+        if arr_type.mode == "dense":
+            # DenseUnion: type_ids + offsets (2 buffers)
+            return all_buffers[:2]
+        else:
+            # SparseUnion: type_ids only (1 buffer)
+            return all_buffers[:1]
+    else:
+        # Primitive types: all buffers belong to this array
+        return all_buffers
+
+
+def _extract_field_nodes_and_buffers_recursive(
+    array: pa.Array,
+    field_nodes: list[tuple[int, int]],
+    buffers: list[pa.Buffer | None],
+) -> None:
+    """Extract field nodes and buffers from an array in depth-first pre-order.
+
+    Arrow IPC format requires both field nodes and buffers in depth-first pre-order
+    traversal. For nested types, we emit the parent's data first, then recurse into
+    children.
+
+    This function ensures that:
+    1. Field nodes are in DFS order: parent before children
+    2. Buffers are in DFS order: parent's buffers before children's buffers
+    3. Buffer counts match what VectorLoader expects
+
+    Args:
+        array: The Arrow array to extract from
+        field_nodes: List to append (length, null_count) tuples to
+        buffers: List to append buffers to
+    """
+    # Emit this array's field node
+    field_nodes.append((len(array), array.null_count))
+
+    # Emit this array's own buffers (not children's)
+    own_buffers = _get_own_buffers(array)
+    buffers.extend(own_buffers)
+
+    # Recurse into children based on type
+    arr_type = array.type
+
+    if isinstance(arr_type, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
+        # List types have a single child: the values array
+        _extract_field_nodes_and_buffers_recursive(array.values, field_nodes, buffers)
+
+    elif isinstance(arr_type, pa.StructType):
+        # Struct types have multiple children: one per field
+        for i in range(arr_type.num_fields):
+            _extract_field_nodes_and_buffers_recursive(
+                array.field(i), field_nodes, buffers
+            )
+
+    elif isinstance(arr_type, pa.MapType):
+        # Map is internally list<struct<key, value>>
+        # The .values property gives us the struct array (entries)
+        # which contains the key and value child arrays
+        _extract_field_nodes_and_buffers_recursive(array.values, field_nodes, buffers)
+
+    elif isinstance(arr_type, pa.UnionType):
+        # Union types have multiple children: one per type code
+        for i in range(arr_type.num_fields):
+            _extract_field_nodes_and_buffers_recursive(
+                array.field(i), field_nodes, buffers
+            )
+
+
 def _extract_field_nodes_recursive(
     array: pa.Array, field_nodes: list[tuple[int, int]]
 ) -> None:
@@ -316,6 +419,9 @@ def _extract_field_nodes_recursive(
 
     Arrow IPC format requires field nodes in depth-first pre-order traversal.
     For nested types, we emit the parent node first, then recurse into children.
+
+    Note: This function is kept for backwards compatibility. Prefer using
+    _extract_field_nodes_and_buffers_recursive which extracts both in lockstep.
 
     Args:
         array: The Arrow array to extract nodes from
@@ -357,12 +463,14 @@ def copy_arrow_table_to_arena(
     This is the key function for zero-copy transfer. It:
     1. Validates schema contains only supported types
     2. Combines chunked columns into single arrays (required for protocol)
-    3. Extracts all buffers from the table's columns (including nested children)
+    3. Extracts field nodes and buffers in DFS order (matching Arrow IPC format)
     4. Copies each buffer into the arena
     5. Returns buffer descriptors for the protocol message
 
-    Supports nested types (list, struct, map, union) by recursively extracting
-    field nodes in depth-first pre-order, matching Arrow IPC format.
+    IMPORTANT: Both field nodes and buffers MUST be in depth-first pre-order
+    traversal to match Arrow IPC/VectorLoader expectations. For nested types:
+    - Field nodes: parent before children
+    - Buffers: parent's buffers before children's buffers
 
     Note: Tables with chunked columns are combined into single chunks before
     copying. This ensures a 1:1 mapping between schema fields and field nodes,
@@ -383,8 +491,8 @@ def copy_arrow_table_to_arena(
     # Validate schema before processing
     _validate_supported_schema(table.schema)
 
-    buffer_infos: list[BufferInfo] = []
     field_nodes: list[tuple[int, int]] = []
+    raw_buffers: list[pa.Buffer | None] = []
 
     # Combine chunks to ensure one chunk per column
     # This is required because our protocol assumes 1:1 field-to-node mapping
@@ -401,19 +509,23 @@ def copy_arrow_table_to_arena(
         if chunk.offset != 0:
             chunk = pa.concat_arrays([chunk])
 
-        # Extract field nodes recursively (depth-first pre-order)
-        # This handles nested types like list<int32>, struct<x:int32, y:string>, etc.
-        _extract_field_nodes_recursive(chunk, field_nodes)
+        # Extract field nodes AND buffers together in DFS order
+        # This ensures correct ordering for nested types (list, struct, map, union)
+        _extract_field_nodes_and_buffers_recursive(chunk, field_nodes, raw_buffers)
 
-        # Copy each buffer (buffers() already returns flattened list for nested types)
-        for buf in chunk.buffers():
-            if buf is None:
-                # Null buffer (e.g., no validity bitmap when no nulls)
-                # We still need a placeholder - use zero-length buffer
-                info = BufferInfo(offset=0, length=0, buffer=None)
-            else:
-                info = arena.allocate_and_copy(buf)
-            buffer_infos.append(info)
+    # Copy buffers to arena
+    # Note: Absent buffers (e.g., no validity bitmap when no nulls) are represented
+    # as zero-length buffers (offset=0, length=0). This is required because Arrow's
+    # VectorLoader expects the exact buffer count from TypeLayout and doesn't handle
+    # null/absent buffers well. See: https://issues.apache.org/jira/browse/ARROW-8803
+    buffer_infos: list[BufferInfo] = []
+    for buf in raw_buffers:
+        if buf is None:
+            # Absent buffer - use zero-length placeholder
+            info = BufferInfo(offset=0, length=0, buffer=None)
+        else:
+            info = arena.allocate_and_copy(buf)
+        buffer_infos.append(info)
 
     return buffer_infos, field_nodes
 

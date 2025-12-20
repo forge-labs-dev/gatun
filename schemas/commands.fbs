@@ -103,9 +103,13 @@ table Argument {
 // --- Arrow Zero-Copy Transfer Types ---
 
 // Describes a single buffer in the payload shared memory
+// Note: Absent buffers (e.g., no validity bitmap when no nulls) are represented
+// as zero-length buffers (offset=0, length=0). This is required because Arrow's
+// VectorLoader expects the exact buffer count from TypeLayout, and doesn't handle
+// null/absent buffers well. See: https://issues.apache.org/jira/browse/ARROW-8803
 table BufferDescriptor {
   offset: uint64;      // Offset from start of payload shm
-  length: uint64;      // Buffer size in bytes
+  length: uint64;      // Buffer size in bytes (0 for absent buffers)
 }
 
 // Describes an Arrow field's buffer layout
@@ -115,7 +119,20 @@ table FieldNode {
 }
 
 // Arrow batch descriptor for zero-copy transfer
-// Sent with SendArrowBuffers action
+// Sent with SendArrowBuffers action (Python -> Java) or in Response (Java -> Python)
+//
+// PAYLOAD ZONE LAYOUT:
+// The payload shared memory is logically divided into two halves:
+// - First half (offset 0 to size/2): Used by Python -> Java transfers
+// - Second half (offset size/2 to size): Used by Java -> Python transfers
+//
+// This avoids overwriting source data during bidirectional transfers.
+// Buffer offsets in this descriptor are absolute offsets from the start of
+// the payload zone, so Python/Java can compute the correct address as:
+//   buffer_address = payload_base_address + buffer_descriptor.offset
+//
+// When Python sends data: offsets are in [0, size/2)
+// When Java sends data: offsets are in [size/2, size)
 table ArrowBatchDescriptor {
   // Schema: serialized Arrow IPC schema bytes (cached by hash)
   schema_hash: uint64;        // Hash of schema for caching
@@ -125,7 +142,7 @@ table ArrowBatchDescriptor {
   num_rows: int64;            // Total number of rows
   nodes: [FieldNode];         // Field nodes describing array structure
 
-  // Buffer locations in payload shm
+  // Buffer locations in payload shm (absolute offsets from payload zone start)
   buffers: [BufferDescriptor];
 
   // Arena epoch for lifetime safety
