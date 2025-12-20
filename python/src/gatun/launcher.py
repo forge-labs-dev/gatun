@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import secrets
+import socket
 import subprocess
 import tempfile
 import time
@@ -125,19 +126,28 @@ def launch_gateway(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
-    # 4. Wait for Socket (Handshake)
+    # 4. Wait for Socket to be ready (not just file existence, but connectable)
     max_retries = int(config.startup_timeout / 0.1)
     retries = max_retries
     while retries > 0:
-        if os.path.exists(socket_path):
-            break
-
         if process.poll() is not None:
             # Process died
             stdout, stderr = process.communicate()
             raise RuntimeError(
                 f"Java Server failed to start:\nstdout: {stdout}\nstderr: {stderr}"
             )
+
+        # Check if socket file exists AND is connectable
+        if os.path.exists(socket_path):
+            try:
+                # Try to connect to verify server is ready
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.settimeout(0.1)
+                sock.connect(socket_path)
+                sock.close()
+                break  # Server is ready
+            except (ConnectionRefusedError, OSError):
+                pass  # Socket exists but server not ready yet
 
         time.sleep(0.1)
         retries -= 1
