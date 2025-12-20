@@ -547,3 +547,139 @@ def test_sliced_table_with_nulls_roundtrip(client):
     assert received_table.column("name").to_pylist() == ["c", "d", None, "f", "g", None]
 
     arena.close()
+
+
+def test_date_time_types_roundtrip(client):
+    """Test Arrow date and time types are transferred correctly."""
+    from datetime import date, datetime
+
+    table = pa.table({
+        "date32_col": pa.array(
+            [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
+            type=pa.date32(),
+        ),
+        "date64_col": pa.array(
+            [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
+            type=pa.date64(),
+        ),
+        "timestamp_us": pa.array(
+            [
+                datetime(2024, 1, 15, 10, 30, 0),
+                datetime(2024, 6, 30, 23, 59, 59),
+                datetime(2025, 12, 31, 0, 0, 0),
+            ],
+            type=pa.timestamp("us"),
+        ),
+        "timestamp_ns": pa.array(
+            [
+                datetime(2024, 1, 15, 10, 30, 0),
+                datetime(2024, 6, 30, 23, 59, 59),
+                datetime(2025, 12, 31, 0, 0, 0),
+            ],
+            type=pa.timestamp("ns"),
+        ),
+        "time32_s": pa.array([3600, 7200, 86399], type=pa.time32("s")),
+        "time64_us": pa.array([3600000000, 7200000000, 86399000000], type=pa.time64("us")),
+        "duration_us": pa.array([1000000, 2000000, 3000000], type=pa.duration("us")),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending table with date/time types: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data for each column
+    for name in table.schema.names:
+        orig = table.column(name).to_pylist()
+        recv = received_table.column(name).to_pylist()
+        assert recv == orig, f"Mismatch in column {name}"
+
+    arena.close()
+
+
+def test_timestamp_with_timezone_roundtrip(client):
+    """Test timezone-aware timestamps are transferred correctly."""
+    from datetime import datetime
+
+    table = pa.table({
+        "ts_utc": pa.array(
+            [
+                datetime(2024, 1, 15, 10, 0),
+                datetime(2024, 6, 30, 12, 0),
+                datetime(2025, 12, 31, 23, 59),
+            ],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
+        "ts_us_eastern": pa.array(
+            [
+                datetime(2024, 1, 15, 10, 0),
+                datetime(2024, 6, 30, 12, 0),
+                datetime(2025, 12, 31, 23, 59),
+            ],
+            type=pa.timestamp("us", tz="America/New_York"),
+        ),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify schema including timezone metadata
+    assert received_table.schema == table.schema
+
+    # Verify data
+    for name in table.schema.names:
+        orig = table.column(name).to_pylist()
+        recv = received_table.column(name).to_pylist()
+        assert recv == orig, f"Mismatch in column {name}"
+
+    arena.close()
+
+
+def test_date_time_with_nulls_roundtrip(client):
+    """Test date/time types with null values."""
+    from datetime import date, datetime
+
+    table = pa.table({
+        "date_nullable": pa.array(
+            [date(2024, 1, 15), None, date(2025, 12, 31)],
+            type=pa.date32(),
+        ),
+        "ts_nullable": pa.array(
+            [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
+            type=pa.timestamp("us"),
+        ),
+        "ts_tz_nullable": pa.array(
+            [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
+    })
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify nulls preserved
+    for name in table.schema.names:
+        orig = table.column(name).to_pylist()
+        recv = received_table.column(name).to_pylist()
+        assert recv == orig, f"Mismatch in column {name}"
+        # Explicitly check null position
+        assert recv[1] is None, f"Expected null at position 1 for {name}"
+
+    arena.close()
