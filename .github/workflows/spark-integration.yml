@@ -125,7 +125,18 @@ jobs:
         run: |
           # Run a subset of PySpark tests with Gatun enabled
           # Start with simple tests that don't require full Spark context
-          ${{ github.workspace }}/gatun/python/.venv/bin/python python/run-tests.py --testnames "${{ github.event.inputs.spark_tests || 'pyspark.tests.test_conf' }}" --parallelism 1
+          ${{ github.workspace }}/gatun/python/.venv/bin/python python/run-tests.py --testnames "${{ github.event.inputs.spark_tests || 'pyspark.tests.test_conf' }}" --parallelism 1 || TEST_FAILED=1
+
+          # Print test output for debugging
+          echo "=== Test Output (unit-tests.log) ==="
+          cat python/unit-tests.log || true
+
+          # Print any temp log files
+          echo "=== Temp Log Files ==="
+          find python/target -name "*.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+
+          # Exit with failure if tests failed
+          if [ "$TEST_FAILED" = "1" ]; then exit 1; fi
         env:
           PYSPARK_USE_GATUN: "true"
           GATUN_MEMORY: "256MB"
