@@ -1,0 +1,136 @@
+name: Spark Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      spark_tests:
+        description: 'PySpark tests to run (comma-separated)'
+        required: false
+        default: 'pyspark.tests.test_conf'
+
+jobs:
+  spark-integration:
+    name: PySpark Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Gatun
+        uses: actions/checkout@v4
+        with:
+          path: gatun
+
+      - name: Checkout Spark (gatun-integration branch)
+        uses: actions/checkout@v4
+        with:
+          repository: fangchenli/spark
+          ref: gatun-integration
+          path: spark
+
+      # Install FlatBuffers compiler
+      - name: Install flatc
+        run: sudo apt-get update && sudo apt-get install -y flatbuffers-compiler
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      # Build Gatun
+      - name: Build Gatun
+        working-directory: gatun/python
+        run: uv sync
+
+      # Build Spark (skip tests for faster CI)
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-spark-${{ hashFiles('spark/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-spark-
+
+      - name: Build Spark
+        working-directory: spark
+        run: |
+          ./build/mvn -DskipTests -Phive -Phive-thriftserver package -q
+        env:
+          MAVEN_OPTS: "-Xmx4g"
+
+      # Install PySpark dependencies
+      - name: Install PySpark dependencies
+        run: |
+          pip install numpy pyarrow pandas scipy
+
+      # Install Gatun
+      - name: Install Gatun
+        run: |
+          pip install ./gatun/python
+
+      # Run basic Gatun tests first to ensure it works
+      - name: Verify Gatun installation
+        run: |
+          python -c "from gatun import connect; print('Gatun import OK')"
+          python -c "from gatun.py4j_compat import JavaGateway; print('Py4J compat OK')"
+
+      # Smoke test: verify Gatun gateway can start with Spark classpath
+      - name: Smoke test - Gatun with Spark classpath
+        working-directory: spark
+        run: |
+          python -c "
+          import os
+          import glob
+          os.environ['SPARK_HOME'] = os.getcwd()
+
+          # Get Spark JARs
+          jars = glob.glob('assembly/target/scala-*/jars/*.jar')
+          print(f'Found {len(jars)} Spark JARs')
+
+          # Test Gatun can start with classpath
+          from gatun import launch_gateway
+          session = launch_gateway(memory='128MB', classpath=jars[:10])  # Use subset for speed
+          print(f'Gatun session started: {session.socket_path}')
+
+          from gatun import GatunClient
+          client = GatunClient(session.socket_path)
+          client.connect()
+
+          # Test basic Java interop
+          arr = client.jvm.java.util.ArrayList()
+          arr.add('hello')
+          print(f'ArrayList test: {arr.size()} items')
+
+          client.close()
+          session.stop()
+          print('Smoke test passed!')
+          "
+        env:
+          PYSPARK_USE_GATUN: "true"
+          GATUN_MEMORY: "128MB"
+
+      # Run PySpark tests with Gatun
+      - name: Run PySpark tests with Gatun
+        working-directory: spark
+        run: |
+          # Run a subset of PySpark tests with Gatun enabled
+          # Start with simple tests that don't require full Spark context
+          python/run-tests --testnames "${{ github.event.inputs.spark_tests || 'pyspark.tests.test_conf' }}" --parallelism 1
+        env:
+          PYSPARK_USE_GATUN: "true"
+          GATUN_MEMORY: "256MB"
+          PYSPARK_PYTHON: python3
+          SPARK_HOME: ${{ github.workspace }}/spark
