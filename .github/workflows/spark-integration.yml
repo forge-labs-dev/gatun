@@ -42,18 +42,23 @@ jobs:
           distribution: "temurin"
           java-version: "21"
 
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
-
-      # Build Gatun
+      # Build Gatun and install dependencies
       - name: Build Gatun
         working-directory: gatun/python
-        run: uv sync
+        run: |
+          uv sync
+          # Install PySpark dependencies into the same venv
+          uv pip install numpy pyarrow pandas scipy
 
       # Build Spark (skip tests for faster CI)
       - name: Cache Maven packages
@@ -71,29 +76,21 @@ jobs:
         env:
           MAVEN_OPTS: "-Xmx4g"
 
-      # Install PySpark dependencies
-      - name: Install PySpark dependencies
-        run: |
-          pip install numpy pyarrow pandas scipy
-
-      # Install Gatun
-      - name: Install Gatun
-        run: |
-          pip install ./gatun/python
-
-      # Run basic Gatun tests first to ensure it works
+      # Verify Gatun installation
       - name: Verify Gatun installation
+        working-directory: gatun/python
         run: |
-          python -c "from gatun import connect; print('Gatun import OK')"
-          python -c "from gatun.py4j_compat import JavaGateway; print('Py4J compat OK')"
+          uv run python -c "from gatun import connect; print('Gatun import OK')"
+          uv run python -c "from gatun.py4j_compat import JavaGateway; print('Py4J compat OK')"
 
       # Smoke test: verify Gatun gateway can start with Spark classpath
       - name: Smoke test - Gatun with Spark classpath
-        working-directory: spark
+        working-directory: gatun/python
         run: |
-          python -c "
+          uv run python -c "
           import os
           import glob
+          os.chdir('${{ github.workspace }}/spark')
           os.environ['SPARK_HOME'] = os.getcwd()
 
           # Get Spark JARs
@@ -128,9 +125,9 @@ jobs:
         run: |
           # Run a subset of PySpark tests with Gatun enabled
           # Start with simple tests that don't require full Spark context
-          python/run-tests --testnames "${{ github.event.inputs.spark_tests || 'pyspark.tests.test_conf' }}" --parallelism 1
+          ${{ github.workspace }}/gatun/python/.venv/bin/python python/run-tests.py --testnames "${{ github.event.inputs.spark_tests || 'pyspark.tests.test_conf' }}" --parallelism 1
         env:
           PYSPARK_USE_GATUN: "true"
           GATUN_MEMORY: "256MB"
-          PYSPARK_PYTHON: python3
+          PYSPARK_PYTHON: ${{ github.workspace }}/gatun/python/.venv/bin/python
           SPARK_HOME: ${{ github.workspace }}/spark
