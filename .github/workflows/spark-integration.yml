@@ -142,3 +142,5 @@ jobs:
           GATUN_MEMORY: "256MB"
           PYSPARK_PYTHON: ${{ github.workspace }}/gatun/python/.venv/bin/python
           SPARK_HOME: ${{ github.workspace }}/spark
+          # Set default Spark master for tests that don't specify one
+          MASTER: "local[4]"
