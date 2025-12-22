@@ -4,7 +4,6 @@ import os
 import secrets
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -97,10 +96,10 @@ def launch_gateway(
         socket_path = config.socket_path
     if socket_path is None:
         # Generate unique socket path to allow multiple concurrent sessions
+        # Always use /tmp to avoid Unix domain socket path length limits (~108 chars)
+        # Don't use tempfile.gettempdir() as it may return a longer path based on TMPDIR
         random_suffix = secrets.token_hex(8)
-        socket_path = os.path.join(
-            tempfile.gettempdir(), f"gatun_{os.getpid()}_{random_suffix}.sock"
-        )
+        socket_path = f"/tmp/gatun_{os.getpid()}_{random_suffix}.sock"
 
     # 3. Construct Command with config JVM flags
     jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags
