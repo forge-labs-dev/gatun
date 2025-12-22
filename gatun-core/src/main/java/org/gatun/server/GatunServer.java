@@ -68,7 +68,8 @@ public class GatunServer {
           "java.lang.Boolean",
           "java.lang.Math",
           "java.lang.StringBuilder",
-          "java.lang.StringBuffer");
+          "java.lang.StringBuffer",
+          "java.lang.System");  // For setting system properties (e.g., spark.master)
 
   // --- SECURITY: Prefixes for allowed class packages (e.g., for Spark integration) ---
   private static final Set<String> ALLOWED_PREFIXES =
