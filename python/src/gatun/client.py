@@ -1523,8 +1523,9 @@ class GatunClient:
         elif isinstance(value, JavaArray):
             # JavaArray came from Java and should go back as ArrayVal (Java array)
             return self._build_java_array(builder, value)
-        elif isinstance(value, list):
-            # Auto-convert Python list to ListVal (Java ArrayList)
+        elif isinstance(value, (list, tuple)):
+            # Auto-convert Python list/tuple to ListVal (Java ArrayList)
+            # Tuples are treated the same as lists for Java interop
             item_offsets = []
             for item in value:
                 item_offsets.append(self._build_argument(builder, item))
