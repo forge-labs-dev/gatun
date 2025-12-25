@@ -45,8 +45,8 @@ public class GatunServer {
 
   // Memory zones
   private static final int COMMAND_OFFSET = 0;
-  private static final int PAYLOAD_OFFSET = 4096; // 4KB
-  private static final int RESPONSE_ZONE_SIZE = 4096; // 4KB
+  private static final int PAYLOAD_OFFSET = 65536; // 64KB - increased to handle large pickled functions
+  private static final int RESPONSE_ZONE_SIZE = 65536; // 64KB - increased to handle large responses
 
   // --- SECURITY: Allowlist of classes that can be instantiated or used for static methods ---
   private static final Set<String> ALLOWED_CLASSES =
@@ -131,7 +131,7 @@ public class GatunServer {
     this.socketPath = Path.of(socketPathStr);
     this.memoryPath = Path.of(socketPathStr + ".shm");
     this.memorySize = memorySize;
-    this.responseOffset = memorySize - 4096;
+    this.responseOffset = memorySize - RESPONSE_ZONE_SIZE;
     this.threadPool = Executors.newVirtualThreadPerTaskExecutor();
   }
 
@@ -563,6 +563,82 @@ public class GatunServer {
             java.lang.reflect.Field field = clazz.getField(fieldName);
             field.set(null, value);  // null for static field
             result = null;
+          } else if (cmd.action() == Action.Reflect) {
+            // Reflection query: target_name is the fully qualified name to check
+            // Returns a string:
+            // - "class" if it's a loadable class
+            // - "method" if the last segment is a method on the parent class
+            // - "field" if the last segment is a field on the parent class
+            // - "none" if not found
+            String fullName = cmd.targetName();
+
+            // First try: is the whole path a class?
+            try {
+              // Handle Scala objects: try both ClassName and ClassName$
+              Class<?> clazz = null;
+              try {
+                clazz = Class.forName(fullName);
+              } catch (ClassNotFoundException e1) {
+                // Try Scala object naming convention (append $)
+                try {
+                  clazz = Class.forName(fullName + "$");
+                } catch (ClassNotFoundException e2) {
+                  // Not a class
+                }
+              }
+
+              if (clazz != null) {
+                result = "class";
+              } else {
+                // Try as class.member
+                int lastDot = fullName.lastIndexOf('.');
+                if (lastDot > 0) {
+                  String parentName = fullName.substring(0, lastDot);
+                  String memberName = fullName.substring(lastDot + 1);
+
+                  // Try to load parent as class
+                  Class<?> parentClass = null;
+                  try {
+                    parentClass = Class.forName(parentName);
+                  } catch (ClassNotFoundException e) {
+                    // Try Scala object
+                    try {
+                      parentClass = Class.forName(parentName + "$");
+                    } catch (ClassNotFoundException e2) {
+                      // Parent not found
+                    }
+                  }
+
+                  if (parentClass != null) {
+                    // Check if memberName is a method
+                    boolean isMethod = false;
+                    for (java.lang.reflect.Method m : parentClass.getMethods()) {
+                      if (m.getName().equals(memberName)) {
+                        isMethod = true;
+                        break;
+                      }
+                    }
+                    if (isMethod) {
+                      result = "method";
+                    } else {
+                      // Check if it's a field
+                      try {
+                        parentClass.getField(memberName);
+                        result = "field";
+                      } catch (NoSuchFieldException e) {
+                        result = "none";
+                      }
+                    }
+                  } else {
+                    result = "none";
+                  }
+                } else {
+                  result = "none";
+                }
+              }
+            } catch (Exception e) {
+              result = "none";
+            }
           }
 
           // 3. Pack Success
@@ -682,7 +758,8 @@ public class GatunServer {
     } else if (valType == Value.ObjectRef) {
       ObjectRef ref = (ObjectRef) arg.val(new ObjectRef());
       value = objectRegistry.get(ref.id());
-      type = Object.class;
+      // Use actual object type for better overload resolution
+      type = (value != null) ? value.getClass() : Object.class;
     } else if (valType == Value.ListVal) {
       // Convert Python list to Java ArrayList
       ListVal lv = (ListVal) arg.val(new ListVal());

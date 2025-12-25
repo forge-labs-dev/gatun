@@ -16,13 +16,23 @@ MODULE_DIR = Path(__file__).parent.resolve()
 JAR_PATH = MODULE_DIR / "jars" / "gatun-server-all.jar"
 
 # JVM Flags required for Apache Arrow & Netty (Java 21+)
+# Also includes flags needed for Spark's Kryo serialization
 DEFAULT_JVM_FLAGS = [
     "--enable-preview",
+    # Arrow/Netty memory requirements
     "--add-opens=java.base/java.nio=ALL-UNNAMED",
     "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
-    "--add-opens=java.base/java.util=ALL-UNNAMED",
     "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
+    # Spark Kryo serialization requirements (Java 17+)
     "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+    "--add-opens=java.base/java.util=ALL-UNNAMED",
+    "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+    "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+    "--add-opens=java.base/java.net=ALL-UNNAMED",
+    "--add-opens=java.base/java.io=ALL-UNNAMED",
+    "--add-opens=java.base/java.security=ALL-UNNAMED",
+    # Netty reflective access
     "-Dio.netty.tryReflectionSetAccessible=true",
     "-Darrow.memory.debug.allocator=true",
 ]
@@ -104,20 +114,27 @@ def launch_gateway(
     # 3. Construct Command with config JVM flags
     jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags
 
+    # Find Java executable - prefer JAVA_HOME, fall back to PATH
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home:
+        java_cmd = os.path.join(java_home, "bin", "java")
+    else:
+        java_cmd = "java"
+
     if classpath:
         # Use -cp with main class to allow additional classpath entries
         # java [FLAGS] -cp [CLASSPATH] org.gatun.server.GatunServer [MEM_SIZE] [SOCKET_PATH]
         all_jars = [str(JAR_PATH)] + classpath
         cp = os.pathsep.join(all_jars)
         cmd = (
-            ["java"]
+            [java_cmd]
             + jvm_flags
             + ["-cp", cp, "org.gatun.server.GatunServer", str(mem_bytes), socket_path]
         )
     else:
         # Use -jar for simplicity when no extra classpath needed
         # java [FLAGS] -jar [JAR] [MEM_SIZE] [SOCKET_PATH]
-        cmd = ["java"] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
+        cmd = [java_cmd] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
 

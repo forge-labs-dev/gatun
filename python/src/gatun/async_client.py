@@ -214,7 +214,7 @@ class AsyncGatunClient:
 
         self.memory_size = 0
         self.command_offset = 0
-        self.payload_offset = 4096
+        self.payload_offset = 65536  # 64KB - must match GatunServer.PAYLOAD_OFFSET
         self.response_offset = 0
 
         self._jvm: Optional[AsyncJVMView] = None
@@ -244,7 +244,7 @@ class AsyncGatunClient:
                     f"server={server_version}"
                 )
 
-            self.response_offset = self.memory_size - 4096
+            self.response_offset = self.memory_size - 65536  # 64KB response zone
 
             # Map shared memory (still sync - mmap doesn't have async API)
             self.shm_file = open(self.memory_path, "r+b")

@@ -209,6 +209,9 @@ class JavaGateway:
 
         self._socket_path = socket_path
 
+        # Store gateway parameters for Py4J compatibility
+        self._gateway_parameters = gateway_parameters or GatewayParameters()
+
         # Create and connect client
         self._client = GatunClient(socket_path)
         if not self._client.connect():
@@ -228,6 +231,15 @@ class JavaGateway:
             gateway.jvm.java.lang.Math.max(1, 2)
         """
         return self._jvm
+
+    @property
+    def gateway_parameters(self) -> GatewayParameters:
+        """Get the gateway connection parameters.
+
+        Returns:
+            GatewayParameters instance with connection settings
+        """
+        return self._gateway_parameters
 
     @property
     def java_gateway_server(self):

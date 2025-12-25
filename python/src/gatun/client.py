@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 # Protocol version - must match the server version
 PROTOCOL_VERSION = 1
 
-# Memory zone sizes
-COMMAND_ZONE_SIZE = 4096  # 4KB for commands
-RESPONSE_ZONE_SIZE = 4096  # 4KB for responses
+# Memory zone sizes - must match GatunServer.java constants
+COMMAND_ZONE_SIZE = 65536  # 64KB for commands
+RESPONSE_ZONE_SIZE = 65536  # 64KB for responses
 
 
 class PayloadTooLargeError(Exception):
@@ -301,6 +301,54 @@ class ArrowTableView:
     def __repr__(self):
         epoch_status = "valid" if self._epoch == self._client._arena_epoch else "STALE"
         return f"<ArrowTableView rows={self.num_rows} cols={self.num_columns} epoch={self._epoch} ({epoch_status})>"
+
+
+class JavaList(list):
+    """A Python list that also exposes Java List-like methods.
+
+    This allows Gatun to auto-convert Java Lists to Python lists while
+    still supporting code that expects Java method names like size(), isEmpty(), etc.
+    """
+
+    def size(self):
+        """Java List.size() - returns the number of elements."""
+        return len(self)
+
+    def isEmpty(self):
+        """Java List.isEmpty() - returns true if list is empty."""
+        return len(self) == 0
+
+    def get(self, index):
+        """Java List.get(index) - returns element at index."""
+        return self[index]
+
+    def contains(self, item):
+        """Java List.contains(item) - returns true if item is in list."""
+        return item in self
+
+
+class JavaArray(list):
+    """A Python list that represents a Java array.
+
+    When passed back to Java, this is serialized as an ArrayVal (Java array)
+    rather than a ListVal (Java ArrayList). This preserves the array semantics
+    when round-tripping through Gatun.
+
+    The element_type attribute stores the original Java array element type.
+    """
+
+    def __init__(self, iterable=(), element_type: str = "Object"):
+        super().__init__(iterable)
+        self.element_type = element_type
+
+    def size(self):
+        """Java-style length access."""
+        return len(self)
+
+    @property
+    def length(self):
+        """Java array length property."""
+        return len(self)
 
 
 def _get_own_buffer_count(arrow_type: pa.DataType) -> int:
@@ -590,6 +638,11 @@ class JVMView:
         return "<JVMView>"
 
 
+# Cache for reflection results to avoid repeated Java calls
+# Maps fully qualified name -> type ("class", "method", "field", "none")
+_reflect_cache: dict[str, str] = {}
+
+
 class _JVMNode:
     """Hybrid node that can act as both a package path and a Java class.
 
@@ -597,55 +650,66 @@ class _JVMNode:
     - Calling it instantiates a class (ArrayList() -> new ArrayList())
     - Accessing a method and calling it invokes static method (Integer.parseInt(...))
 
-    The trick: we don't know if an attribute access is a package/class or a method
-    until we see what happens next. So we return a _JVMNode that can be:
-    - Called with no args or object args -> constructor
-    - Called after method-like access -> static method
+    This implementation uses Java reflection to correctly identify:
+    - Regular Java classes (e.g., java.util.ArrayList)
+    - Scala objects (e.g., org.apache.spark.sql.functions)
+    - Static methods on classes
+    - Static fields on classes
 
-    Method detection uses a heuristic: if the current path segment looks like a class
-    (starts uppercase) and we're accessing an attribute, treat it as a static method.
-    This handles both camelCase methods like `parseInt` and SCREAMING_CASE methods
-    like `INT()` commonly used in Scala APIs (e.g., Encoders.INT()).
+    Results are cached globally for performance.
     """
 
-    def __init__(self, client, path, parent_looks_like_class=False):
+    def __init__(self, client, path):
         self._client = client
         self._path = path
-        # If parent looks like a class, this node is likely a static method/field
-        self._parent_looks_like_class = parent_looks_like_class
+
+    def _get_type(self) -> str:
+        """Get the type of this path via reflection (cached)."""
+        if self._path not in _reflect_cache:
+            _reflect_cache[self._path] = self._client.reflect(self._path)
+        return _reflect_cache[self._path]
 
     def __getattr__(self, name):
         """Navigate deeper or access static method/field."""
         new_path = f"{self._path}.{name}"
+
         # Get the last segment of the current path to check if it looks like a class
         last_segment = self._path.rsplit(".", 1)[-1] if "." in self._path else self._path
         # If current segment starts with uppercase, it likely is a class
-        # so the accessed attribute is likely a static method/field
         parent_looks_like_class = last_segment and last_segment[0].isupper()
 
-        # Heuristic: if parent is a class AND name is ALL_UPPERCASE (like MAX_VALUE, EMPTY_LIST),
-        # it's likely a static field - fetch it immediately
+        # Heuristic: if parent looks like a class AND name is ALL_UPPERCASE with underscore,
+        # it's likely a static field constant - fetch it immediately
         if parent_looks_like_class and name.isupper() and "_" in name:
             # This looks like a constant field (e.g., MAX_VALUE, EMPTY_LIST)
             # Fetch it immediately
             return self._client.get_static_field(self._path, name)
 
-        return _JVMNode(self._client, new_path, parent_looks_like_class=parent_looks_like_class)
+        return _JVMNode(self._client, new_path)
 
     def __call__(self, *args):
         """Instantiate as a class or invoke as a static method."""
-        if self._parent_looks_like_class:
+        # Use reflection to determine if this is a class or method
+        node_type = self._get_type()
+
+        if node_type == "class":
+            # This is a constructor call: java.util.ArrayList()
+            return self._client.create_object(self._path, *args)
+        elif node_type == "method":
             # This is a static method call: java.lang.Integer.parseInt("42")
-            # or Encoders.INT() - the parent segment looks like a class name
-            # Split path into class and method
+            # or Scala object method: functions.col("name")
             last_dot = self._path.rfind(".")
             if last_dot == -1:
                 raise ValueError(f"Invalid method path: {self._path}")
             class_name = self._path[:last_dot]
-            method_name = self._path[last_dot + 1 :]
+            method_name = self._path[last_dot + 1:]
             return self._client.invoke_static_method(class_name, method_name, *args)
+        elif node_type == "field":
+            # This is a static field access (being called as function - error)
+            raise TypeError(f"{self._path} is a static field, not a method")
         else:
-            # This is a constructor call: java.util.ArrayList()
+            # Unknown - try as class first (backward compatibility)
+            # This handles packages that haven't been loaded yet
             return self._client.create_object(self._path, *args)
 
     def __repr__(self):
@@ -667,7 +731,7 @@ class GatunClient:
         # These are set during connect()
         self.memory_size = 0
         self.command_offset = 0
-        self.payload_offset = 4096
+        self.payload_offset = 65536  # 64KB - must match GatunServer.PAYLOAD_OFFSET
         self.response_offset = 0
 
         # JVM view for package-style access
@@ -702,7 +766,9 @@ class GatunClient:
         logger.debug("Connecting to %s", self.socket_path)
         try:
             self.sock.connect(self.socket_path)
-            self.sock.settimeout(5.0)
+            # Long timeout for Spark jobs which can take minutes
+            # None = no timeout (blocking mode)
+            self.sock.settimeout(None)
 
             # 1. Handshake - read version, epoch, and memory size
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
@@ -722,7 +788,8 @@ class GatunClient:
             self._arena_epoch = arena_epoch
 
             # 2. Configure Offsets
-            self.response_offset = self.memory_size - 4096
+            # Response zone size must match GatunServer.RESPONSE_ZONE_SIZE (64KB)
+            self.response_offset = self.memory_size - 65536
 
             # 3. Map Memory
             self.shm_file = open(self.memory_path, "r+b")
@@ -816,7 +883,7 @@ class GatunClient:
         elif val_type == Value.Value.ListVal:
             union_obj = ListVal.ListVal()
             union_obj.Init(val_table.Bytes, val_table.Pos)
-            result = []
+            result = JavaList()
             for i in range(union_obj.ItemsLength()):
                 item = union_obj.Items(i)
                 result.append(self._unpack_value(item.ValType(), item.Val()))
@@ -841,44 +908,55 @@ class GatunClient:
         return None
 
     def _unpack_array(self, array_val):
-        """Unpack an ArrayVal FlatBuffer to a Python list."""
+        """Unpack an ArrayVal FlatBuffer to a JavaArray (preserves array semantics)."""
         elem_type = array_val.ElementType()
 
         if elem_type == ElementType.ElementType.Int:
-            return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
+            return JavaArray(
+                (array_val.IntValues(i) for i in range(array_val.IntValuesLength())),
+                element_type="Int",
+            )
         elif elem_type == ElementType.ElementType.Long:
-            return [
-                array_val.LongValues(i) for i in range(array_val.LongValuesLength())
-            ]
+            return JavaArray(
+                (array_val.LongValues(i) for i in range(array_val.LongValuesLength())),
+                element_type="Long",
+            )
         elif elem_type == ElementType.ElementType.Double:
-            return [
-                array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())
-            ]
+            return JavaArray(
+                (array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())),
+                element_type="Double",
+            )
         elif elem_type == ElementType.ElementType.Float:
             # Float was widened to double
-            return [
-                array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())
-            ]
+            return JavaArray(
+                (array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())),
+                element_type="Float",
+            )
         elif elem_type == ElementType.ElementType.Bool:
-            return [
-                array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())
-            ]
+            return JavaArray(
+                (array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())),
+                element_type="Bool",
+            )
         elif elem_type == ElementType.ElementType.Byte:
+            # Byte arrays are still returned as bytes for convenience
             return bytes(
                 [array_val.ByteValues(i) for i in range(array_val.ByteValuesLength())]
             )
         elif elem_type == ElementType.ElementType.Short:
             # Short was widened to int
-            return [array_val.IntValues(i) for i in range(array_val.IntValuesLength())]
+            return JavaArray(
+                (array_val.IntValues(i) for i in range(array_val.IntValuesLength())),
+                element_type="Short",
+            )
         elif elem_type == ElementType.ElementType.String:
-            result = []
+            result = JavaArray(element_type="String")
             for i in range(array_val.ObjectValuesLength()):
                 item = array_val.ObjectValues(i)
                 result.append(self._unpack_value(item.ValType(), item.Val()))
             return result
         else:
             # Object array
-            result = []
+            result = JavaArray(element_type="Object")
             for i in range(array_val.ObjectValuesLength()):
                 item = array_val.ObjectValues(i)
                 result.append(self._unpack_value(item.ValType(), item.Val()))
@@ -1273,6 +1351,38 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
+    def reflect(self, full_name: str) -> str:
+        """Query Java to determine the type of a fully qualified name.
+
+        This is used to distinguish between classes, methods, and fields
+        when navigating the JVM via attribute access.
+
+        Args:
+            full_name: Fully qualified name to check
+                      (e.g., "org.apache.spark.sql.functions" or
+                       "org.apache.spark.sql.functions.col")
+
+        Returns:
+            One of:
+            - "class" if the name refers to a loadable class (including Scala objects)
+            - "method" if the last segment is a method on the parent class
+            - "field" if the last segment is a field on the parent class
+            - "none" if the name cannot be resolved
+
+        Note:
+            Results are typically cached by the caller for performance.
+        """
+        builder = flatbuffers.Builder(256)
+        name_off = builder.CreateString(full_name)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.Reflect)
+        Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
     def is_instance_of(self, obj, class_name: str) -> bool:
         """Check if a Java object is an instance of a class.
 
@@ -1410,8 +1520,11 @@ class GatunClient:
             ObjectRef.Start(builder)
             ObjectRef.AddId(builder, value.object_id)
             return Value.Value.ObjectRef, ObjectRef.End(builder)
+        elif isinstance(value, JavaArray):
+            # JavaArray came from Java and should go back as ArrayVal (Java array)
+            return self._build_java_array(builder, value)
         elif isinstance(value, list):
-            # Auto-convert Python list to ListVal
+            # Auto-convert Python list to ListVal (Java ArrayList)
             item_offsets = []
             for item in value:
                 item_offsets.append(self._build_argument(builder, item))
@@ -1589,6 +1702,85 @@ class GatunClient:
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         else:
             raise TypeError(f"Unsupported array.array typecode: {typecode}")
+
+    def _build_java_array(self, builder, java_array: JavaArray):
+        """Build an ArrayVal from a JavaArray (preserving array semantics for round-trip)."""
+        elem_type = java_array.element_type
+
+        if elem_type == "Int":
+            np_arr = np.array(list(java_array), dtype=np.int32)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Long":
+            np_arr = np.array(list(java_array), dtype=np.int64)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
+            ArrayVal.AddLongValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Double":
+            np_arr = np.array(list(java_array), dtype=np.float64)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Float":
+            np_arr = np.array(list(java_array), dtype=np.float64)  # widened to double
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
+            ArrayVal.AddDoubleValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Bool":
+            np_arr = np.array(list(java_array), dtype=np.bool_)
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Bool)
+            ArrayVal.AddBoolValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Byte":
+            vec_off = builder.CreateByteVector(bytes(java_array))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
+            ArrayVal.AddByteValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "Short":
+            np_arr = np.array(list(java_array), dtype=np.int32)  # widened to int
+            vec_off = builder.CreateNumpyVector(np_arr)
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
+            ArrayVal.AddIntValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        elif elem_type == "String":
+            # String array - need to build each as Argument
+            item_offsets = []
+            for item in java_array:
+                item_offsets.append(self._build_argument(builder, item))
+            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+            for offset in reversed(item_offsets):
+                builder.PrependUOffsetTRelative(offset)
+            vec_off = builder.EndVector()
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.String)
+            ArrayVal.AddObjectValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+        else:
+            # Object array - need to build each as Argument
+            item_offsets = []
+            for item in java_array:
+                item_offsets.append(self._build_argument(builder, item))
+            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+            for offset in reversed(item_offsets):
+                builder.PrependUOffsetTRelative(offset)
+            vec_off = builder.EndVector()
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
+            ArrayVal.AddObjectValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
 
     def free_object(self, object_id):
         """Sends FreeObject to release a Java object."""

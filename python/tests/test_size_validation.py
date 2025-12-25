@@ -2,7 +2,7 @@
 
 import pytest
 from gatun import PayloadTooLargeError, JavaException, JavaRuntimeException
-from gatun.client import COMMAND_ZONE_SIZE
+from gatun.client import COMMAND_ZONE_SIZE, RESPONSE_ZONE_SIZE
 
 
 def test_payload_too_large_error_attributes():
@@ -27,10 +27,10 @@ def test_payload_too_large_error_message_suggests_increase():
 
 def test_command_size_limit(client):
     """Test that commands exceeding the zone size raise PayloadTooLargeError."""
-    # Create a string that will result in a command larger than 4KB
+    # Create a string that will result in a command larger than 64KB
     # The command includes method name, class info, and the argument
-    # A 5KB string should definitely exceed the limit
-    huge_string = "x" * 5000
+    # A 70KB string should definitely exceed the limit
+    huge_string = "x" * 70000
 
     # Trying to pass this as an argument should fail during send
     with pytest.raises(PayloadTooLargeError) as exc_info:
@@ -55,12 +55,13 @@ def test_response_size_limit(client):
     # When we call toString(), the response will be too large
     sb = client.jvm.java.lang.StringBuilder()
 
-    # Build a string larger than 4KB using multiple appends
+    # Build a string larger than 64KB using multiple appends
     # Use small chunks to avoid command size limits
-    for _ in range(50):
-        sb.append("x" * 100)  # 5KB total
+    # 700 * 100 = 70KB total, exceeding 64KB response zone
+    for _ in range(700):
+        sb.append("x" * 100)
 
-    # toString() will try to return a string > 4KB
+    # toString() will try to return a string > 64KB
     # This may either:
     # 1. Return "Response too large" error (if Java catches it)
     # 2. Cause socket closed (if Java process crashes)
@@ -68,7 +69,7 @@ def test_response_size_limit(client):
         result = sb.toString()
         # If we got here, the response was within limits
         # This is OK - just means our estimate was wrong
-        assert len(result) <= 4096, (
+        assert len(result) <= RESPONSE_ZONE_SIZE, (
             f"Expected response to be limited, got {len(result)} chars"
         )
     except (PayloadTooLargeError, JavaException, RuntimeError) as e:
@@ -83,13 +84,14 @@ def test_large_list_response(client):
     # Create a list with many items - when converted to response, may exceed limit
     arr = client.jvm.java.util.ArrayList()
 
-    # Add many strings to exceed response zone
-    for i in range(200):
-        arr.add(f"item_{i:04d}_" + "x" * 30)
+    # Add many strings to exceed 64KB response zone
+    # Each item is ~50 bytes, so 2000 items = ~100KB
+    for i in range(2000):
+        arr.add(f"item_{i:04d}_" + "x" * 40)
 
     # Getting subList will try to serialize all items
     try:
-        arr.subList(0, 200)
+        arr.subList(0, 2000)
         # If we got here, response was within limits
         pass  # This is OK
     except (PayloadTooLargeError, JavaException, RuntimeError) as e:
@@ -112,25 +114,26 @@ def test_moderate_response_works(client):
 
 
 def test_exact_response_limit_boundary(client):
-    """Test behavior near the 4KB response limit."""
+    """Test behavior near the 64KB response limit."""
     sb = client.jvm.java.lang.StringBuilder()
 
-    # Build a string close to but under 4KB (accounting for FlatBuffer overhead)
+    # Build a string close to but under 64KB (accounting for FlatBuffer overhead)
     # FlatBuffer adds ~50-100 bytes of overhead for a string response
-    sb.append("x" * 3800)
+    # 60KB should be safely under the limit
+    sb.append("x" * 60000)
 
     # This should succeed - under the limit
     result = sb.toString()
-    assert len(result) == 3800
+    assert len(result) == 60000
 
-    # Now add more to exceed 4KB
-    sb.append("y" * 500)  # Total now 4300 bytes
+    # Now add more to exceed 64KB
+    sb.append("y" * 6000)  # Total now 66KB
 
     # This may fail or succeed depending on exact overhead
     try:
         result = sb.toString()
-        # If succeeded, response fit in 4KB
-        assert len(result) == 4300
+        # If succeeded, response fit in 64KB
+        assert len(result) == 66000
     except (PayloadTooLargeError, JavaException, RuntimeError) as e:
         # If failed, it should be a size-related error
         err_str = str(e).lower()
@@ -141,8 +144,8 @@ def test_arrow_payload_size_validation(client):
     """Test that Arrow batch size is validated before writing."""
     import pyarrow as pa
 
-    # Get the max payload size (memory - 4KB command zone - 4KB response zone)
-    # For 16MB default: ~16MB - 8KB ≈ 16MB
+    # Get the max payload size (memory - 64KB command zone - 64KB response zone)
+    # For 16MB default: ~16MB - 128KB ≈ 16MB
     # We need to test that validation happens
 
     # Create a small table that will fit

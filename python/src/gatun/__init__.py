@@ -3,6 +3,7 @@ from typing import Optional
 from gatun.client import (
     GatunClient,
     JavaObject,
+    JavaArray,
     JVMView,
     JavaClass,
     java_import,
@@ -40,6 +41,7 @@ __all__ = [
     # Sync client
     "GatunClient",
     "JavaObject",
+    "JavaArray",
     "JVMView",
     "JavaClass",
     "java_import",

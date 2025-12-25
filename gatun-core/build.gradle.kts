@@ -16,8 +16,11 @@ java {
 
 dependencies {
     implementation("com.google.flatbuffers:flatbuffers-java:25.2.10")
-    implementation("org.apache.arrow:arrow-vector:15.0.0")
-    implementation("org.apache.arrow:arrow-memory-netty:15.0.0")
+    implementation("org.apache.arrow:arrow-vector:18.3.0")
+    implementation("org.apache.arrow:arrow-memory-netty:18.3.0")
+
+    // Force Jackson 2.20.1 to match Spark 4.x
+    implementation(platform("com.fasterxml.jackson:jackson-bom:2.20.1"))
 }
 
 val runtimeJvmArgs = listOf(
@@ -51,5 +54,13 @@ tasks {
         archiveClassifier.set("all")
         archiveVersion.set("")
         mergeServiceFiles()
+
+        // Relocate Netty to avoid version conflicts when Spark is on classpath.
+        // Arrow uses Netty for memory allocation, Spark uses a different Netty version.
+        // By shading Gatun's Netty, both can coexist without conflicts.
+        relocate("io.netty", "gatun.shaded.io.netty")
+
+        // Note: Jackson is NOT shaded - we use 2.20.1 to match Spark 4.x exactly.
+        // This allows Spark and Gatun to share the same Jackson classes.
     }
 }
