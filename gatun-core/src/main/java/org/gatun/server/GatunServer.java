@@ -769,7 +769,7 @@ public class GatunServer {
         list.add(converted[0]);
       }
       value = list;
-      type = Object.class;
+      type = java.util.ArrayList.class;
     } else if (valType == Value.MapVal) {
       // Convert Python dict to Java HashMap
       MapVal mv = (MapVal) arg.val(new MapVal());
@@ -781,7 +781,7 @@ public class GatunServer {
         map.put(keyConverted[0], valConverted[0]);
       }
       value = map;
-      type = Object.class;
+      type = java.util.HashMap.class;
     } else if (valType == Value.NullVal) {
       value = null;
       type = Object.class;
