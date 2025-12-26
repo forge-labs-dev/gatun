@@ -26,8 +26,125 @@ from gatun.client import (
     JavaObject as GatunJavaObject,
     JVMView as GatunJVMView,
     java_import as gatun_java_import,
+    JavaException as GatunJavaException,
 )
 from gatun.launcher import launch_gateway as gatun_launch_gateway, GatunSession
+
+
+# Py4J-compatible exception classes
+class Py4JJavaError(Exception):
+    """Py4J-compatible Java exception wrapper.
+
+    This class mimics py4j.protocol.Py4JJavaError to allow PySpark's
+    exception handling to work with Gatun.
+    """
+
+    def __init__(self, msg: str, java_exception: "Py4JJavaError | None" = None):
+        super().__init__(msg)
+        self.java_exception = java_exception
+        self._error_type = ""
+        self._error_msg = msg
+
+    @classmethod
+    def from_gatun_exception(cls, exc: GatunJavaException) -> "Py4JJavaError":
+        """Create a Py4JJavaError from a Gatun JavaException."""
+        # Create a mock Java exception object that PySpark can introspect
+        java_class = getattr(exc, "java_class", type(exc).__name__)
+        message = getattr(exc, "message", str(exc))
+        stack_trace = getattr(exc, "stack_trace", str(exc))
+        java_exc = _MockJavaException(java_class, message, stack_trace)
+        error = cls(str(exc), java_exc)
+        error._error_type = java_class
+        error._error_msg = str(exc)
+        return error
+
+    def __str__(self):
+        return self._error_msg
+
+
+class _MockJavaException:
+    """Mock Java exception object for PySpark compatibility.
+
+    PySpark's exception handling calls methods like getCause(), getMessage(),
+    getStackTrace() on the java_exception. This class provides those methods.
+
+    This class also supports PySpark's is_instance_of checks by maintaining
+    a _gatun_class_name attribute that can be used to check type hierarchy.
+    """
+
+    def __init__(self, class_name: str, message: str, stack_trace: str):
+        self._class_name = class_name
+        self._message = message
+        self._stack_trace = stack_trace
+        self._cause = None
+        # Special attribute for Gatun's is_instance_of to use
+        self._gatun_class_name = class_name
+
+    def toString(self) -> str:
+        return f"{self._class_name}: {self._message}"
+
+    def getMessage(self) -> str:
+        return self._message
+
+    def getCause(self) -> "_MockJavaException | None":
+        return self._cause
+
+    def getStackTrace(self) -> list:
+        """Return a list of mock stack trace elements."""
+        return [_MockStackTraceElement(line) for line in self._stack_trace.split("\n")]
+
+    def getClass(self) -> "_MockJavaClass":
+        return _MockJavaClass(self._class_name)
+
+
+class _MockStackTraceElement:
+    """Mock stack trace element for PySpark compatibility."""
+
+    def __init__(self, line: str):
+        self._line = line
+
+    def toString(self) -> str:
+        return self._line
+
+
+class _MockJavaClass:
+    """Mock Java class for PySpark compatibility."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def getName(self) -> str:
+        return self._name
+
+
+def _convert_exception(func: Callable) -> Callable:
+    """Decorator to convert Gatun exceptions to Py4JJavaError/PySpark exceptions.
+
+    This allows PySpark's exception handling to work with Gatun.
+    """
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except GatunJavaException as e:
+            # First convert to Py4JJavaError
+            py4j_error = Py4JJavaError.from_gatun_exception(e)
+            # Then try to convert to appropriate PySpark exception
+            # Import here to avoid circular import at module load
+            converted = _convert_py4j_error_to_pyspark_lazy(py4j_error)
+            raise converted from None
+
+    return wrapper
+
+
+def _convert_py4j_error_to_pyspark_lazy(error: "Py4JJavaError") -> Exception:
+    """Lazy conversion to avoid import issues at module load time."""
+    # This function is called from _convert_exception decorator
+    # We can't import _convert_py4j_error_to_pyspark at decorator definition time
+    # because it might not exist yet
+    return _convert_py4j_error_to_pyspark(error)
 
 
 # Re-export java_import directly - API is compatible
@@ -97,6 +214,7 @@ class JavaObject(GatunJavaObject):
     """Py4J-compatible JavaObject wrapper.
 
     Extends Gatun's JavaObject with Py4J-specific attributes.
+    Converts Gatun exceptions to Py4JJavaError for PySpark compatibility.
     """
 
     def __init__(self, target_id: str | int, gateway: "JavaGateway"):
@@ -115,11 +233,53 @@ class JavaObject(GatunJavaObject):
         """Py4J compatibility: return the gateway client."""
         return self._gateway
 
+    def __getattr__(self, name: str):
+        """Get attribute with exception conversion."""
+        # Get the underlying callable from GatunJavaObject
+        attr = super().__getattr__(name)
+
+        # Wrap callables to convert exceptions and wrap returned objects
+        if callable(attr):
+            return _ExceptionConvertingCallable(attr, self._gateway)
+        return attr
+
+
+class _ExceptionConvertingCallable:
+    """Wrapper that converts Gatun exceptions to Py4JJavaError/PySpark exceptions."""
+
+    def __init__(self, func: Callable, gateway: "JavaGateway | None" = None):
+        self._func = func
+        self._gateway = gateway
+
+    def __call__(self, *args, **kwargs):
+        try:
+            result = self._func(*args, **kwargs)
+            # If result is a GatunJavaObject and we have a gateway, wrap it
+            if isinstance(result, GatunJavaObject) and not isinstance(result, JavaObject):
+                if self._gateway is not None:
+                    # Detach the original object to prevent double-free
+                    result.detach()
+                    return JavaObject(result.object_id, self._gateway)
+            return result
+        except GatunJavaException as e:
+            # First convert to Py4JJavaError
+            py4j_error = Py4JJavaError.from_gatun_exception(e)
+            # Then try to convert to appropriate PySpark exception
+            converted = _convert_py4j_error_to_pyspark_lazy(py4j_error)
+            raise converted from None
+        except Py4JJavaError as e:
+            # Client already raised Py4JJavaError - try to convert to PySpark exception
+            converted = _convert_py4j_error_to_pyspark_lazy(e)
+            if converted is not e:
+                raise converted from None
+            raise
+
 
 class JVMView(GatunJVMView):
     """Py4J-compatible JVMView wrapper.
 
     Provides the same interface as py4j.java_gateway.JVMView.
+    Converts Gatun exceptions to Py4JJavaError for PySpark compatibility.
     """
 
     def __init__(self, gateway: "JavaGateway", jvm_name: str = "default"):
@@ -131,6 +291,128 @@ class JVMView(GatunJVMView):
     def _gateway_client(self):
         """Py4J compatibility: return the gateway client."""
         return self._gateway
+
+    def __getattr__(self, name: str):
+        """Get attribute with exception conversion wrapper."""
+        attr = super().__getattr__(name)
+        # Wrap the _JVMNode to convert exceptions
+        if hasattr(attr, "__call__"):
+            return _ExceptionConvertingJVMNode(attr, self._gateway)
+        return attr
+
+
+def _convert_py4j_error_to_pyspark(error: "Py4JJavaError") -> Exception:
+    """Convert Py4JJavaError to appropriate PySpark exception.
+
+    This function converts Gatun's Py4JJavaError to the appropriate PySpark
+    exception (AnalysisException, IllegalArgumentException, etc.) so that
+    PySpark code that catches these specific exceptions will work correctly.
+
+    Args:
+        error: The Py4JJavaError to convert
+
+    Returns:
+        The appropriate PySpark exception, or the original error if no
+        conversion is needed or possible
+    """
+    # Get the java_exception which is our _MockJavaException
+    java_exc = error.java_exception
+    if java_exc is None or not hasattr(java_exc, "_gatun_class_name"):
+        return error
+
+    class_name = java_exc._gatun_class_name
+    message = java_exc.getMessage() or ""
+    stack_trace = java_exc._stack_trace if hasattr(java_exc, "_stack_trace") else str(error)
+
+    # Try to import PySpark exception classes
+    try:
+        from pyspark.errors.exceptions.captured import (
+            AnalysisException,
+            ParseException,
+            IllegalArgumentException,
+            StreamingQueryException,
+            QueryExecutionException,
+            PythonException,
+            ArithmeticException,
+            UnsupportedOperationException,
+            ArrayIndexOutOfBoundsException,
+            DateTimeException,
+            NumberFormatException,
+            SparkRuntimeException,
+            SparkUpgradeException,
+            SparkNoSuchElementException,
+        )
+    except ImportError:
+        # PySpark not available or exceptions not available
+        return error
+
+    # Map Java exception class to PySpark exception
+    # Order matters - more specific exceptions should come first
+    if "catalyst.parser.ParseException" in class_name:
+        return ParseException(desc=message, stackTrace=stack_trace)
+    elif "AnalysisException" in class_name:
+        return AnalysisException(desc=message, stackTrace=stack_trace)
+    elif "StreamingQueryException" in class_name:
+        return StreamingQueryException(desc=message, stackTrace=stack_trace)
+    elif "QueryExecutionException" in class_name:
+        return QueryExecutionException(desc=message, stackTrace=stack_trace)
+    elif "NumberFormatException" in class_name:
+        return NumberFormatException(desc=message, stackTrace=stack_trace)
+    elif "IllegalArgumentException" in class_name:
+        return IllegalArgumentException(desc=message, stackTrace=stack_trace)
+    elif "ArithmeticException" in class_name:
+        return ArithmeticException(desc=message, stackTrace=stack_trace)
+    elif "UnsupportedOperationException" in class_name:
+        return UnsupportedOperationException(desc=message, stackTrace=stack_trace)
+    elif "ArrayIndexOutOfBoundsException" in class_name:
+        return ArrayIndexOutOfBoundsException(desc=message, stackTrace=stack_trace)
+    elif "DateTimeException" in class_name:
+        return DateTimeException(desc=message, stackTrace=stack_trace)
+    elif "SparkRuntimeException" in class_name:
+        return SparkRuntimeException(desc=message, stackTrace=stack_trace)
+    elif "SparkUpgradeException" in class_name:
+        return SparkUpgradeException(desc=message, stackTrace=stack_trace)
+    elif "SparkNoSuchElementException" in class_name:
+        return SparkNoSuchElementException(desc=message, stackTrace=stack_trace)
+    elif "PythonException" in class_name:
+        return PythonException(desc=message, stackTrace=stack_trace)
+
+    # Return the original error for unknown exception types
+    return error
+
+
+class _ExceptionConvertingJVMNode:
+    """Wrapper for JVM nodes that converts exceptions and wraps results."""
+
+    def __init__(self, node, gateway: "JavaGateway"):
+        self._node = node
+        self._gateway = gateway
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._node, name)
+        if hasattr(attr, "__call__") or hasattr(attr, "__getattr__"):
+            return _ExceptionConvertingJVMNode(attr, self._gateway)
+        return attr
+
+    def __call__(self, *args, **kwargs):
+        try:
+            result = self._node(*args, **kwargs)
+            # Wrap returned JavaObjects
+            if isinstance(result, GatunJavaObject) and not isinstance(result, JavaObject):
+                # Detach the original object to prevent double-free
+                # The wrapper will manage the object lifecycle
+                result.detach()
+                return JavaObject(result.object_id, self._gateway)
+            return result
+        except GatunJavaException as e:
+            # First convert to Py4JJavaError
+            py4j_error = Py4JJavaError.from_gatun_exception(e)
+            # Then try to convert to appropriate PySpark exception
+            converted = _convert_py4j_error_to_pyspark(py4j_error)
+            raise converted from None
+
+    def __repr__(self):
+        return repr(self._node)
 
 
 class JavaGateway:
@@ -212,8 +494,10 @@ class JavaGateway:
         # Store gateway parameters for Py4J compatibility
         self._gateway_parameters = gateway_parameters or GatewayParameters()
 
-        # Create and connect client
-        self._client = GatunClient(socket_path)
+        # Create and connect client with py4j_compat mode enabled
+        self._client = GatunClient(socket_path, py4j_compat=True)
+        # Set the exception converter so client raises Py4JJavaError
+        self._client._py4j_exception_converter = Py4JJavaError.from_gatun_exception
         if not self._client.connect():
             if self._session:
                 self._session.stop()
@@ -525,6 +809,189 @@ def launch_gateway(
     )
 
 
+# Global exception handler that can be set by PySpark's install_exception_handler()
+# When set, this function is called with Py4JJavaError before re-raising
+_exception_handler: callable | None = None
+
+
+def _set_exception_handler(handler: callable) -> None:
+    """Set a global exception handler for Py4JJavaError.
+
+    This is called by PySpark's install_exception_handler() to install a handler
+    that converts Py4JJavaError to PySpark-specific exceptions like AnalysisException.
+
+    The handler takes a function as input and returns a wrapped function that
+    catches Py4JJavaError and converts it to the appropriate exception.
+    """
+    global _exception_handler
+    _exception_handler = handler
+
+
+def _get_exception_handler() -> callable | None:
+    """Get the currently registered exception handler."""
+    return _exception_handler
+
+
+# Known exception inheritance patterns for Spark/Java
+# This is used by _gatun_is_instance_of to check exception types
+_EXCEPTION_INHERITANCE = {
+    # Spark SQL exceptions
+    "org.apache.spark.sql.catalyst.parser.ParseException": [
+        "org.apache.spark.sql.AnalysisException",
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.sql.AnalysisException": [
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.sql.streaming.StreamingQueryException": [
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.sql.execution.QueryExecutionException": [
+        "java.lang.Exception",
+    ],
+    # Java exceptions
+    "java.lang.NumberFormatException": [
+        "java.lang.IllegalArgumentException",
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.lang.IllegalArgumentException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.lang.ArithmeticException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.lang.UnsupportedOperationException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.lang.ArrayIndexOutOfBoundsException": [
+        "java.lang.IndexOutOfBoundsException",
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.lang.IndexOutOfBoundsException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "java.time.DateTimeException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    # Spark runtime exceptions
+    "org.apache.spark.SparkRuntimeException": [
+        "org.apache.spark.SparkException",
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.SparkUpgradeException": [
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.SparkNoSuchElementException": [
+        "java.util.NoSuchElementException",
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+    "org.apache.spark.api.python.PythonException": [
+        "java.lang.RuntimeException",
+        "java.lang.Exception",
+    ],
+}
+
+
+def _check_exception_inheritance(obj_class: str, parent_class: str) -> bool:
+    """Check if obj_class inherits from parent_class.
+
+    This handles the common exception inheritance patterns in Spark/Java.
+    """
+    parents = _EXCEPTION_INHERITANCE.get(obj_class, [])
+    return parent_class in parents
+
+
+# Monkey-patch py4j.protocol to use our Py4JJavaError
+# This allows PySpark's exception handlers (which import from py4j.protocol)
+# to catch Gatun exceptions correctly.
+def _patch_py4j_protocol():
+    """Patch py4j.protocol.Py4JJavaError to be Gatun's Py4JJavaError.
+
+    This is necessary because PySpark imports Py4JJavaError from py4j.protocol
+    in many places and uses `except Py4JJavaError:` to catch Java exceptions.
+    By patching the py4j.protocol module, those catch blocks will also catch
+    our Gatun Py4JJavaError exceptions.
+
+    This function patches py4j modules regardless of whether the real py4j
+    package is installed, ensuring Gatun's exception handling is used.
+    """
+    import sys
+    import types
+
+    # Create or get the py4j module
+    if "py4j" not in sys.modules:
+        py4j_module = types.ModuleType("py4j")
+        sys.modules["py4j"] = py4j_module
+    else:
+        py4j_module = sys.modules["py4j"]
+
+    # Create or get the py4j.protocol module
+    if "py4j.protocol" not in sys.modules:
+        protocol_module = types.ModuleType("py4j.protocol")
+        sys.modules["py4j.protocol"] = protocol_module
+        py4j_module.protocol = protocol_module
+    else:
+        protocol_module = sys.modules["py4j.protocol"]
+
+    # ALWAYS patch Py4JJavaError to be our class (even if real py4j is installed)
+    protocol_module.Py4JJavaError = Py4JJavaError
+
+    # Add a dummy get_return_value that PySpark's install_exception_handler can patch.
+    # This is only used to make install_exception_handler not fail - the actual
+    # exception conversion happens in _ExceptionConvertingJVMNode.
+    def _dummy_get_return_value(*args, **kwargs):
+        """Dummy function for PySpark compatibility - not actually used."""
+        pass
+
+    protocol_module.get_return_value = _dummy_get_return_value
+
+    # Custom is_instance_of that handles both real Java objects and mock exceptions
+    def _gatun_is_instance_of(gw, obj, cls_name):
+        """Check if obj is an instance of cls_name.
+
+        For real JavaObject instances, delegates to gateway.is_instance_of.
+        For _MockJavaException objects (from Gatun's exception handling),
+        checks based on the class name using a known inheritance hierarchy.
+        """
+        # Handle mock exceptions specially
+        if hasattr(obj, "_gatun_class_name"):
+            obj_class = obj._gatun_class_name
+            # Check exact match first
+            if obj_class == cls_name:
+                return True
+            # Check known inheritance patterns for Spark exceptions
+            return _check_exception_inheritance(obj_class, cls_name)
+        # Fall back to gateway's is_instance_of for real Java objects
+        if gw is not None:
+            return gw.is_instance_of(obj, cls_name)
+        return False
+
+    # Create or get the py4j.java_gateway module
+    if "py4j.java_gateway" not in sys.modules:
+        gateway_module = types.ModuleType("py4j.java_gateway")
+        sys.modules["py4j.java_gateway"] = gateway_module
+        py4j_module.java_gateway = gateway_module
+    else:
+        gateway_module = sys.modules["py4j.java_gateway"]
+
+    # ALWAYS patch is_instance_of (even if real py4j is installed)
+    gateway_module.is_instance_of = _gatun_is_instance_of
+    gateway_module.java_import = java_import
+    gateway_module.get_return_value = _dummy_get_return_value
+
+
+# Apply the patch when this module is imported
+_patch_py4j_protocol()
+
+
 # Export all public symbols
 __all__ = [
     # Main classes
@@ -536,6 +1003,8 @@ __all__ = [
     "GatewayParameters",
     "JavaParameters",
     "PythonParameters",
+    # Exceptions (Py4J compatible)
+    "Py4JJavaError",
     # Functions
     "java_import",
     "get_field",

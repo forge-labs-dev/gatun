@@ -34,7 +34,7 @@ from gatun.client import (
     JavaObject,
     PayloadTooLargeError,
     PROTOCOL_VERSION,
-    _raise_java_exception,
+    _raise_java_exception_impl,
 )
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
@@ -300,7 +300,7 @@ class AsyncGatunClient:
                     if error_type_bytes
                     else "java.lang.RuntimeException"
                 )
-                _raise_java_exception(error_type, error_msg)
+                _raise_java_exception_impl(error_type, error_msg)
 
             # Unpack the return value
             return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())

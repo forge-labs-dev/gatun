@@ -162,12 +162,20 @@ _JAVA_EXCEPTION_MAP: dict[str, type[JavaException]] = {
 }
 
 
-def _raise_java_exception(error_type: str, error_msg: str) -> None:
+def _raise_java_exception_impl(
+    error_type: str,
+    error_msg: str,
+    exception_converter: callable | None = None,
+) -> None:
     """Raise the appropriate Python exception for a Java error.
+
+    This is the core implementation used by both sync and async clients.
 
     Args:
         error_type: The fully qualified Java exception class name
         error_msg: The full error message including stack trace
+        exception_converter: Optional function to convert JavaException to another type
+                           (e.g., Py4JJavaError for PySpark compatibility)
     """
     import re
 
@@ -198,7 +206,14 @@ def _raise_java_exception(error_type: str, error_msg: str) -> None:
     if ": " in message:
         message = message.split(": ", 1)[1]
 
-    raise exc_class(error_type, message, error_msg)
+    # Create the native Gatun exception
+    native_exc = exc_class(error_type, message, error_msg)
+
+    # If we have a converter, use it
+    if exception_converter is not None:
+        raise exception_converter(native_exc) from None
+
+    raise native_exc
 
 
 def _recv_exactly(sock, n):
@@ -717,7 +732,15 @@ class _JVMNode:
 
 
 class GatunClient:
-    def __init__(self, socket_path=None):
+    def __init__(self, socket_path=None, *, py4j_compat: bool = False):
+        """Initialize a Gatun client.
+
+        Args:
+            socket_path: Path to the Unix domain socket for communication.
+                        Defaults to ~/gatun.sock.
+            py4j_compat: If True, raise Py4JJavaError instead of JavaException
+                        for compatibility with PySpark's exception handling.
+        """
         if socket_path is None:
             socket_path = os.path.expanduser("~/gatun.sock")
 
@@ -748,6 +771,10 @@ class GatunClient:
 
         # Arena epoch for lifetime safety - tracks current valid epoch
         self._arena_epoch: int = 0
+
+        # Py4J compatibility mode - raise Py4JJavaError instead of JavaException
+        self._py4j_compat = py4j_compat
+        self._py4j_exception_converter = None
 
     @property
     def jvm(self):
@@ -989,7 +1016,7 @@ class GatunClient:
                     if error_type_bytes
                     else "java.lang.RuntimeException"
                 )
-                _raise_java_exception(error_type, error_msg)
+                self._raise_java_exception(error_type, error_msg)
 
             # 4. Check for Arrow batch response
             arrow_batch = resp.ArrowBatch()
@@ -998,6 +1025,15 @@ class GatunClient:
 
             # 5. Unpack the return value
             return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())
+
+    def _raise_java_exception(self, error_type: str, error_msg: str) -> None:
+        """Raise the appropriate Python exception for a Java error.
+
+        If py4j_compat mode is enabled and a converter is set, this will
+        raise Py4JJavaError instead of the native Gatun exceptions.
+        """
+        converter = self._py4j_exception_converter if self._py4j_compat else None
+        _raise_java_exception_impl(error_type, error_msg, converter)
 
     def _handle_callback(self, resp):
         """Handle a callback invocation request from Java."""

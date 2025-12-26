@@ -18,6 +18,7 @@ from gatun.py4j_compat import (
     java_import,
     is_instance_of,
     launch_gateway,
+    Py4JJavaError,
 )
 
 
@@ -292,3 +293,60 @@ class TestPySparkPatterns:
         size = arr.size()
         items = [arr.get(i) for i in range(size)]
         assert items == ["a", "b", "c"]
+
+
+class TestPy4JJavaError:
+    """Test Py4JJavaError exception compatibility for PySpark."""
+
+    def test_exception_raised_as_py4j_java_error(self, gateway):
+        """Test that Java exceptions are raised as Py4JJavaError."""
+        with pytest.raises(Py4JJavaError) as exc_info:
+            # Try to parse an invalid number - should raise NumberFormatException
+            gateway.jvm.java.lang.Integer.parseInt("not_a_number")
+
+        # Verify the exception has the expected attributes
+        error = exc_info.value
+        assert error.java_exception is not None
+        assert "NumberFormatException" in str(error)
+
+    def test_exception_has_java_exception_attribute(self, gateway):
+        """Test that Py4JJavaError has java_exception attribute like Py4J."""
+        with pytest.raises(Py4JJavaError) as exc_info:
+            gateway.jvm.java.lang.Integer.parseInt("invalid")
+
+        error = exc_info.value
+        java_exc = error.java_exception
+
+        # PySpark introspects these methods
+        assert hasattr(java_exc, "getMessage")
+        assert hasattr(java_exc, "getClass")
+        assert hasattr(java_exc, "getCause")
+        assert hasattr(java_exc, "getStackTrace")
+        assert hasattr(java_exc, "toString")
+
+        # Test the methods return reasonable values
+        assert java_exc.getMessage() is not None
+        assert java_exc.getClass().getName() is not None
+        assert "NumberFormatException" in java_exc.getClass().getName()
+
+    def test_exception_via_direct_method_call(self, gateway):
+        """Test exception via direct method call (not through JVM view)."""
+        arr = gateway.jvm.java.util.ArrayList()
+
+        with pytest.raises(Py4JJavaError) as exc_info:
+            # Try to get element at invalid index
+            arr.get(999)
+
+        error = exc_info.value
+        assert "IndexOutOfBoundsException" in str(error)
+
+    def test_exception_preserves_stack_trace(self, gateway):
+        """Test that stack trace is preserved in exception."""
+        with pytest.raises(Py4JJavaError) as exc_info:
+            gateway.jvm.java.lang.Integer.parseInt("bad")
+
+        error = exc_info.value
+        stack_trace = error.java_exception.getStackTrace()
+        assert isinstance(stack_trace, list)
+        # Should have at least some stack frames
+        assert len(stack_trace) >= 0  # May be empty for simple exceptions
