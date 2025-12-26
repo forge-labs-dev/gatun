@@ -632,11 +632,18 @@ class JVMView:
 
             # Check for wildcard imports (e.g., java_import(jvm, "java.util.*"))
             # Only apply wildcards for uppercase names (class names per Java convention)
+            # We need to check all wildcard packages and return the first one that
+            # actually contains the class, since multiple packages may be imported.
             if name and name[0].isupper():
                 for package, is_wildcard in self._imports.items():
                     if is_wildcard is True:
-                        # Try the package.name path
-                        return _JVMNode(self._client, f"{package}.{name}")
+                        # Try the package.name path - verify it exists first
+                        full_path = f"{package}.{name}"
+                        # Use reflection to check if this class exists
+                        if full_path not in _reflect_cache:
+                            _reflect_cache[full_path] = self._client.reflect(full_path)
+                        if _reflect_cache[full_path] in ("class", "method", "field"):
+                            return _JVMNode(self._client, full_path)
 
         if self._package_path:
             new_path = f"{self._package_path}.{name}"
@@ -723,7 +730,27 @@ class _JVMNode:
             # This is a static field access (being called as function - error)
             raise TypeError(f"{self._path} is a static field, not a method")
         else:
-            # Unknown - try as class first (backward compatibility)
+            # Unknown type - use heuristics to decide whether this is a class or method
+            # If the path has a dot and the parent segment looks like a class name
+            # (starts with uppercase), treat the last segment as a method call.
+            # Example: org.apache.spark.api.python.PythonSQLUtils.explainString
+            #          -> PythonSQLUtils is the class, explainString is the method
+            last_dot = self._path.rfind(".")
+            if last_dot != -1:
+                parent_path = self._path[:last_dot]
+                method_name = self._path[last_dot + 1:]
+                parent_last_segment = parent_path.rsplit(".", 1)[-1]
+
+                # If parent looks like a class (starts with uppercase) and
+                # method name looks like a method (starts with lowercase),
+                # try as static method first
+                if (parent_last_segment and parent_last_segment[0].isupper() and
+                    method_name and method_name[0].islower()):
+                    return self._client.invoke_static_method(
+                        parent_path, method_name, *args
+                    )
+
+            # Fallback: try as class instantiation (backward compatibility)
             # This handles packages that haven't been loaded yet
             return self._client.create_object(self._path, *args)
 
