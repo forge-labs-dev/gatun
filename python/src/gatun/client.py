@@ -536,6 +536,27 @@ class JavaObject:
         except Exception:
             return f"<Dead JavaObject id={self.object_id}>"
 
+    def __eq__(self, other):
+        """Compare with another JavaObject using Java's equals() method."""
+        if not isinstance(other, JavaObject):
+            return False
+        # If same object_id, they're definitely equal
+        if self.object_id == other.object_id:
+            return True
+        # Otherwise, call Java's equals() method
+        try:
+            return self.client.invoke_method(self.object_id, "equals", other)
+        except Exception:
+            return False
+
+    def __hash__(self):
+        """Return Java's hashCode() for this object."""
+        try:
+            return self.client.invoke_method(self.object_id, "hashCode")
+        except Exception:
+            # Fallback to object_id if we can't get hashCode
+            return hash(self.object_id)
+
 
 def java_import(jvm_view: "JVMView", import_path: str) -> None:
     """Import Java classes into the JVM view's namespace.
