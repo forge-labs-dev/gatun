@@ -123,7 +123,6 @@ class TestJavaArrayRoundTrip:
     lists and then back to ArrayLists.
     """
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_array_type_preserved(self, client):
         """Test that arrays from Java are JavaArray instances."""
         arr = client.jvm.java.util.ArrayList()
@@ -153,7 +152,6 @@ class TestJavaArrayRoundTrip:
         assert result[2] == "z"
         assert list(result) == ["x", "y", "z"]
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_array_round_trip_object(self, client):
         """Test Object[] round-trip preserves array semantics."""
         # Create array from ArrayList
@@ -171,7 +169,6 @@ class TestJavaArrayRoundTrip:
         result = client.jvm.java.util.Arrays.toString(java_array)
         assert result == "[hello, world]"
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_int_array_preserved(self, client):
         """Test that int[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
@@ -184,7 +181,6 @@ class TestJavaArrayRoundTrip:
         assert result.element_type == "Int"
         assert list(result) == [1, 2, 3, 4, 5]
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_long_array_preserved(self, client):
         """Test that long[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
@@ -195,7 +191,6 @@ class TestJavaArrayRoundTrip:
         assert isinstance(result, JavaArray)
         assert result.element_type == "Long"
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_double_array_preserved(self, client):
         """Test that double[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
@@ -206,7 +201,6 @@ class TestJavaArrayRoundTrip:
         assert isinstance(result, JavaArray)
         assert result.element_type == "Double"
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_string_array_preserved(self, client):
         """Test that String[] arrays have correct element type."""
         arr = client.jvm.java.util.ArrayList()
@@ -221,7 +215,6 @@ class TestJavaArrayRoundTrip:
         assert result.element_type == "Object"
         assert list(result) == ["a", "b", "c"]
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_array_size_method(self, client):
         """Test JavaArray.size() method for Java-style access."""
         arr = client.jvm.java.util.ArrayList()
@@ -231,7 +224,6 @@ class TestJavaArrayRoundTrip:
         # Java-style size() method
         assert java_array.size() == 1
 
-    @pytest.mark.skip(reason="JavaArray return type not implemented - server returns ObjectRef for arrays")
     def test_java_array_length_property(self, client):
         """Test JavaArray.length property for Java-style access."""
         arr = client.jvm.java.util.ArrayList()

@@ -290,3 +290,97 @@ def test_arraylist_add_overloads(client):
     assert arr.size() == 2
     assert arr.get(0) == "zero"
     assert arr.get(1) == "first"
+
+
+# --- return_object_ref tests ---
+
+
+def test_return_object_ref_array(client):
+    """Test that return_object_ref=True returns ObjectRef for arrays."""
+    from gatun import JavaArray
+    from gatun.client import JavaObject
+
+    # Get Class object for String
+    class_obj = client.invoke_static_method("java.lang.Class", "forName", "java.lang.String")
+
+    # Without return_object_ref, arrays are auto-converted to JavaArray
+    arr_auto = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", class_obj, 3
+    )
+    assert isinstance(arr_auto, JavaArray)
+    assert not isinstance(arr_auto, JavaObject)
+
+    # With return_object_ref=True, arrays are returned as ObjectRef
+    arr_ref = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", class_obj, 3, return_object_ref=True
+    )
+    assert isinstance(arr_ref, JavaObject)
+    assert hasattr(arr_ref, "object_id")
+
+
+def test_return_object_ref_list(client):
+    """Test that return_object_ref=True returns ObjectRef for lists."""
+    from gatun.client import JavaObject
+
+    # Create an ArrayList and populate it
+    arr = client.create_object("java.util.ArrayList")
+    arr.add("a")
+    arr.add("b")
+    arr.add("c")
+
+    # Without return_object_ref, subList returns auto-converted Python list
+    # Note: We test with ArrayList directly since Arrays.asList returns a private class
+    list_auto = client.invoke_method(arr.object_id, "subList", 0, 2)
+    assert isinstance(list_auto, list)
+    assert list_auto == ["a", "b"]
+
+    # With return_object_ref=True on static method returning a new ArrayList
+    # Use Collections.emptyList which returns a public singleton
+    empty_ref = client.invoke_static_method(
+        "java.util.Collections", "emptyList", return_object_ref=True
+    )
+    assert isinstance(empty_ref, JavaObject)
+    assert hasattr(empty_ref, "object_id")
+
+
+def test_return_object_ref_string(client):
+    """Test that return_object_ref=True returns ObjectRef for strings."""
+    from gatun.client import JavaObject
+
+    # Without return_object_ref, strings are auto-converted
+    str_auto = client.invoke_static_method(
+        "java.lang.String", "valueOf", 42
+    )
+    assert isinstance(str_auto, str)
+    assert str_auto == "42"
+
+    # With return_object_ref=True, strings are returned as ObjectRef
+    str_ref = client.invoke_static_method(
+        "java.lang.String", "valueOf", 42, return_object_ref=True
+    )
+    assert isinstance(str_ref, JavaObject)
+    assert str_ref.toString() == "42"
+
+
+def test_return_object_ref_allows_mutation(client):
+    """Test that ObjectRef arrays can be mutated via reflection API."""
+    from gatun.client import JavaObject
+
+    # Create array with return_object_ref=True
+    class_obj = client.invoke_static_method("java.lang.Class", "forName", "java.lang.String")
+    arr = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", class_obj, 3, return_object_ref=True
+    )
+    assert isinstance(arr, JavaObject)
+
+    # Set elements using Array.set
+    client.invoke_static_method("java.lang.reflect.Array", "set", arr, 0, "hello")
+    client.invoke_static_method("java.lang.reflect.Array", "set", arr, 1, "world")
+
+    # Get elements using Array.get
+    assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 0) == "hello"
+    assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 1) == "world"
+    assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 2) is None
+
+    # Verify length
+    assert client.invoke_static_method("java.lang.reflect.Array", "getLength", arr) == 3

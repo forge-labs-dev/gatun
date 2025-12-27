@@ -150,8 +150,13 @@ class GatunAdapter(BridgeAdapter):
                 )
 
             # Create the array using reflection
+            # Use return_object_ref=True to get an ObjectRef instead of auto-converted array
             return self._client.invoke_static_method(
-                "java.lang.reflect.Array", "newInstance", class_obj, length
+                "java.lang.reflect.Array",
+                "newInstance",
+                class_obj,
+                length,
+                return_object_ref=True,
             )
         except GatunJavaException as e:
             raise self._convert_exception(e) from None

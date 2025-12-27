@@ -70,6 +70,8 @@ public class GatunServer {
           "java.lang.StringBuilder",
           "java.lang.StringBuffer",
           "java.lang.System",    // For setting system properties (e.g., spark.master)
+          "java.lang.Class",     // For reflection-based array creation
+          "java.lang.reflect.Array",  // For array operations
           "java.sql.Timestamp",  // For datetime conversion
           "java.sql.Date",       // For date conversion
           "java.sql.Time");      // For time conversion
@@ -378,7 +380,8 @@ public class GatunServer {
             result = method.invoke(null, finalArgs);
 
             // Wrap returned objects in registry
-            if (result != null && !isAutoConvertible(result)) {
+            // If returnObjectRef is true, always wrap as ObjectRef (no auto-conversion)
+            if (result != null && (cmd.returnObjectRef() || !isAutoConvertible(result))) {
               long newId = objectIdCounter.getAndIncrement();
               objectRegistry.put(newId, result);
               sessionObjectIds.add(newId);

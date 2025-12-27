@@ -1375,13 +1375,16 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
-    def invoke_static_method(self, class_name, method_name, *args):
+    def invoke_static_method(
+        self, class_name, method_name, *args, return_object_ref: bool = False
+    ):
         """Invoke a static method on a class.
 
         Args:
             class_name: Fully qualified class name (e.g., "java.lang.Integer")
             method_name: Method name (e.g., "parseInt")
             *args: Arguments to pass to the method
+            return_object_ref: If True, return result as ObjectRef (no auto-conversion)
         """
         builder = flatbuffers.Builder(1024)
         # Format: "fully.qualified.ClassName.methodName"
@@ -1408,6 +1411,8 @@ class GatunClient:
         Cmd.CommandAddTargetName(builder, name_off)
         if args_vec:
             Cmd.CommandAddArgs(builder, args_vec)
+        if return_object_ref:
+            Cmd.CommandAddReturnObjectRef(builder, True)
 
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
