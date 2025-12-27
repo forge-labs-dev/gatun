@@ -9,25 +9,29 @@ import numpy as np
 
 
 class TestArrayReturnValues:
-    """Test that Java arrays are returned correctly to Python."""
+    """Test that Java arrays are returned correctly to Python.
+
+    Java arrays are returned as JavaObject instances with iteration support.
+    Use list() to convert them to Python lists.
+    """
 
     def test_int_array_copyof(self, client):
-        """Test Arrays.copyOf returns int[] which becomes a list."""
+        """Test Arrays.copyOf returns int[] which can be iterated."""
         Arrays = client.jvm.java.util.Arrays
         original = np.array([1, 2, 3, 4, 5], dtype=np.int32)
         # copyOf returns int[]
         result = Arrays.copyOf(original, 5)
-        assert result == [1, 2, 3, 4, 5]
+        assert list(result) == [1, 2, 3, 4, 5]
 
     def test_double_array_copyof(self, client):
-        """Test Arrays.copyOf returns double[] which becomes a list."""
+        """Test Arrays.copyOf returns double[] which can be iterated."""
         Arrays = client.jvm.java.util.Arrays
         original = np.array([1.5, 2.5, 3.5], dtype=np.float64)
         result = Arrays.copyOf(original, 3)
-        assert result == [1.5, 2.5, 3.5]
+        assert list(result) == [1.5, 2.5, 3.5]
 
     def test_string_array_copyof(self, client):
-        """Test Arrays.copyOf with String[] equivalent."""
+        """Test Arrays.copyOf with String[] equivalent which can be iterated."""
         # Create Object[] with strings via ArrayList.toArray
         ArrayList = client.jvm.java.util.ArrayList
         al = ArrayList()
@@ -35,16 +39,16 @@ class TestArrayReturnValues:
         al.add("b")
         al.add("c")
         arr = al.toArray()
-        assert arr == ["a", "b", "c"]
+        assert list(arr) == ["a", "b", "c"]
 
     def test_toarray_from_list(self, client):
-        """Test ArrayList.toArray() returns Object[]."""
+        """Test ArrayList.toArray() returns Object[] which can be iterated."""
         ArrayList = client.jvm.java.util.ArrayList
         arr = ArrayList()
         arr.add("hello")
         arr.add("world")
         result = arr.toArray()
-        assert result == ["hello", "world"]
+        assert list(result) == ["hello", "world"]
 
 
 class TestArrayArguments:
@@ -131,7 +135,11 @@ class TestPythonArrayModule:
 
 
 class TestArrayRoundTrip:
-    """Test arrays can be sent to Java and received back."""
+    """Test arrays can be sent to Java and received back.
+
+    Java arrays are returned as JavaObject instances with iteration support.
+    Use list() to convert them to Python lists.
+    """
 
     def test_int_array_roundtrip_via_copy(self, client):
         """Test int[] round trip via Arrays.copyOf."""
@@ -140,7 +148,7 @@ class TestArrayRoundTrip:
 
         # copyOf returns int[]
         copied = Arrays.copyOf(original, 3)
-        assert copied == [10, 20, 30]
+        assert list(copied) == [10, 20, 30]
 
     def test_double_array_roundtrip(self, client):
         """Test double[] round trip."""
@@ -149,7 +157,7 @@ class TestArrayRoundTrip:
 
         # Arrays.copyOf returns double[]
         copied = Arrays.copyOf(original, 3)
-        assert copied == [1.1, 2.2, 3.3]
+        assert list(copied) == [1.1, 2.2, 3.3]
 
     def test_string_array_via_list(self, client):
         """Test String[] round trip via ArrayList."""
@@ -163,7 +171,7 @@ class TestArrayRoundTrip:
 
         # toArray returns Object[]
         result = al.toArray()
-        assert result == ["apple", "banana", "cherry"]
+        assert list(result) == ["apple", "banana", "cherry"]
 
 
 class TestArrayEdgeCases:

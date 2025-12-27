@@ -557,6 +557,90 @@ class JavaObject:
             # Fallback to object_id if we can't get hashCode
             return hash(self.object_id)
 
+    def __len__(self):
+        """Return length of Java array or collection.
+
+        For arrays, uses Array.getLength().
+        For collections, calls size().
+        Raises TypeError if object doesn't support length.
+        """
+        # Try array length first
+        try:
+            return self.client.invoke_static_method(
+                "java.lang.reflect.Array", "getLength", self
+            )
+        except Exception:
+            pass
+
+        # Try collection size()
+        try:
+            return self.client.invoke_method(self.object_id, "size")
+        except Exception:
+            pass
+
+        # Object doesn't support length
+        raise TypeError("object has no len()")
+
+    def __bool__(self):
+        """Return True if this is a valid Java object reference.
+
+        This prevents bool() from calling __len__() on objects that
+        don't support length (like JavaSparkContext).
+        """
+        # A JavaObject with a valid object_id is truthy
+        return self.object_id is not None
+
+    def __iter__(self):
+        """Iterate over Java array or collection.
+
+        For arrays, uses Array.get() with index.
+        For Iterable objects, calls iterator().
+        """
+        try:
+            # Try array iteration first
+            length = self.client.invoke_static_method(
+                "java.lang.reflect.Array", "getLength", self
+            )
+            for i in range(length):
+                yield self.client.invoke_static_method(
+                    "java.lang.reflect.Array", "get", self, i
+                )
+        except Exception:
+            # Fall back to Iterable.iterator()
+            iterator = self.client.invoke_method(self.object_id, "iterator")
+            while self.client.invoke_method(iterator.object_id, "hasNext"):
+                yield self.client.invoke_method(iterator.object_id, "next")
+
+    def __getitem__(self, index):
+        """Get element at index from Java array or list.
+
+        For arrays, uses Array.get().
+        For lists, calls get(index).
+        """
+        try:
+            # Try array access first
+            return self.client.invoke_static_method(
+                "java.lang.reflect.Array", "get", self, index
+            )
+        except Exception:
+            # Fall back to list.get(index)
+            return self.client.invoke_method(self.object_id, "get", index)
+
+    def __setitem__(self, index, value):
+        """Set element at index in Java array or list.
+
+        For arrays, uses Array.set().
+        For lists, calls set(index, value).
+        """
+        try:
+            # Try array access first
+            self.client.invoke_static_method(
+                "java.lang.reflect.Array", "set", self, index, value
+            )
+        except Exception:
+            # Fall back to list.set(index, value)
+            self.client.invoke_method(self.object_id, "set", index, value)
+
 
 def java_import(jvm_view: "JVMView", import_path: str) -> None:
     """Import Java classes into the JVM view's namespace.
