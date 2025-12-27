@@ -69,12 +69,16 @@ public class GatunServer {
           "java.lang.Math",
           "java.lang.StringBuilder",
           "java.lang.StringBuffer",
-          "java.lang.System");  // For setting system properties (e.g., spark.master)
+          "java.lang.System",    // For setting system properties (e.g., spark.master)
+          "java.sql.Timestamp",  // For datetime conversion
+          "java.sql.Date",       // For date conversion
+          "java.sql.Time");      // For time conversion
 
   // --- SECURITY: Prefixes for allowed class packages (e.g., for Spark integration) ---
   private static final Set<String> ALLOWED_PREFIXES =
       Set.of(
           "org.apache.spark.",  // Apache Spark
+          "org.apache.log4j.",  // Log4J (used by Spark)
           "scala."              // Scala standard library
       );
 
@@ -745,8 +749,16 @@ public class GatunServer {
       type = String.class; // Use String for better overload resolution
     } else if (valType == Value.IntVal) {
       IntVal iv = (IntVal) arg.val(new IntVal());
-      value = (int) iv.v(); // Convert long to int for common Java APIs
-      type = int.class;
+      long longVal = iv.v();
+      // Check if value fits in int range; if so use int for common Java APIs
+      // Otherwise use long to avoid overflow (e.g., epoch milliseconds for Timestamp)
+      if (longVal >= Integer.MIN_VALUE && longVal <= Integer.MAX_VALUE) {
+        value = (int) longVal;
+        type = int.class;
+      } else {
+        value = longVal;
+        type = long.class;
+      }
     } else if (valType == Value.DoubleVal) {
       DoubleVal dv = (DoubleVal) arg.val(new DoubleVal());
       value = dv.v();

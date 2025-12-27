@@ -1631,7 +1631,61 @@ class GatunClient:
             NullVal.Start(builder)
             return Value.Value.NullVal, NullVal.End(builder)
         else:
-            raise TypeError(f"Unsupported argument type: {type(value)}")
+            # Check for datetime types (import here to avoid circular imports)
+            import datetime
+            import time as time_module
+            import calendar
+
+            if isinstance(value, datetime.datetime):
+                # Convert datetime to java.sql.Timestamp
+                # First calculate epoch milliseconds
+                if value.tzinfo is not None:
+                    # Timezone-aware datetime
+                    epoch_secs = calendar.timegm(value.utctimetuple())
+                else:
+                    # Naive datetime - treat as local time
+                    epoch_secs = time_module.mktime(value.timetuple())
+                epoch_millis = int(epoch_secs * 1000) + value.microsecond // 1000
+                nanos = value.microsecond * 1000
+
+                # Create java.sql.Timestamp object
+                timestamp = self.create_object("java.sql.Timestamp", epoch_millis)
+                if nanos > 0:
+                    timestamp.setNanos(nanos)
+                # Detach the finalizer to prevent premature GC from freeing
+                # the Java object before the outer command uses it
+                timestamp.detach()
+                ObjectRef.Start(builder)
+                ObjectRef.AddId(builder, timestamp.object_id)
+                return Value.Value.ObjectRef, ObjectRef.End(builder)
+            elif isinstance(value, datetime.date):
+                # Convert date to java.sql.Date using valueOf
+                # java.sql.Date.valueOf expects "YYYY-MM-DD" format
+                date_str = value.isoformat()
+                date_obj = self.invoke_static_method(
+                    "java.sql.Date", "valueOf", date_str
+                )
+                # Detach the finalizer to prevent premature GC from freeing
+                # the Java object before the outer command uses it
+                date_obj.detach()
+                ObjectRef.Start(builder)
+                ObjectRef.AddId(builder, date_obj.object_id)
+                return Value.Value.ObjectRef, ObjectRef.End(builder)
+            elif isinstance(value, datetime.time):
+                # Convert time to java.sql.Time using valueOf
+                # java.sql.Time.valueOf expects "HH:MM:SS" format
+                time_str = value.strftime("%H:%M:%S")
+                time_obj = self.invoke_static_method(
+                    "java.sql.Time", "valueOf", time_str
+                )
+                # Detach the finalizer to prevent premature GC from freeing
+                # the Java object before the outer command uses it
+                time_obj.detach()
+                ObjectRef.Start(builder)
+                ObjectRef.AddId(builder, time_obj.object_id)
+                return Value.Value.ObjectRef, ObjectRef.End(builder)
+            else:
+                raise TypeError(f"Unsupported argument type: {type(value)}")
 
     def _build_array(self, builder, arr):
         """Build an ArrayVal from a numpy array."""
