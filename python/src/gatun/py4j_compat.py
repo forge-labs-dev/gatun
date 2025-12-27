@@ -390,6 +390,13 @@ class _ExceptionConvertingJVMNode:
 
     def __getattr__(self, name: str):
         attr = getattr(self._node, name)
+        # If it's already a JavaObject, wrap it with our Py4J-compatible wrapper
+        if isinstance(attr, GatunJavaObject):
+            if isinstance(attr, JavaObject):
+                return attr  # Already wrapped
+            attr.detach()  # Prevent double-free
+            return JavaObject(attr.object_id, self._gateway)
+        # If it's a node that can be navigated further, wrap it
         if hasattr(attr, "__call__") or hasattr(attr, "__getattr__"):
             return _ExceptionConvertingJVMNode(attr, self._gateway)
         return attr

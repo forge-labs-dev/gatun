@@ -700,11 +700,11 @@ class _JVMNode:
         # If current segment starts with uppercase, it likely is a class
         parent_looks_like_class = last_segment and last_segment[0].isupper()
 
-        # Heuristic: if parent looks like a class AND name is ALL_UPPERCASE with underscore,
+        # Heuristic: if parent looks like a class AND name is ALL_UPPERCASE,
         # it's likely a static field constant - fetch it immediately
-        if parent_looks_like_class and name.isupper() and "_" in name:
-            # This looks like a constant field (e.g., MAX_VALUE, EMPTY_LIST)
-            # Fetch it immediately
+        # Examples: MAX_VALUE, EMPTY_LIST, FATAL, INFO, DEBUG
+        if parent_looks_like_class and name.isupper():
+            # This looks like a constant field - fetch it immediately
             return self._client.get_static_field(self._path, name)
 
         return _JVMNode(self._client, new_path)
