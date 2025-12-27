@@ -1691,79 +1691,79 @@ class GatunClient:
         """Build an ArrayVal from a numpy array."""
         dtype = arr.dtype
 
-        if dtype == np.int32:
-            vec_off = builder.CreateNumpyVector(arr)
+        # Mapping of numpy dtypes to (element_type, add_values_fn, optional_cast)
+        primitive_types = {
+            np.dtype(np.int32): (
+                ElementType.ElementType.Int,
+                ArrayVal.AddIntValues,
+                None,
+            ),
+            np.dtype(np.int64): (
+                ElementType.ElementType.Long,
+                ArrayVal.AddLongValues,
+                None,
+            ),
+            np.dtype(np.float64): (
+                ElementType.ElementType.Double,
+                ArrayVal.AddDoubleValues,
+                None,
+            ),
+            np.dtype(np.float32): (
+                ElementType.ElementType.Float,
+                ArrayVal.AddDoubleValues,
+                np.float64,  # Widen float32 to float64 for transmission
+            ),
+            np.dtype(np.bool_): (
+                ElementType.ElementType.Bool,
+                ArrayVal.AddBoolValues,
+                np.uint8,
+            ),
+            np.dtype(np.int8): (
+                ElementType.ElementType.Byte,
+                ArrayVal.AddByteValues,
+                np.int8,
+            ),
+            np.dtype(np.uint8): (
+                ElementType.ElementType.Byte,
+                ArrayVal.AddByteValues,
+                np.int8,
+            ),
+            np.dtype(np.int16): (
+                ElementType.ElementType.Short,
+                ArrayVal.AddIntValues,
+                np.int32,  # Widen short to int for transmission
+            ),
+        }
+
+        if dtype in primitive_types:
+            elem_type, add_values_fn, cast_type = primitive_types[dtype]
+            data = arr if cast_type is None else arr.astype(cast_type)
+            vec_off = builder.CreateNumpyVector(data)
             ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
-            ArrayVal.AddIntValues(builder, vec_off)
+            ArrayVal.AddElementType(builder, elem_type)
+            add_values_fn(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.int64:
-            vec_off = builder.CreateNumpyVector(arr)
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
-            ArrayVal.AddLongValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.float64:
-            vec_off = builder.CreateNumpyVector(arr)
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
-            ArrayVal.AddDoubleValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.float32:
-            # Widen float32 to float64 for transmission
-            vec_off = builder.CreateNumpyVector(arr.astype(np.float64))
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
-            ArrayVal.AddDoubleValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.bool_:
-            vec_off = builder.CreateNumpyVector(arr.astype(np.uint8))
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Bool)
-            ArrayVal.AddBoolValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.int8 or dtype == np.uint8:
-            vec_off = builder.CreateNumpyVector(arr.astype(np.int8))
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
-            ArrayVal.AddByteValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif dtype == np.int16:
-            # Widen short to int for transmission
-            vec_off = builder.CreateNumpyVector(arr.astype(np.int32))
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
-            ArrayVal.AddIntValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
-        elif arr.dtype.kind == "U" or arr.dtype.kind == "O":
-            # String array or object array - use object_values
-            item_offsets = []
-            for item in arr:
-                item_offsets.append(self._build_argument(builder, item))
-            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
-            for offset in reversed(item_offsets):
-                builder.PrependUOffsetTRelative(offset)
-            vec_off = builder.EndVector()
-            ArrayVal.Start(builder)
-            if arr.dtype.kind == "U":
-                ArrayVal.AddElementType(builder, ElementType.ElementType.String)
-            else:
-                ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
-            ArrayVal.AddObjectValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
+
+        # String or object arrays - serialize each element
+        if dtype.kind in ("U", "O"):
+            elem_type = (
+                ElementType.ElementType.String
+                if dtype.kind == "U"
+                else ElementType.ElementType.Object
+            )
         else:
-            # Fallback: convert to object array
-            item_offsets = []
-            for item in arr:
-                item_offsets.append(self._build_argument(builder, item))
-            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
-            for offset in reversed(item_offsets):
-                builder.PrependUOffsetTRelative(offset)
-            vec_off = builder.EndVector()
-            ArrayVal.Start(builder)
-            ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
-            ArrayVal.AddObjectValues(builder, vec_off)
-            return Value.Value.ArrayVal, ArrayVal.End(builder)
+            # Fallback: treat as object array
+            elem_type = ElementType.ElementType.Object
+
+        item_offsets = [self._build_argument(builder, item) for item in arr]
+        ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+        for offset in reversed(item_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        vec_off = builder.EndVector()
+        ArrayVal.Start(builder)
+        ArrayVal.AddElementType(builder, elem_type)
+        ArrayVal.AddObjectValues(builder, vec_off)
+        return Value.Value.ArrayVal, ArrayVal.End(builder)
 
     def _build_byte_array(self, builder, data):
         """Build an ArrayVal from bytes or bytearray."""
