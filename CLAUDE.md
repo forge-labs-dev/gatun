@@ -291,12 +291,62 @@ Data flow (Python -> Java):
 2. Python sends buffer descriptors (offsets/lengths) to Java
 3. Java wraps buffers directly as ArrowBuf (zero-copy read)
 
+### JavaObject Features
+JavaObject wrappers support Python protocols for seamless integration:
+```python
+# Iteration - iterate over Java collections
+arr = client.jvm.java.util.ArrayList()
+arr.add("a")
+arr.add("b")
+for item in arr:
+    print(item)  # "a", "b"
+
+# Indexing - access elements by index
+print(arr[0])  # "a"
+print(arr[1])  # "b"
+
+# Length - get collection size
+print(len(arr))  # 2
+
+# Works with any Java Iterable/Collection
+hashset = client.jvm.java.util.HashSet()
+hashset.add(1)
+hashset.add(2)
+print(list(hashset))  # [1, 2]
+```
+
+### JavaArray for Array Round-Tripping
+When Java methods return arrays, they're wrapped as `JavaArray` to preserve array semantics:
+```python
+from gatun import JavaArray
+
+# Arrays from Java are JavaArray instances
+arr = client.jvm.java.util.ArrayList()
+arr.add("x")
+arr.add("y")
+java_array = arr.toArray()  # Returns JavaArray, not list
+
+# JavaArray acts like a Python list
+print(len(java_array))  # 2
+print(java_array[0])    # "x"
+print(list(java_array)) # ["x", "y"]
+
+# But preserves array type when passed back to Java
+result = client.jvm.java.util.Arrays.toString(java_array)  # "[x, y]"
+
+# Create JavaArray manually for specific element types
+int_array = JavaArray([1, 2, 3], element_type="Int")
+str_array = JavaArray(["a", "b"], element_type="String")
+```
+
 ### Supported Argument/Return Types
 - Primitives: `int`, `long`, `double`, `boolean`
 - `String`
-- `list` -> Java `List`
-- `dict` -> Java `Map`
+- `list` -> Java `List` (ArrayList)
+- `dict` -> Java `Map` (HashMap)
 - `bytes` -> Java `byte[]`
+- `JavaArray` -> Java arrays (preserves array type)
+- `numpy.ndarray` -> Java arrays (int32->int[], int64->long[], float64->double[])
 - Object references (returned as `JavaObject` wrappers)
 - `null`/`None`
 
@@ -320,7 +370,8 @@ Java exceptions are mapped to Python exceptions:
 Only these classes can be instantiated or used for static methods (hardcoded in GatunServer.java):
 - Collections: `java.util.ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`, `TreeMap`, `HashSet`, `LinkedHashSet`, `TreeSet`, `Collections`, `Arrays`
 - Strings: `java.lang.String`, `StringBuilder`, `StringBuffer`
-- Primitives: `java.lang.Integer`, `Long`, `Double`, `Boolean`, `Math`
+- Primitives: `java.lang.Integer`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `Math`
+- Reflection: `java.lang.Class`, `java.lang.reflect.Array` (for array operations)
 - Spark/Scala: Classes under `org.apache.spark.*` and `scala.*` prefixes are allowed
 
 Attempting to use non-allowlisted classes (e.g., `Runtime`, `ProcessBuilder`) raises `SecurityException`.
@@ -360,6 +411,50 @@ with JavaGateway() as gateway:
     arr = ArrayList()
     arr.add("hello")
 ```
+
+## BridgeAdapter (PySpark Integration)
+
+The `BridgeAdapter` abstract class provides a unified interface for JVM communication,
+enabling PySpark to work with either Py4J or Gatun backends:
+
+```python
+from gatun.bridge import BridgeAdapter
+from gatun.bridge_adapters import GatunAdapter
+
+# Create adapter (launches Gatun server)
+bridge = GatunAdapter(memory="256MB")
+
+# Object lifecycle
+obj = bridge.new("java.util.ArrayList")  # Create object
+bridge.detach(obj)                        # Prevent auto-cleanup
+bridge.close()                            # Close connection
+
+# Method calls
+bridge.call(obj, "add", "hello")          # Instance method
+result = bridge.call_static("java.lang.Math", "max", 10, 20)  # Static method
+
+# Field access
+value = bridge.get_field(obj, "fieldName")
+bridge.set_field(obj, "fieldName", value)
+
+# Array operations (for Java array manipulation)
+arr = bridge.new_array("java.lang.String", 3)  # Create String[3]
+bridge.array_set(arr, 0, "hello")              # Set element
+value = bridge.array_get(arr, 0)               # Get element
+length = bridge.array_length(arr)              # Get length
+
+# Type checking
+bridge.is_instance_of(obj, "java.util.List")  # True
+```
+
+### PySpark Usage
+To use Gatun with PySpark, set the environment variable before importing PySpark:
+```bash
+export PYSPARK_USE_GATUN=true
+export GATUN_MEMORY=256MB
+```
+
+Then use PySpark normally - it will use Gatun instead of Py4J for JVM communication.
 
 ## Logging
 

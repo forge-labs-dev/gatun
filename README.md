@@ -12,6 +12,8 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **Request Cancellation**: Cancel long-running operations
 - **JVM View API**: Pythonic package-style navigation (`client.jvm.java.util.ArrayList`)
 - **Py4J Compatible**: Drop-in replacement for Py4J in many cases
+- **PySpark Integration**: Use as backend for PySpark via BridgeAdapter
+- **Pythonic JavaObjects**: Iteration, indexing, and len() support on Java collections
 
 ## Installation
 
@@ -210,6 +212,54 @@ client.is_instance_of(arr, "java.util.Collection") # True
 client.is_instance_of(arr, "java.util.Map")        # False
 ```
 
+### Pythonic Java Collections
+
+JavaObject wrappers support iteration, indexing, and length:
+
+```python
+arr = client.jvm.java.util.ArrayList()
+arr.add("a")
+arr.add("b")
+arr.add("c")
+
+# Iterate
+for item in arr:
+    print(item)  # "a", "b", "c"
+
+# Index access
+print(arr[0])  # "a"
+print(arr[1])  # "b"
+
+# Length
+print(len(arr))  # 3
+
+# Convert to Python list
+items = list(arr)  # ["a", "b", "c"]
+```
+
+### JavaArray for Array Round-Tripping
+
+When Java returns arrays, they're wrapped as `JavaArray` to preserve type when passed back:
+
+```python
+from gatun import JavaArray
+
+# Arrays from Java are JavaArray instances
+arr = client.jvm.java.util.ArrayList()
+arr.add("x")
+arr.add("y")
+java_array = arr.toArray()  # Returns JavaArray
+
+# JavaArray acts like a list
+print(list(java_array))  # ["x", "y"]
+
+# But preserves array type for Java methods
+result = client.jvm.java.util.Arrays.toString(java_array)  # "[x, y]"
+
+# Create typed arrays manually
+int_array = JavaArray([1, 2, 3], element_type="Int")
+```
+
 ### Arrow Data Transfer
 
 ```python
@@ -263,6 +313,40 @@ with JavaGateway() as gateway:
     arr.add("hello")
 ```
 
+## PySpark Integration
+
+Use Gatun as the JVM communication backend for PySpark:
+
+```bash
+# Enable Gatun backend
+export PYSPARK_USE_GATUN=true
+export GATUN_MEMORY=256MB
+
+# Run PySpark normally
+python my_spark_app.py
+```
+
+Or use the BridgeAdapter API directly:
+
+```python
+from gatun.bridge_adapters import GatunAdapter
+
+# Create bridge (launches JVM)
+bridge = GatunAdapter(memory="256MB")
+
+# Use bridge API
+obj = bridge.new("java.util.ArrayList")
+bridge.call(obj, "add", "hello")
+result = bridge.call_static("java.lang.Math", "max", 10, 20)
+
+# Array operations
+arr = bridge.new_array("java.lang.String", 3)
+bridge.array_set(arr, 0, "hello")
+bridge.array_get(arr, 0)  # "hello"
+
+bridge.close()
+```
+
 ## Configuration
 
 Configure via `pyproject.toml`:
@@ -288,9 +372,11 @@ export GATUN_SOCKET_PATH=/tmp/gatun.sock
 | `float` | `double` |
 | `bool` | `boolean` |
 | `str` | `String` |
-| `list` | `List` |
-| `dict` | `Map` |
+| `list` | `List` (ArrayList) |
+| `dict` | `Map` (HashMap) |
 | `bytes` | `byte[]` |
+| `JavaArray` | Arrays (`int[]`, `String[]`, etc.) |
+| `numpy.ndarray` | Typed arrays |
 | `None` | `null` |
 | `JavaObject` | Object reference |
 
