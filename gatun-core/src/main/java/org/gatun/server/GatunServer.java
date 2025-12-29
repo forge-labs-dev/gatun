@@ -133,6 +133,47 @@ public class GatunServer {
   private static final Map<ConstructorCacheKey, CachedConstructor> constructorCache =
       new ConcurrentHashMap<>();
 
+  // --- NO-ARG CONSTRUCTOR CACHE ---
+  // Caches no-arg constructors separately for fast lookup (most common case)
+  // Key: class -> no-arg Constructor
+  private static final Map<Class<?>, java.lang.reflect.Constructor<?>> noArgConstructorCache =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Get no-arg constructor for a class, using cache.
+   */
+  private static java.lang.reflect.Constructor<?> getNoArgConstructor(Class<?> clazz)
+      throws NoSuchMethodException {
+    java.lang.reflect.Constructor<?> ctor = noArgConstructorCache.get(clazz);
+    if (ctor != null) {
+      return ctor;
+    }
+    ctor = clazz.getDeclaredConstructor();
+    noArgConstructorCache.put(clazz, ctor);
+    return ctor;
+  }
+
+  // --- STATIC FIELD CACHE ---
+  // Caches static field lookups to avoid repeated reflection overhead.
+  // Key: "className.fieldName" -> Field object
+  private static final Map<String, java.lang.reflect.Field> staticFieldCache =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Get a static field by class and name, using cache.
+   */
+  private static java.lang.reflect.Field getStaticField(Class<?> clazz, String fieldName)
+      throws NoSuchFieldException {
+    String key = clazz.getName() + "." + fieldName;
+    java.lang.reflect.Field field = staticFieldCache.get(key);
+    if (field != null) {
+      return field;
+    }
+    field = clazz.getField(fieldName);
+    staticFieldCache.put(key, field);
+    return field;
+  }
+
   // --- CLASS CACHE ---
   // Caches Class.forName lookups to avoid repeated class loading overhead.
   // Key: fully qualified class name -> Class object
@@ -483,8 +524,8 @@ public class GatunServer {
             Object instance;
 
             if (argCount == 0) {
-              // No-arg constructor
-              instance = clazz.getDeclaredConstructor().newInstance();
+              // No-arg constructor (cached)
+              instance = getNoArgConstructor(clazz).newInstance();
             } else {
               // Constructor with arguments
               Object[] javaArgs = new Object[argCount];
@@ -740,7 +781,7 @@ public class GatunServer {
             }
 
             Class<?> clazz = getClass(className);
-            java.lang.reflect.Field field = clazz.getField(fieldName);
+            java.lang.reflect.Field field = getStaticField(clazz, fieldName);
             result = field.get(null); // null for static field
 
             // Wrap returned objects in registry
@@ -773,7 +814,7 @@ public class GatunServer {
             Object value = converted[0];
 
             Class<?> clazz = getClass(className);
-            java.lang.reflect.Field field = clazz.getField(fieldName);
+            java.lang.reflect.Field field = getStaticField(clazz, fieldName);
             field.set(null, value); // null for static field
             result = null;
           } else if (cmd.action() == Action.Reflect) {
