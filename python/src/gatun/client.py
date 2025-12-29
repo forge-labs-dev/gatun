@@ -908,6 +908,42 @@ class GatunClient:
         self._py4j_compat = py4j_compat
         self._py4j_exception_converter = None
 
+        # FlatBuffers builder pool - reuse builders to reduce allocation overhead
+        # Small builder for simple commands (256 bytes initial)
+        self._builder_small = flatbuffers.Builder(256)
+        # Large builder for commands with arguments/data (1024 bytes initial)
+        self._builder_large = flatbuffers.Builder(1024)
+
+        # String encoding cache - cache UTF-8 encoded bytes for commonly used strings
+        # This avoids repeated str.encode() calls for class/method names
+        self._string_cache: dict[str, bytes] = {}
+
+    def _create_string(self, builder: flatbuffers.Builder, s: str) -> int:
+        """Create a FlatBuffers string with caching of encoded bytes.
+
+        Caches the UTF-8 encoded bytes of strings to avoid repeated encoding.
+        The cache grows unbounded but in practice is limited to the set of
+        class names, method names, and field names used by the application.
+        """
+        encoded = self._string_cache.get(s)
+        if encoded is None:
+            encoded = s.encode("utf-8")
+            self._string_cache[s] = encoded
+        return builder.CreateString(encoded)
+
+    def _get_builder(self, large: bool = False) -> flatbuffers.Builder:
+        """Get a reusable FlatBuffers builder.
+
+        Clears and returns an existing builder from the pool to avoid allocation.
+        Use large=True for commands with arguments or data.
+
+        Note: We cannot preserve vtables across clears because vtable entries
+        contain absolute buffer offsets that become invalid after Clear().
+        """
+        builder = self._builder_large if large else self._builder_small
+        builder.Clear()
+        return builder
+
     @property
     def jvm(self):
         """Access Java classes via package navigation.
@@ -1067,45 +1103,40 @@ class GatunClient:
         return None
 
     def _unpack_array(self, array_val):
-        """Unpack an ArrayVal FlatBuffer to a JavaArray (preserves array semantics)."""
+        """Unpack an ArrayVal FlatBuffer to a JavaArray (preserves array semantics).
+
+        Uses *AsNumpy() methods for O(1) bulk access instead of O(n) element-by-element.
+        """
         elem_type = array_val.ElementType()
 
         if elem_type == ElementType.ElementType.Int:
-            return JavaArray(
-                (array_val.IntValues(i) for i in range(array_val.IntValuesLength())),
-                element_type="Int",
-            )
+            # Use IntValuesAsNumpy for fast bulk access, then tolist() for JavaArray
+            return JavaArray(array_val.IntValuesAsNumpy().tolist(), element_type="Int")
         elif elem_type == ElementType.ElementType.Long:
             return JavaArray(
-                (array_val.LongValues(i) for i in range(array_val.LongValuesLength())),
-                element_type="Long",
+                array_val.LongValuesAsNumpy().tolist(), element_type="Long"
             )
         elif elem_type == ElementType.ElementType.Double:
             return JavaArray(
-                (array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())),
-                element_type="Double",
+                array_val.DoubleValuesAsNumpy().tolist(), element_type="Double"
             )
         elif elem_type == ElementType.ElementType.Float:
             # Float was widened to double
             return JavaArray(
-                (array_val.DoubleValues(i) for i in range(array_val.DoubleValuesLength())),
-                element_type="Float",
+                array_val.DoubleValuesAsNumpy().tolist(), element_type="Float"
             )
         elif elem_type == ElementType.ElementType.Bool:
             return JavaArray(
-                (array_val.BoolValues(i) for i in range(array_val.BoolValuesLength())),
-                element_type="Bool",
+                array_val.BoolValuesAsNumpy().tolist(), element_type="Bool"
             )
         elif elem_type == ElementType.ElementType.Byte:
-            # Byte arrays are still returned as bytes for convenience
-            return bytes(
-                [array_val.ByteValues(i) for i in range(array_val.ByteValuesLength())]
-            )
+            # Use ByteValuesAsNumpy for fast zero-copy access, then tobytes()
+            # This is O(1) memcpy instead of O(n) element-by-element copy
+            return bytes(array_val.ByteValuesAsNumpy())
         elif elem_type == ElementType.ElementType.Short:
             # Short was widened to int
             return JavaArray(
-                (array_val.IntValues(i) for i in range(array_val.IntValuesLength())),
-                element_type="Short",
+                array_val.IntValuesAsNumpy().tolist(), element_type="Short"
             )
         elif elem_type == ElementType.ElementType.String:
             result = JavaArray(element_type="String")
@@ -1279,7 +1310,7 @@ class GatunClient:
         self, callback_id: int, result, is_error: bool, error_msg: str | None
     ):
         """Send the result of a callback execution back to Java."""
-        builder = flatbuffers.Builder(1024)
+        builder = self._get_builder(large=True)
 
         # Build arguments: [result, is_error]
         arg_offsets = []
@@ -1301,7 +1332,7 @@ class GatunClient:
         # Build target_name (error message if error)
         target_name_off = None
         if error_msg:
-            target_name_off = builder.CreateString(error_msg)
+            target_name_off = self._create_string(builder, error_msg)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.CallbackResponse)
@@ -1316,8 +1347,8 @@ class GatunClient:
         self._send_raw(builder.Output(), wait_for_response=False)
 
     def create_object(self, class_name, *args):
-        builder = flatbuffers.Builder(1024)
-        cls_off = builder.CreateString(class_name)
+        builder = self._get_builder(large=True)
+        cls_off = self._create_string(builder, class_name)
 
         # Build argument tables (must be done before Command)
         arg_offsets = []
@@ -1345,8 +1376,8 @@ class GatunClient:
         return self._send_raw(builder.Output())
 
     def invoke_method(self, obj_id, method_name, *args):
-        builder = flatbuffers.Builder(1024)
-        meth_off = builder.CreateString(method_name)
+        builder = self._get_builder(large=True)
+        meth_off = self._create_string(builder, method_name)
 
         # Build argument tables (must be done before Command)
         arg_offsets = []
@@ -1386,10 +1417,10 @@ class GatunClient:
             *args: Arguments to pass to the method
             return_object_ref: If True, return result as ObjectRef (no auto-conversion)
         """
-        builder = flatbuffers.Builder(1024)
+        builder = self._get_builder(large=True)
         # Format: "fully.qualified.ClassName.methodName"
         full_name = f"{class_name}.{method_name}"
-        name_off = builder.CreateString(full_name)
+        name_off = self._create_string(builder, full_name)
 
         # Build argument tables (must be done before Command)
         arg_offsets = []
@@ -1429,8 +1460,8 @@ class GatunClient:
         if isinstance(obj_id, JavaObject):
             obj_id = obj_id.object_id
 
-        builder = flatbuffers.Builder(256)
-        name_off = builder.CreateString(field_name)
+        builder = self._get_builder()
+        name_off = self._create_string(builder, field_name)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.GetField)
@@ -1452,8 +1483,8 @@ class GatunClient:
         if isinstance(obj_id, JavaObject):
             obj_id = obj_id.object_id
 
-        builder = flatbuffers.Builder(256)
-        name_off = builder.CreateString(field_name)
+        builder = self._get_builder()
+        name_off = self._create_string(builder, field_name)
 
         # Build argument for the value
         arg_offset = self._build_argument(builder, value)
@@ -1485,9 +1516,9 @@ class GatunClient:
             >>> client.get_static_field("java.lang.Integer", "MAX_VALUE")
             2147483647
         """
-        builder = flatbuffers.Builder(256)
+        builder = self._get_builder()
         full_name = f"{class_name}.{field_name}"
-        name_off = builder.CreateString(full_name)
+        name_off = self._create_string(builder, full_name)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.GetStaticField)
@@ -1505,9 +1536,9 @@ class GatunClient:
             field_name: Name of the static field
             value: Value to set
         """
-        builder = flatbuffers.Builder(256)
+        builder = self._get_builder()
         full_name = f"{class_name}.{field_name}"
-        name_off = builder.CreateString(full_name)
+        name_off = self._create_string(builder, full_name)
 
         # Build argument for the value
         arg_offset = self._build_argument(builder, value)
@@ -1545,8 +1576,8 @@ class GatunClient:
         Note:
             Results are typically cached by the caller for performance.
         """
-        builder = flatbuffers.Builder(256)
-        name_off = builder.CreateString(full_name)
+        builder = self._get_builder()
+        name_off = self._create_string(builder, full_name)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.Reflect)
@@ -1580,8 +1611,8 @@ class GatunClient:
         else:
             obj_id = obj
 
-        builder = flatbuffers.Builder(256)
-        name_off = builder.CreateString(class_name)
+        builder = self._get_builder()
+        name_off = self._create_string(builder, class_name)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
@@ -1622,8 +1653,8 @@ class GatunClient:
             arr.add(2)
             client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
         """
-        builder = flatbuffers.Builder(256)
-        interface_off = builder.CreateString(interface_name)
+        builder = self._get_builder()
+        interface_off = self._create_string(builder, interface_name)
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.RegisterCallback)
@@ -1652,7 +1683,7 @@ class GatunClient:
         # Remove from local registry
         self._callbacks.pop(callback_id, None)
 
-        builder = flatbuffers.Builder(64)
+        builder = self._get_builder()
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.UnregisterCallback)
         Cmd.CommandAddTargetId(builder, callback_id)
@@ -1673,7 +1704,7 @@ class GatunClient:
     def _build_value(self, builder, value):
         """Build a Value union and return (type, offset)."""
         if isinstance(value, str):
-            str_off = builder.CreateString(value)
+            str_off = self._create_string(builder, value)
             StringVal.Start(builder)
             StringVal.AddV(builder, str_off)
             return Value.Value.StringVal, StringVal.End(builder)
@@ -2016,7 +2047,7 @@ class GatunClient:
         if self.sock is None or self.sock.fileno() == -1:
             return
 
-        builder = flatbuffers.Builder(64)
+        builder = self._get_builder()
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.FreeObject)
         Cmd.CommandAddTargetId(builder, object_id)
@@ -2062,7 +2093,7 @@ class GatunClient:
         ctypes.memmove(payload_addr, ipc_buffer.address, bytes_written)
 
         # Build Command
-        builder = flatbuffers.Builder(256)
+        builder = self._get_builder()
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.SendArrowBatch)
         command = Cmd.CommandEnd(builder)
@@ -2175,7 +2206,7 @@ class GatunClient:
         include_schema = schema_cache is None or schema_hash not in schema_cache
 
         # 3. Build FlatBuffers command
-        builder = flatbuffers.Builder(1024)
+        builder = self._get_builder(large=True)
 
         # Build schema bytes vector if needed
         schema_bytes_vec = None
@@ -2247,7 +2278,7 @@ class GatunClient:
         # Increment epoch to invalidate any outstanding ArrowTableView objects
         self._arena_epoch += 1
 
-        builder = flatbuffers.Builder(64)
+        builder = self._get_builder()
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.ResetPayloadArena)
@@ -2293,7 +2324,7 @@ class GatunClient:
             # Unsafe: would raise StaleArenaError after reset
             # table_view.column("x")  # Don't do this!
         """
-        builder = flatbuffers.Builder(64)
+        builder = self._get_builder()
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.GetArrowData)
@@ -2332,7 +2363,7 @@ class GatunClient:
             # ... start operation with request_id in another thread ...
             client.cancel(request_id)  # Cancel it
         """
-        builder = flatbuffers.Builder(64)
+        builder = self._get_builder()
 
         Cmd.CommandStart(builder)
         Cmd.CommandAddAction(builder, Act.Action.Cancel)

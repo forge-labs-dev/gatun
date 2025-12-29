@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
@@ -14,8 +16,6 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Proxy;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +45,8 @@ public class GatunServer {
 
   // Memory zones
   private static final int COMMAND_OFFSET = 0;
-  private static final int PAYLOAD_OFFSET = 65536; // 64KB - increased to handle large pickled functions
+  private static final int PAYLOAD_OFFSET =
+      65536; // 64KB - increased to handle large pickled functions
   private static final int RESPONSE_ZONE_SIZE = 65536; // 64KB - increased to handle large responses
 
   // --- SECURITY: Allowlist of classes that can be instantiated or used for static methods ---
@@ -69,20 +70,20 @@ public class GatunServer {
           "java.lang.Math",
           "java.lang.StringBuilder",
           "java.lang.StringBuffer",
-          "java.lang.System",    // For setting system properties (e.g., spark.master)
-          "java.lang.Class",     // For reflection-based array creation
-          "java.lang.reflect.Array",  // For array operations
-          "java.sql.Timestamp",  // For datetime conversion
-          "java.sql.Date",       // For date conversion
-          "java.sql.Time");      // For time conversion
+          "java.lang.System", // For setting system properties (e.g., spark.master)
+          "java.lang.Class", // For reflection-based array creation
+          "java.lang.reflect.Array", // For array operations
+          "java.sql.Timestamp", // For datetime conversion
+          "java.sql.Date", // For date conversion
+          "java.sql.Time"); // For time conversion
 
   // --- SECURITY: Prefixes for allowed class packages (e.g., for Spark integration) ---
   private static final Set<String> ALLOWED_PREFIXES =
       Set.of(
-          "org.apache.spark.",  // Apache Spark
-          "org.apache.log4j.",  // Log4J (used by Spark)
-          "scala."              // Scala standard library
-      );
+          "org.apache.spark.", // Apache Spark
+          "org.apache.log4j.", // Log4J (used by Spark)
+          "scala." // Scala standard library
+          );
 
   private static boolean isClassAllowed(String className) {
     if (ALLOWED_CLASSES.contains(className)) {
@@ -115,10 +116,209 @@ public class GatunServer {
   private static final ThreadLocal<Long> currentRequestId = new ThreadLocal<>();
 
   // Per-session: cancelled request IDs
-  private static final ThreadLocal<Set<Long>> cancelledRequests = ThreadLocal.withInitial(HashSet::new);
+  private static final ThreadLocal<Set<Long>> cancelledRequests =
+      ThreadLocal.withInitial(HashSet::new);
 
   private final BufferAllocator allocator = new RootAllocator();
   private final ArrowMemoryHandler arrowHandler = new ArrowMemoryHandler(allocator);
+
+  // --- METHOD CACHE ---
+  // Caches resolved methods to avoid repeated reflection lookups.
+  // Key: (class, methodName, argTypes) -> CachedMethod (method + varargs info)
+  private static final Map<MethodCacheKey, CachedMethod> methodCache = new ConcurrentHashMap<>();
+
+  // --- CONSTRUCTOR CACHE ---
+  // Caches resolved constructors to avoid repeated reflection lookups.
+  // Key: (class, argTypes) -> CachedConstructor (constructor + varargs info)
+  private static final Map<ConstructorCacheKey, CachedConstructor> constructorCache =
+      new ConcurrentHashMap<>();
+
+  // --- CLASS CACHE ---
+  // Caches Class.forName lookups to avoid repeated class loading overhead.
+  // Key: fully qualified class name -> Class object
+  private static final Map<String, Class<?>> classCache = new ConcurrentHashMap<>();
+
+  /**
+   * Get a Class object by name, using cache to avoid repeated Class.forName overhead.
+   */
+  private static Class<?> getClass(String className) throws ClassNotFoundException {
+    Class<?> clazz = classCache.get(className);
+    if (clazz != null) {
+      return clazz;
+    }
+    clazz = Class.forName(className);
+    classCache.put(className, clazz);
+    return clazz;
+  }
+
+  /**
+   * Try to get a Class object by name, returning null if not found.
+   * Uses cache for faster lookups.
+   */
+  private static Class<?> tryGetClass(String className) {
+    Class<?> clazz = classCache.get(className);
+    if (clazz != null) {
+      return clazz;
+    }
+    try {
+      clazz = Class.forName(className);
+      classCache.put(className, clazz);
+      return clazz;
+    } catch (ClassNotFoundException e) {
+      return null;
+    }
+  }
+
+  /** Key for method cache lookup. */
+  private static final class MethodCacheKey {
+    private final Class<?> clazz;
+    private final String methodName;
+    private final Class<?>[] argTypes;
+    private final int hashCode;
+
+    MethodCacheKey(Class<?> clazz, String methodName, Class<?>[] argTypes) {
+      this.clazz = clazz;
+      this.methodName = methodName;
+      this.argTypes = argTypes;
+      // Pre-compute hash for faster lookups
+      int h = clazz.hashCode() * 31 + methodName.hashCode();
+      for (Class<?> t : argTypes) {
+        h = h * 31 + (t != null ? t.hashCode() : 0);
+      }
+      this.hashCode = h;
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (!(obj instanceof MethodCacheKey other)) return false;
+      if (clazz != other.clazz) return false;
+      if (!methodName.equals(other.methodName)) return false;
+      if (argTypes.length != other.argTypes.length) return false;
+      for (int i = 0; i < argTypes.length; i++) {
+        if (argTypes[i] != other.argTypes[i]) return false;
+      }
+      return true;
+    }
+  }
+
+  /** Cached method resolution result. */
+  private static final class CachedMethod {
+    final java.lang.reflect.Method method;
+    final boolean isVarArgs;
+    final int fixedArgCount; // For varargs: number of fixed args before vararg array
+    final Class<?> varargComponentType; // For varargs: component type of vararg array
+
+    CachedMethod(java.lang.reflect.Method method) {
+      this.method = method;
+      this.isVarArgs = method.isVarArgs();
+      if (isVarArgs) {
+        Class<?>[] paramTypes = method.getParameterTypes();
+        this.fixedArgCount = paramTypes.length - 1;
+        this.varargComponentType = paramTypes[fixedArgCount].getComponentType();
+      } else {
+        this.fixedArgCount = 0;
+        this.varargComponentType = null;
+      }
+    }
+
+    /** Prepare arguments for invocation, repacking varargs if needed. */
+    Object[] prepareArgs(Object[] args) {
+      if (!isVarArgs) {
+        return args;
+      }
+      // Repack: fixed args + varargs array
+      Object[] newArgs = new Object[fixedArgCount + 1];
+      for (int i = 0; i < fixedArgCount; i++) {
+        newArgs[i] = args[i];
+      }
+      int varargCount = args.length - fixedArgCount;
+      Object varargArray = java.lang.reflect.Array.newInstance(varargComponentType, varargCount);
+      for (int i = 0; i < varargCount; i++) {
+        java.lang.reflect.Array.set(varargArray, i, args[fixedArgCount + i]);
+      }
+      newArgs[fixedArgCount] = varargArray;
+      return newArgs;
+    }
+  }
+
+  /** Key for constructor cache lookup. */
+  private static final class ConstructorCacheKey {
+    private final Class<?> clazz;
+    private final Class<?>[] argTypes;
+    private final int hashCode;
+
+    ConstructorCacheKey(Class<?> clazz, Class<?>[] argTypes) {
+      this.clazz = clazz;
+      this.argTypes = argTypes;
+      // Pre-compute hash for faster lookups
+      int h = clazz.hashCode();
+      for (Class<?> t : argTypes) {
+        h = h * 31 + (t != null ? t.hashCode() : 0);
+      }
+      this.hashCode = h;
+    }
+
+    @Override
+    public int hashCode() {
+      return hashCode;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (!(obj instanceof ConstructorCacheKey other)) return false;
+      if (clazz != other.clazz) return false;
+      if (argTypes.length != other.argTypes.length) return false;
+      for (int i = 0; i < argTypes.length; i++) {
+        if (argTypes[i] != other.argTypes[i]) return false;
+      }
+      return true;
+    }
+  }
+
+  /** Cached constructor resolution result. */
+  private static final class CachedConstructor {
+    final java.lang.reflect.Constructor<?> constructor;
+    final boolean isVarArgs;
+    final int fixedArgCount;
+    final Class<?> varargComponentType;
+
+    CachedConstructor(java.lang.reflect.Constructor<?> constructor) {
+      this.constructor = constructor;
+      this.isVarArgs = constructor.isVarArgs();
+      if (isVarArgs) {
+        Class<?>[] paramTypes = constructor.getParameterTypes();
+        this.fixedArgCount = paramTypes.length - 1;
+        this.varargComponentType = paramTypes[fixedArgCount].getComponentType();
+      } else {
+        this.fixedArgCount = 0;
+        this.varargComponentType = null;
+      }
+    }
+
+    /** Prepare arguments for invocation, repacking varargs if needed. */
+    Object[] prepareArgs(Object[] args) {
+      if (!isVarArgs) {
+        return args;
+      }
+      // Repack: fixed args + varargs array
+      Object[] newArgs = new Object[fixedArgCount + 1];
+      for (int i = 0; i < fixedArgCount; i++) {
+        newArgs[i] = args[i];
+      }
+      int varargCount = args.length - fixedArgCount;
+      Object varargArray = java.lang.reflect.Array.newInstance(varargComponentType, varargCount);
+      for (int i = 0; i < varargCount; i++) {
+        java.lang.reflect.Array.set(varargArray, i, args[fixedArgCount + i]);
+      }
+      newArgs[fixedArgCount] = varargArray;
+      return newArgs;
+    }
+  }
 
   /** Holds information about a registered callback. */
   private static class CallbackInfo {
@@ -213,6 +413,9 @@ public class GatunServer {
       ByteBuffer lengthBuf = ByteBuffer.allocate(4);
       lengthBuf.order(ByteOrder.LITTLE_ENDIAN);
 
+      // Reusable FlatBufferBuilder for responses (avoid allocation per request)
+      FlatBufferBuilder responseBuilder = new FlatBufferBuilder(1024);
+
       while (readFully(client, lengthBuf)) {
         // 1. Read Command Length
         lengthBuf.flip();
@@ -256,7 +459,9 @@ public class GatunServer {
         currentRequestId.set(requestId);
 
         // --- Standard Request/Response Logic ---
-        FlatBufferBuilder builder = new FlatBufferBuilder(1024);
+        // Reuse the response builder (clear resets position but keeps buffer)
+        responseBuilder.clear();
+        FlatBufferBuilder builder = responseBuilder;
         int responseOffset = 0;
         Object result = null;
 
@@ -271,7 +476,7 @@ public class GatunServer {
             if (!isClassAllowed(className)) {
               throw new SecurityException("Class not allowed: " + className);
             }
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz = getClass(className);
 
             // Convert constructor arguments if provided
             int argCount = cmd.argsLength();
@@ -359,7 +564,7 @@ public class GatunServer {
               throw new SecurityException("Class not allowed: " + className);
             }
 
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz = getClass(className);
 
             // Convert FlatBuffer arguments to Java objects
             int argCount = cmd.argsLength();
@@ -436,7 +641,8 @@ public class GatunServer {
           else if (cmd.action() == Action.SendArrowBuffers) {
             ArrowBatchDescriptor batchDesc = cmd.arrowBatch();
             if (batchDesc == null) {
-              throw new IllegalArgumentException("SendArrowBuffers requires arrow_batch descriptor");
+              throw new IllegalArgumentException(
+                  "SendArrowBuffers requires arrow_batch descriptor");
             }
             // For now, payload shm is the same as control shm (payloadSlice)
             // TODO: Support separate payload shm file
@@ -474,7 +680,7 @@ public class GatunServer {
             lengthBuf.flip();
             client.write(lengthBuf);
             lengthBuf.clear();
-            continue;  // Skip normal response handling
+            continue; // Skip normal response handling
           }
           // --- CALLBACK BLOCK ---
           else if (cmd.action() == Action.RegisterCallback) {
@@ -517,7 +723,7 @@ public class GatunServer {
             if (target == null) throw new RuntimeException("Object " + targetId + " not found");
 
             // Try to load the class (no allowlist check - this is read-only)
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz = getClass(className);
             result = clazz.isInstance(target);
           } else if (cmd.action() == Action.GetStaticField) {
             // Get static field: target_name = "pkg.Class.FIELD"
@@ -533,9 +739,9 @@ public class GatunServer {
               throw new SecurityException("Class not allowed: " + className);
             }
 
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz = getClass(className);
             java.lang.reflect.Field field = clazz.getField(fieldName);
-            result = field.get(null);  // null for static field
+            result = field.get(null); // null for static field
 
             // Wrap returned objects in registry
             if (result != null && !isAutoConvertible(result)) {
@@ -566,9 +772,9 @@ public class GatunServer {
             Object[] converted = convertArgument(arg);
             Object value = converted[0];
 
-            Class<?> clazz = Class.forName(className);
+            Class<?> clazz = getClass(className);
             java.lang.reflect.Field field = clazz.getField(fieldName);
-            field.set(null, value);  // null for static field
+            field.set(null, value); // null for static field
             result = null;
           } else if (cmd.action() == Action.Reflect) {
             // Reflection query: target_name is the fully qualified name to check
@@ -582,16 +788,10 @@ public class GatunServer {
             // First try: is the whole path a class?
             try {
               // Handle Scala objects: try both ClassName and ClassName$
-              Class<?> clazz = null;
-              try {
-                clazz = Class.forName(fullName);
-              } catch (ClassNotFoundException e1) {
+              Class<?> clazz = tryGetClass(fullName);
+              if (clazz == null) {
                 // Try Scala object naming convention (append $)
-                try {
-                  clazz = Class.forName(fullName + "$");
-                } catch (ClassNotFoundException e2) {
-                  // Not a class
-                }
+                clazz = tryGetClass(fullName + "$");
               }
 
               if (clazz != null) {
@@ -604,16 +804,10 @@ public class GatunServer {
                   String memberName = fullName.substring(lastDot + 1);
 
                   // Try to load parent as class
-                  Class<?> parentClass = null;
-                  try {
-                    parentClass = Class.forName(parentName);
-                  } catch (ClassNotFoundException e) {
+                  Class<?> parentClass = tryGetClass(parentName);
+                  if (parentClass == null) {
                     // Try Scala object
-                    try {
-                      parentClass = Class.forName(parentName + "$");
-                    } catch (ClassNotFoundException e2) {
-                      // Parent not found
-                    }
+                    parentClass = tryGetClass(parentName + "$");
                   }
 
                   if (parentClass != null) {
@@ -718,8 +912,8 @@ public class GatunServer {
   }
 
   /**
-   * Check if the current request has been cancelled.
-   * Can be called from long-running operations to support cooperative cancellation.
+   * Check if the current request has been cancelled. Can be called from long-running operations to
+   * support cooperative cancellation.
    *
    * @throws InterruptedException if the current request was cancelled
    */
@@ -893,12 +1087,34 @@ public class GatunServer {
 
   // --- HELPER: Find method by name and compatible argument types ---
   // Returns Object[] { Method, Object[] adjustedArgs } to handle varargs repacking
+  // Uses method cache for faster repeated lookups.
   private static Object[] findMethodWithArgs(
+      Class<?> clazz, String name, Class<?>[] argTypes, Object[] args)
+      throws NoSuchMethodException {
+    // Check cache first
+    MethodCacheKey cacheKey = new MethodCacheKey(clazz, name, argTypes);
+    CachedMethod cached = methodCache.get(cacheKey);
+    if (cached != null) {
+      return new Object[] {cached.method, cached.prepareArgs(args)};
+    }
+
+    // Not in cache - do full resolution
+    java.lang.reflect.Method resolvedMethod = resolveMethod(clazz, name, argTypes, args);
+
+    // Cache the result
+    CachedMethod toCache = new CachedMethod(resolvedMethod);
+    methodCache.put(cacheKey, toCache);
+
+    return new Object[] {resolvedMethod, toCache.prepareArgs(args)};
+  }
+
+  // --- HELPER: Resolve method without caching (called on cache miss) ---
+  private static java.lang.reflect.Method resolveMethod(
       Class<?> clazz, String name, Class<?>[] argTypes, Object[] args)
       throws NoSuchMethodException {
     // First try exact match
     try {
-      return new Object[] {clazz.getMethod(name, argTypes), args};
+      return clazz.getMethod(name, argTypes);
     } catch (NoSuchMethodException e) {
       // Fall through to search
     }
@@ -906,7 +1122,6 @@ public class GatunServer {
     // Search for compatible method - prioritize non-varargs over varargs
     // and methods with fewer fixed parameters
     java.lang.reflect.Method bestMatch = null;
-    Object[] bestArgs = null;
     int bestScore = Integer.MIN_VALUE;
 
     for (java.lang.reflect.Method m : clazz.getMethods()) {
@@ -936,24 +1151,19 @@ public class GatunServer {
           int score = 1000 + specificity;
           if (bestScore < score) {
             bestMatch = m;
-            bestArgs = args;
             bestScore = score;
           }
         }
       }
 
-      // Check for varargs match (always repack args into array)
+      // Check for varargs match
       if (m.isVarArgs() && argTypes.length >= paramTypes.length - 1) {
-        Object[] result = tryVarargsMatch(paramTypes, argTypes, args);
-        if (result != null) {
+        if (isVarargsCompatible(paramTypes, argTypes)) {
           // Score: varargs gets lower priority (100 - fixedCount)
-          // Methods with fewer fixed params are preferred (e.g., asList(T...) over format(Locale,
-          // String, Object...))
           int fixedCount = paramTypes.length - 1;
           int score = 100 - fixedCount;
           if (bestScore < score) {
             bestMatch = m;
-            bestArgs = result;
             bestScore = score;
           }
         }
@@ -961,11 +1171,32 @@ public class GatunServer {
     }
 
     if (bestMatch != null) {
-      return new Object[] {bestMatch, bestArgs};
+      return bestMatch;
     }
 
     throw new NoSuchMethodException(
         "No matching method: " + name + " with " + argTypes.length + " args");
+  }
+
+  // --- HELPER: Check if argTypes are compatible with varargs method params ---
+  private static boolean isVarargsCompatible(Class<?>[] paramTypes, Class<?>[] argTypes) {
+    int fixedCount = paramTypes.length - 1;
+    Class<?> varargComponentType = paramTypes[fixedCount].getComponentType();
+
+    // Check fixed parameters match
+    for (int i = 0; i < fixedCount; i++) {
+      if (!isAssignable(paramTypes[i], argTypes[i])) {
+        return false;
+      }
+    }
+
+    // Check vararg parameters match
+    for (int i = fixedCount; i < argTypes.length; i++) {
+      if (!isAssignable(varargComponentType, argTypes[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // --- HELPER: Try to match varargs method and repack arguments ---
@@ -1022,18 +1253,38 @@ public class GatunServer {
 
   // --- HELPER: Find constructor with compatible argument types ---
   // Returns Object[] { Constructor, Object[] adjustedArgs } to handle varargs repacking
+  // Uses constructor cache for faster repeated lookups.
   private static Object[] findConstructorWithArgs(
+      Class<?> clazz, Class<?>[] argTypes, Object[] args) throws NoSuchMethodException {
+    // Check cache first
+    ConstructorCacheKey cacheKey = new ConstructorCacheKey(clazz, argTypes);
+    CachedConstructor cached = constructorCache.get(cacheKey);
+    if (cached != null) {
+      return new Object[] {cached.constructor, cached.prepareArgs(args)};
+    }
+
+    // Not in cache - do full resolution
+    java.lang.reflect.Constructor<?> resolvedCtor = resolveConstructor(clazz, argTypes, args);
+
+    // Cache the result
+    CachedConstructor toCache = new CachedConstructor(resolvedCtor);
+    constructorCache.put(cacheKey, toCache);
+
+    return new Object[] {resolvedCtor, toCache.prepareArgs(args)};
+  }
+
+  // --- HELPER: Resolve constructor without caching (called on cache miss) ---
+  private static java.lang.reflect.Constructor<?> resolveConstructor(
       Class<?> clazz, Class<?>[] argTypes, Object[] args) throws NoSuchMethodException {
     // First try exact match
     try {
-      return new Object[] {clazz.getConstructor(argTypes), args};
+      return clazz.getConstructor(argTypes);
     } catch (NoSuchMethodException e) {
       // Fall through to search
     }
 
     // Search for compatible constructor with specificity scoring
     java.lang.reflect.Constructor<?> bestMatch = null;
-    Object[] bestArgs = null;
     int bestScore = Integer.MIN_VALUE;
 
     for (java.lang.reflect.Constructor<?> c : clazz.getConstructors()) {
@@ -1041,12 +1292,10 @@ public class GatunServer {
 
       // Check for varargs match
       if (c.isVarArgs() && argTypes.length >= paramTypes.length - 1) {
-        Object[] result = tryVarargsMatch(paramTypes, argTypes, args);
-        if (result != null) {
+        if (isVarargsCompatible(paramTypes, argTypes)) {
           int score = 100; // Varargs gets lower priority
           if (bestScore < score) {
             bestMatch = c;
-            bestArgs = result;
             bestScore = score;
           }
         }
@@ -1073,14 +1322,13 @@ public class GatunServer {
         int score = 1000 + specificity;
         if (bestScore < score) {
           bestMatch = c;
-          bestArgs = args;
           bestScore = score;
         }
       }
     }
 
     if (bestMatch != null) {
-      return new Object[] {bestMatch, bestArgs};
+      return bestMatch;
     }
 
     throw new NoSuchMethodException(
@@ -1099,10 +1347,12 @@ public class GatunServer {
     if (paramType == long.class && (argType == int.class || argType == long.class)) return true;
     // Allow int/long -> double widening (e.g., Math.pow(2, 10) should work)
     if (paramType == double.class
-        && (argType == double.class || argType == float.class || argType == int.class || argType == long.class))
-      return true;
-    if (paramType == float.class && (argType == float.class || argType == int.class || argType == long.class))
-      return true;
+        && (argType == double.class
+            || argType == float.class
+            || argType == int.class
+            || argType == long.class)) return true;
+    if (paramType == float.class
+        && (argType == float.class || argType == int.class || argType == long.class)) return true;
     if (paramType == boolean.class && argType == boolean.class) return true;
     return false;
   }
@@ -1320,7 +1570,7 @@ public class GatunServer {
    */
   private Object createCallbackProxy(long callbackId, String interfaceName)
       throws ClassNotFoundException {
-    Class<?> interfaceClass = Class.forName(interfaceName);
+    Class<?> interfaceClass = getClass(interfaceName);
     if (!interfaceClass.isInterface()) {
       throw new IllegalArgumentException(interfaceName + " is not an interface");
     }
@@ -1470,7 +1720,8 @@ public class GatunServer {
 
   private int packError(FlatBufferBuilder builder, String msg, String errorType) {
     int errOff = builder.createString(msg == null ? "Unknown Error" : msg);
-    int typeOff = builder.createString(errorType == null ? "java.lang.RuntimeException" : errorType);
+    int typeOff =
+        builder.createString(errorType == null ? "java.lang.RuntimeException" : errorType);
     Response.startResponse(builder);
     Response.addIsError(builder, true);
     Response.addErrorMsg(builder, errOff);
@@ -1478,10 +1729,9 @@ public class GatunServer {
     return Response.endResponse(builder);
   }
 
-  /**
-   * Pack an Arrow write result into a response with ArrowBatchDescriptor.
-   */
-  private int packArrowResponse(FlatBufferBuilder builder, ArrowMemoryHandler.ArrowWriteResult result) {
+  /** Pack an Arrow write result into a response with ArrowBatchDescriptor. */
+  private int packArrowResponse(
+      FlatBufferBuilder builder, ArrowMemoryHandler.ArrowWriteResult result) {
     // Build schema bytes vector if present
     int schemaBytesVec = 0;
     if (result.schemaBytes != null) {
