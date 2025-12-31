@@ -1747,7 +1747,7 @@ def run_py4j_benchmarks() -> dict:
         text=True,
         env={**os.environ},
         cwd=cwd,
-        timeout=600,  # 10 minutes should be enough for ~37 benchmarks × 2 runs
+        timeout=1800,  # 30 minutes for full benchmark suite with warmup
     )
 
     if result.returncode != 0:
