@@ -918,6 +918,10 @@ class GatunClient:
         # This avoids repeated str.encode() calls for class/method names
         self._string_cache: dict[str, bytes] = {}
 
+        # Count of fire-and-forget commands sent without reading responses
+        # These responses must be drained before the next synchronous command
+        self._pending_responses: int = 0
+
     def _create_string(self, builder: flatbuffers.Builder, s: str) -> int:
         """Create a FlatBuffers string with caching of encoded bytes.
 
@@ -1034,11 +1038,16 @@ class GatunClient:
         if len(data) > max_command_size:
             raise PayloadTooLargeError(len(data), max_command_size, "Command")
 
-        # 2. Write to Shared Memory
+        # 2. Drain any pending responses from fire-and-forget commands
+        # This must happen before writing to shared memory to avoid race conditions
+        if wait_for_response:
+            self._drain_pending_responses()
+
+        # 3. Write to Shared Memory
         self.shm.seek(self.command_offset)
         self.shm.write(data)
 
-        # 2. Signal Java (Send Length)
+        # 4. Signal Java (Send Length)
         # Verify socket is open
         if self.sock.fileno() == -1:
             if wait_for_response:
@@ -1047,9 +1056,28 @@ class GatunClient:
 
         self.sock.sendall(struct.pack("<I", len(data)))
 
-        # 3. Handle Response
+        # 5. Handle Response
         if wait_for_response:
             return self._read_response()
+        else:
+            # Track that we have a pending response to drain later
+            self._pending_responses += 1
+
+    def _drain_pending_responses(self):
+        """Drain any pending responses from fire-and-forget commands.
+
+        Fire-and-forget commands (like FreeObject) still get responses from Java.
+        We must read and discard these responses before the next synchronous
+        command to keep the response stream in sync.
+        """
+        while self._pending_responses > 0:
+            # Read response length
+            sz_data = _recv_exactly(self.sock, 4)
+            sz = struct.unpack("<I", sz_data)[0]
+            # Read and discard the response data (it's in SHM, we just need to sync)
+            self.shm.seek(self.response_offset)
+            self.shm.read(sz)
+            self._pending_responses -= 1
 
     def _unpack_value(self, val_type, val_table):
         """Unpack a FlatBuffer Value union to a Python object."""
@@ -2043,7 +2071,12 @@ class GatunClient:
             return Value.Value.ArrayVal, ArrayVal.End(builder)
 
     def free_object(self, object_id):
-        """Sends FreeObject to release a Java object."""
+        """Sends FreeObject to release a Java object (fire-and-forget).
+
+        This is called from the weak reference finalizer when JavaObjects are
+        garbage collected. It uses fire-and-forget mode to avoid blocking GC
+        with a round-trip, which significantly improves throughput.
+        """
         if self.sock is None or self.sock.fileno() == -1:
             return
 
@@ -2055,7 +2088,10 @@ class GatunClient:
         builder.Finish(cmd_offset)
 
         try:
-            self._send_raw(builder.Output())
+            # Fire-and-forget: don't wait for response since FreeObject
+            # just returns null and we don't care about the result.
+            # This avoids blocking GC with a socket round-trip.
+            self._send_raw(builder.Output(), wait_for_response=False)
         except OSError:
             pass
 

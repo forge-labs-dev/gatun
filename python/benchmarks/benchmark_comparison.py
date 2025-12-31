@@ -956,16 +956,26 @@ def print_sweep_results(
 
 
 def benchmark_gatun_throughput() -> list[dict]:
-    """Run Gatun throughput benchmarks."""
+    """Run Gatun throughput benchmarks.
+
+    NOTE: All callables are pre-bound before timing loops to measure pure bridge
+    overhead, matching how real applications (like PySpark) cache method references.
+    """
     from gatun import connect
 
     client = connect()
     results = []
 
-    # Bulk static calls
+    # Pre-bind classes and methods (matching Py4J benchmark pattern)
+    Math = client.jvm.java.lang.Math
+    ArrayList = client.jvm.java.util.ArrayList
+    HashMap = client.jvm.java.util.HashMap
+
+    # Bulk static calls - prebind the method
+    abs_fn = Math.abs  # Pre-bind the static method
     start = time.perf_counter()
     for i in range(BULK_SIZE):
-        client.jvm.java.lang.Math.abs(i)
+        abs_fn(i)
     elapsed = time.perf_counter() - start
     results.append(
         {
@@ -975,10 +985,10 @@ def benchmark_gatun_throughput() -> list[dict]:
         }
     )
 
-    # Bulk object creation
+    # Bulk object creation - use prebound class
     start = time.perf_counter()
     for _ in range(BULK_SIZE):
-        client.create_object("java.util.ArrayList")
+        ArrayList()
     elapsed = time.perf_counter() - start
     results.append(
         {
@@ -988,11 +998,12 @@ def benchmark_gatun_throughput() -> list[dict]:
         }
     )
 
-    # Bulk instance method calls
-    arr = client.create_object("java.util.ArrayList")
+    # Bulk instance method calls - prebind the method
+    arr = ArrayList()
+    add_fn = arr.add  # Pre-bind the instance method
     start = time.perf_counter()
     for i in range(BULK_SIZE):
-        arr.add(i)
+        add_fn(i)
     elapsed = time.perf_counter() - start
     results.append(
         {
@@ -1008,8 +1019,8 @@ def benchmark_gatun_throughput() -> list[dict]:
     ops_per_iteration = 5
     start = time.perf_counter()
     for i in range(iterations):
-        # Create object (1 op)
-        hm = client.create_object("java.util.HashMap")
+        # Create object (1 op) - use prebound class
+        hm = HashMap()
         # Call instance methods (2 ops)
         hm.put("key1", i)
         hm.put("key2", f"value{i}")
@@ -1373,17 +1384,22 @@ def run_latency_benchmarks(gateway, auto_convert):
 
 
 def run_throughput_benchmarks(gateway):
-    """Run throughput benchmarks."""
+    """Run throughput benchmarks.
+
+    NOTE: All callables are pre-bound before timing loops to measure pure bridge
+    overhead, matching how real applications (like PySpark) cache method references.
+    """
     ArrayList = gateway.jvm.java.util.ArrayList
     HashMap = gateway.jvm.java.util.HashMap
     Math = gateway.jvm.java.lang.Math
 
     throughput_results = []
 
-    # Bulk static calls
+    # Bulk static calls - prebind the method
+    abs_fn = Math.abs  # Pre-bind the static method
     start = time.perf_counter()
     for i in range(BULK_SIZE):
-        Math.abs(i)
+        abs_fn(i)
     elapsed = time.perf_counter() - start
     throughput_results.append({
         "name": f"Bulk static calls ({BULK_SIZE})",
@@ -1402,11 +1418,12 @@ def run_throughput_benchmarks(gateway):
         "ops_per_sec": BULK_SIZE / elapsed,
     })
 
-    # Bulk instance method calls
+    # Bulk instance method calls - prebind the method
     arr = ArrayList()
+    add_fn = arr.add  # Pre-bind the instance method
     start = time.perf_counter()
     for i in range(BULK_SIZE):
-        arr.add(i)
+        add_fn(i)
     elapsed = time.perf_counter() - start
     throughput_results.append({
         "name": f"Bulk instance calls ({BULK_SIZE})",
@@ -1513,9 +1530,15 @@ print("PY4J_PORT:" + str(port))
 
 java_home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk@21")
 java_cmd = os.path.join(java_home, "bin", "java")
+
+# JVM tuning for stable microbenchmarking:
+# - Fixed heap size to avoid GC resize pauses
+jvm_opts = [
+    "-Xms512m", "-Xmx512m",  # Fixed heap size (larger to avoid GC during benchmarks)
+]
 proc = subprocess.Popen(
-    [java_cmd, "-cp", jar_path, "py4j.GatewayServer", str(port)],
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    [java_cmd] + jvm_opts + ["-cp", jar_path, "py4j.GatewayServer", str(port)],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,  # Avoid pipe blocking
 )
 
 # Wait for server to start with port polling (more reliable than sleep)
@@ -1582,6 +1605,7 @@ def run_py4j_benchmarks() -> dict:
         text=True,
         env={**os.environ},
         cwd=cwd,
+        timeout=600,  # 10 minutes should be enough for ~37 benchmarks × 2 runs
     )
 
     if result.returncode != 0:
