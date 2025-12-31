@@ -171,6 +171,45 @@ public class GatunServer {
   /** Empty Object array constant to avoid allocation. */
   private static final Object[] EMPTY_OBJECT_ARRAY = new Object[0];
 
+  // Common JDK classes with no-arg constructors to pre-warm the cache
+  private static final String[] PREWARM_CLASSES = {
+      "java.util.ArrayList",
+      "java.util.LinkedList",
+      "java.util.HashMap",
+      "java.util.LinkedHashMap",
+      "java.util.HashSet",
+      "java.util.LinkedHashSet",
+      "java.util.TreeMap",
+      "java.util.TreeSet",
+      "java.lang.StringBuilder",
+      "java.lang.StringBuffer"
+  };
+
+  // Static initializer to pre-warm constructor and method caches
+  static {
+    for (String className : PREWARM_CLASSES) {
+      try {
+        Class<?> clazz = Class.forName(className);
+        // Pre-cache the no-arg constructor
+        java.lang.reflect.Constructor<?> ctor = clazz.getDeclaredConstructor();
+        noArgConstructorCache.put(clazz, ctor);
+        // Pre-cache common no-arg methods as MethodHandles
+        for (String methodName : new String[] {"size", "isEmpty", "toString", "hashCode", "clear"}) {
+          try {
+            java.lang.reflect.Method method = clazz.getMethod(methodName);
+            MethodHandle handle = METHOD_LOOKUP.unreflect(method);
+            noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
+          } catch (NoSuchMethodException | IllegalAccessException e) {
+            // Method doesn't exist on this class - skip
+          }
+        }
+      } catch (ClassNotFoundException | NoSuchMethodException e) {
+        LOG.fine("Failed to pre-warm cache for " + className + ": " + e.getMessage());
+      }
+    }
+    LOG.fine("Pre-warmed constructor cache with " + noArgConstructorCache.size() + " entries");
+  }
+
   /**
    * Get no-arg method handle for a class, using fast cache lookup.
    *
