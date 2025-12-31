@@ -6,7 +6,6 @@ import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.net.StandardProtocolFamily;
@@ -32,6 +31,10 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.gatun.protocol.*; // Import all generated classes
+import org.gatun.server.ReflectionCache.CachedConstructor;
+import org.gatun.server.ReflectionCache.CachedMethod;
+import org.gatun.server.ReflectionCache.ConstructorCacheKey;
+import org.gatun.server.ReflectionCache.MethodCacheKey;
 
 public class GatunServer {
   private static final Logger LOG = Logger.getLogger(GatunServer.class.getName());
@@ -124,423 +127,40 @@ public class GatunServer {
   private final BufferAllocator allocator = new RootAllocator();
   private final ArrowMemoryHandler arrowHandler = new ArrowMemoryHandler(allocator);
 
-  // --- METHOD CACHE ---
-  // Caches resolved methods to avoid repeated reflection lookups.
-  // Key: (class, methodName, argTypes) -> CachedMethod (method + varargs info)
-  private static final Map<MethodCacheKey, CachedMethod> methodCache = new ConcurrentHashMap<>();
-
-  // --- CONSTRUCTOR CACHE ---
-  // Caches resolved constructors to avoid repeated reflection lookups.
-  // Key: (class, argTypes) -> CachedConstructor (constructor + varargs info)
-  private static final Map<ConstructorCacheKey, CachedConstructor> constructorCache =
-      new ConcurrentHashMap<>();
-
-  // --- NO-ARG CONSTRUCTOR CACHE ---
-  // Caches no-arg constructors separately for fast lookup (most common case)
-  // Key: class -> no-arg Constructor
-  private static final Map<Class<?>, java.lang.reflect.Constructor<?>> noArgConstructorCache =
-      new ConcurrentHashMap<>();
-
-  /**
-   * Get no-arg constructor for a class, using cache.
-   */
+  // Delegate to ReflectionCache for all caching operations
   private static java.lang.reflect.Constructor<?> getNoArgConstructor(Class<?> clazz)
       throws NoSuchMethodException {
-    java.lang.reflect.Constructor<?> ctor = noArgConstructorCache.get(clazz);
-    if (ctor != null) {
-      return ctor;
-    }
-    ctor = clazz.getDeclaredConstructor();
-    noArgConstructorCache.put(clazz, ctor);
-    return ctor;
+    return ReflectionCache.getNoArgConstructor(clazz);
   }
 
-  // --- NO-ARG METHOD HANDLE CACHE ---
-  // Caches no-arg methods as MethodHandles for fast invocation (most common case: size(), isEmpty(), etc)
-  // MethodHandles are significantly faster than Method.invoke() after JIT warmup
-  // Uses a simple two-level map: Class -> methodName -> MethodHandle
-  private static final Map<Class<?>, Map<String, MethodHandle>> noArgMethodHandleCache =
-      new ConcurrentHashMap<>();
-
-  /** Lookup for converting Methods to MethodHandles. */
-  private static final MethodHandles.Lookup METHOD_LOOKUP = MethodHandles.publicLookup();
-
-  /** Empty Class array constant to avoid allocation. */
-  private static final Class<?>[] EMPTY_CLASS_ARRAY = new Class<?>[0];
-
-  /** Empty Object array constant to avoid allocation. */
-  private static final Object[] EMPTY_OBJECT_ARRAY = new Object[0];
-
-  // Common JDK classes with no-arg constructors to pre-warm the cache
-  private static final String[] PREWARM_CLASSES = {
-      "java.util.ArrayList",
-      "java.util.LinkedList",
-      "java.util.HashMap",
-      "java.util.LinkedHashMap",
-      "java.util.HashSet",
-      "java.util.LinkedHashSet",
-      "java.util.TreeMap",
-      "java.util.TreeSet",
-      "java.lang.StringBuilder",
-      "java.lang.StringBuffer"
-  };
-
-  // Static initializer to pre-warm constructor and method caches
-  static {
-    for (String className : PREWARM_CLASSES) {
-      try {
-        Class<?> clazz = Class.forName(className);
-        // Pre-cache the no-arg constructor
-        java.lang.reflect.Constructor<?> ctor = clazz.getDeclaredConstructor();
-        noArgConstructorCache.put(clazz, ctor);
-        // Pre-cache common no-arg methods as MethodHandles
-        for (String methodName : new String[] {"size", "isEmpty", "toString", "hashCode", "clear"}) {
-          try {
-            java.lang.reflect.Method method = clazz.getMethod(methodName);
-            MethodHandle handle = METHOD_LOOKUP.unreflect(method);
-            noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
-          } catch (NoSuchMethodException | IllegalAccessException e) {
-            // Method doesn't exist on this class - skip
-          }
-        }
-      } catch (ClassNotFoundException | NoSuchMethodException e) {
-        LOG.fine("Failed to pre-warm cache for " + className + ": " + e.getMessage());
-      }
-    }
-    LOG.fine("Pre-warmed constructor cache with " + noArgConstructorCache.size() + " entries");
-  }
-
-  /**
-   * Get no-arg method handle for a class, using fast cache lookup.
-   *
-   * @return the MethodHandle, or null if not found (caller should fall back to normal resolution)
-   */
   private static MethodHandle getNoArgMethodHandle(Class<?> clazz, String methodName) {
-    Map<String, MethodHandle> classMethods = noArgMethodHandleCache.get(clazz);
-    if (classMethods != null) {
-      MethodHandle cached = classMethods.get(methodName);
-      if (cached != null) {
-        return cached;
-      }
-    }
-
-    // Try to find the no-arg method and convert to MethodHandle
-    try {
-      java.lang.reflect.Method method = clazz.getMethod(methodName);
-      MethodHandle handle = METHOD_LOOKUP.unreflect(method);
-      // Cache it
-      noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
-      return handle;
-    } catch (NoSuchMethodException | IllegalAccessException e) {
-      // Not a simple no-arg method or not accessible - return null so caller uses normal resolution
-      return null;
-    }
+    return ReflectionCache.getNoArgMethodHandle(clazz, methodName);
   }
 
-  // --- STATIC FIELD CACHE ---
-  // Caches static field lookups to avoid repeated reflection overhead.
-  // Key: "className.fieldName" -> Field object
-  private static final Map<String, java.lang.reflect.Field> staticFieldCache =
-      new ConcurrentHashMap<>();
-
-  /**
-   * Get a static field by class and name, using cache.
-   */
   private static java.lang.reflect.Field getStaticField(Class<?> clazz, String fieldName)
       throws NoSuchFieldException {
-    String key = clazz.getName() + "." + fieldName;
-    java.lang.reflect.Field field = staticFieldCache.get(key);
-    if (field != null) {
-      return field;
-    }
-    field = clazz.getField(fieldName);
-    staticFieldCache.put(key, field);
-    return field;
+    return ReflectionCache.getStaticField(clazz, fieldName);
   }
 
-  // --- INSTANCE FIELD CACHE ---
-  // Caches instance field lookups (including hierarchy search) to avoid repeated reflection.
-  // Key: "className.fieldName" -> Field object (or sentinel for not found)
-  private static final Map<String, java.lang.reflect.Field> instanceFieldCache =
-      new ConcurrentHashMap<>();
-
-  /**
-   * Get an instance field by class and name, using cache.
-   * Searches the class hierarchy and caches the result.
-   */
   private static java.lang.reflect.Field getInstanceField(Class<?> clazz, String fieldName)
       throws NoSuchFieldException {
-    String key = clazz.getName() + "." + fieldName;
-    java.lang.reflect.Field field = instanceFieldCache.get(key);
-    if (field != null) {
-      return field;
-    }
-    // Search up the class hierarchy
-    Class<?> current = clazz;
-    while (current != null) {
-      try {
-        field = current.getDeclaredField(fieldName);
-        instanceFieldCache.put(key, field);
-        return field;
-      } catch (NoSuchFieldException e) {
-        current = current.getSuperclass();
-      }
-    }
-    throw new NoSuchFieldException("No field named '" + fieldName + "' in " + clazz.getName());
+    return ReflectionCache.getInstanceField(clazz, fieldName);
   }
 
-  // --- METHODS CACHE ---
-  // Caches getMethods() results to avoid repeated reflection overhead.
-  // Key: Class -> Method[] array
-  private static final Map<Class<?>, java.lang.reflect.Method[]> methodsCache =
-      new ConcurrentHashMap<>();
-
-  /**
-   * Get all public methods for a class, using cache.
-   */
   private static java.lang.reflect.Method[] getCachedMethods(Class<?> clazz) {
-    java.lang.reflect.Method[] methods = methodsCache.get(clazz);
-    if (methods != null) {
-      return methods;
-    }
-    methods = clazz.getMethods();
-    methodsCache.put(clazz, methods);
-    return methods;
+    return ReflectionCache.getCachedMethods(clazz);
   }
 
-  // --- CONSTRUCTORS CACHE ---
-  // Caches getConstructors() results to avoid repeated reflection overhead.
-  // Key: Class -> Constructor[] array
-  private static final Map<Class<?>, java.lang.reflect.Constructor<?>[]> constructorsCache =
-      new ConcurrentHashMap<>();
-
-  /**
-   * Get all public constructors for a class, using cache.
-   */
   private static java.lang.reflect.Constructor<?>[] getCachedConstructors(Class<?> clazz) {
-    java.lang.reflect.Constructor<?>[] constructors = constructorsCache.get(clazz);
-    if (constructors != null) {
-      return constructors;
-    }
-    constructors = clazz.getConstructors();
-    constructorsCache.put(clazz, constructors);
-    return constructors;
+    return ReflectionCache.getCachedConstructors(clazz);
   }
 
-  // --- CLASS CACHE ---
-  // Caches Class.forName lookups to avoid repeated class loading overhead.
-  // Key: fully qualified class name -> Class object
-  private static final Map<String, Class<?>> classCache = new ConcurrentHashMap<>();
-
-  /**
-   * Get a Class object by name, using cache to avoid repeated Class.forName overhead.
-   */
   private static Class<?> getClass(String className) throws ClassNotFoundException {
-    Class<?> clazz = classCache.get(className);
-    if (clazz != null) {
-      return clazz;
-    }
-    clazz = Class.forName(className);
-    classCache.put(className, clazz);
-    return clazz;
+    return ReflectionCache.getClass(className);
   }
 
-  /**
-   * Try to get a Class object by name, returning null if not found.
-   * Uses cache for faster lookups.
-   */
   private static Class<?> tryGetClass(String className) {
-    Class<?> clazz = classCache.get(className);
-    if (clazz != null) {
-      return clazz;
-    }
-    try {
-      clazz = Class.forName(className);
-      classCache.put(className, clazz);
-      return clazz;
-    } catch (ClassNotFoundException e) {
-      return null;
-    }
-  }
-
-  /** Key for method cache lookup. */
-  private static final class MethodCacheKey {
-    private final Class<?> clazz;
-    private final String methodName;
-    private final Class<?>[] argTypes;
-    private final int hashCode;
-
-    MethodCacheKey(Class<?> clazz, String methodName, Class<?>[] argTypes) {
-      this.clazz = clazz;
-      this.methodName = methodName;
-      this.argTypes = argTypes;
-      // Pre-compute hash for faster lookups
-      int h = clazz.hashCode() * 31 + methodName.hashCode();
-      for (Class<?> t : argTypes) {
-        h = h * 31 + (t != null ? t.hashCode() : 0);
-      }
-      this.hashCode = h;
-    }
-
-    @Override
-    public int hashCode() {
-      return hashCode;
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-      if (!(obj instanceof MethodCacheKey other)) return false;
-      if (clazz != other.clazz) return false;
-      if (!methodName.equals(other.methodName)) return false;
-      if (argTypes.length != other.argTypes.length) return false;
-      for (int i = 0; i < argTypes.length; i++) {
-        if (argTypes[i] != other.argTypes[i]) return false;
-      }
-      return true;
-    }
-  }
-
-  /** Cached method resolution result with MethodHandle for fast invocation. */
-  private static final class CachedMethod {
-    final java.lang.reflect.Method method;
-    final MethodHandle handle; // MethodHandle for faster invocation
-    final boolean isVarArgs;
-    final int fixedArgCount; // For varargs: number of fixed args before vararg array
-    final Class<?> varargComponentType; // For varargs: component type of vararg array
-
-    CachedMethod(java.lang.reflect.Method method) {
-      this.method = method;
-      this.isVarArgs = method.isVarArgs();
-      if (isVarArgs) {
-        Class<?>[] paramTypes = method.getParameterTypes();
-        this.fixedArgCount = paramTypes.length - 1;
-        this.varargComponentType = paramTypes[fixedArgCount].getComponentType();
-      } else {
-        this.fixedArgCount = 0;
-        this.varargComponentType = null;
-      }
-      // Convert to MethodHandle for faster invocation
-      MethodHandle h = null;
-      try {
-        h = METHOD_LOOKUP.unreflect(method);
-      } catch (IllegalAccessException e) {
-        // Fall back to null - will use Method.invoke
-      }
-      this.handle = h;
-      this.isStatic = java.lang.reflect.Modifier.isStatic(method.getModifiers());
-    }
-
-    final boolean isStatic;
-
-    /** Prepare arguments for invocation, repacking varargs if needed. */
-    Object[] prepareArgs(Object[] args) {
-      if (!isVarArgs) {
-        return args;
-      }
-      // Repack: fixed args + varargs array
-      Object[] newArgs = new Object[fixedArgCount + 1];
-      for (int i = 0; i < fixedArgCount; i++) {
-        newArgs[i] = args[i];
-      }
-      int varargCount = args.length - fixedArgCount;
-      Object varargArray = java.lang.reflect.Array.newInstance(varargComponentType, varargCount);
-      for (int i = 0; i < varargCount; i++) {
-        java.lang.reflect.Array.set(varargArray, i, args[fixedArgCount + i]);
-      }
-      newArgs[fixedArgCount] = varargArray;
-      return newArgs;
-    }
-
-    /** Invoke the method using MethodHandle if available, otherwise fall back to reflection. */
-    Object invoke(Object target, Object[] args) throws Throwable {
-      if (handle != null) {
-        // Use invokeWithArguments for flexibility with different arg counts
-        if (isStatic) {
-          return handle.invokeWithArguments(args);
-        } else {
-          // For instance methods, prepend target to args
-          Object[] fullArgs = new Object[args.length + 1];
-          fullArgs[0] = target;
-          System.arraycopy(args, 0, fullArgs, 1, args.length);
-          return handle.invokeWithArguments(fullArgs);
-        }
-      }
-      return method.invoke(target, args);
-    }
-  }
-
-  /** Key for constructor cache lookup. */
-  private static final class ConstructorCacheKey {
-    private final Class<?> clazz;
-    private final Class<?>[] argTypes;
-    private final int hashCode;
-
-    ConstructorCacheKey(Class<?> clazz, Class<?>[] argTypes) {
-      this.clazz = clazz;
-      this.argTypes = argTypes;
-      // Pre-compute hash for faster lookups
-      int h = clazz.hashCode();
-      for (Class<?> t : argTypes) {
-        h = h * 31 + (t != null ? t.hashCode() : 0);
-      }
-      this.hashCode = h;
-    }
-
-    @Override
-    public int hashCode() {
-      return hashCode;
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-      if (!(obj instanceof ConstructorCacheKey other)) return false;
-      if (clazz != other.clazz) return false;
-      if (argTypes.length != other.argTypes.length) return false;
-      for (int i = 0; i < argTypes.length; i++) {
-        if (argTypes[i] != other.argTypes[i]) return false;
-      }
-      return true;
-    }
-  }
-
-  /** Cached constructor resolution result. */
-  private static final class CachedConstructor {
-    final java.lang.reflect.Constructor<?> constructor;
-    final boolean isVarArgs;
-    final int fixedArgCount;
-    final Class<?> varargComponentType;
-
-    CachedConstructor(java.lang.reflect.Constructor<?> constructor) {
-      this.constructor = constructor;
-      this.isVarArgs = constructor.isVarArgs();
-      if (isVarArgs) {
-        Class<?>[] paramTypes = constructor.getParameterTypes();
-        this.fixedArgCount = paramTypes.length - 1;
-        this.varargComponentType = paramTypes[fixedArgCount].getComponentType();
-      } else {
-        this.fixedArgCount = 0;
-        this.varargComponentType = null;
-      }
-    }
-
-    /** Prepare arguments for invocation, repacking varargs if needed. */
-    Object[] prepareArgs(Object[] args) {
-      if (!isVarArgs) {
-        return args;
-      }
-      // Repack: fixed args + varargs array
-      Object[] newArgs = new Object[fixedArgCount + 1];
-      for (int i = 0; i < fixedArgCount; i++) {
-        newArgs[i] = args[i];
-      }
-      int varargCount = args.length - fixedArgCount;
-      Object varargArray = java.lang.reflect.Array.newInstance(varargComponentType, varargCount);
-      for (int i = 0; i < varargCount; i++) {
-        java.lang.reflect.Array.set(varargArray, i, args[fixedArgCount + i]);
-      }
-      newArgs[fixedArgCount] = varargArray;
-      return newArgs;
-    }
+    return ReflectionCache.tryGetClass(className);
   }
 
   /** Holds information about a registered callback. */
@@ -758,7 +378,7 @@ public class GatunServer {
               } else {
                 // Fallback: use normal resolution (handles inherited methods, etc)
                 MethodWithArgs mwa =
-                    findMethodWithArgs(target.getClass(), methodName, EMPTY_CLASS_ARRAY, EMPTY_OBJECT_ARRAY);
+                    findMethodWithArgs(target.getClass(), methodName, ReflectionCache.EMPTY_CLASS_ARRAY, ReflectionCache.EMPTY_OBJECT_ARRAY);
                 result = mwa.cached.invoke(target, mwa.args);
               }
             } else {
@@ -1425,7 +1045,7 @@ public class GatunServer {
       throws NoSuchMethodException {
     // Check cache first
     MethodCacheKey cacheKey = new MethodCacheKey(clazz, name, argTypes);
-    CachedMethod cached = methodCache.get(cacheKey);
+    CachedMethod cached = ReflectionCache.getCachedMethod(cacheKey);
     if (cached != null) {
       return new MethodWithArgs(cached, cached.prepareArgs(args));
     }
@@ -1435,7 +1055,7 @@ public class GatunServer {
 
     // Cache the result
     CachedMethod toCache = new CachedMethod(resolvedMethod);
-    methodCache.put(cacheKey, toCache);
+    ReflectionCache.cacheMethod(cacheKey, toCache);
 
     return new MethodWithArgs(toCache, toCache.prepareArgs(args));
   }
@@ -1575,7 +1195,7 @@ public class GatunServer {
       Class<?> clazz, Class<?>[] argTypes, Object[] args) throws NoSuchMethodException {
     // Check cache first
     ConstructorCacheKey cacheKey = new ConstructorCacheKey(clazz, argTypes);
-    CachedConstructor cached = constructorCache.get(cacheKey);
+    CachedConstructor cached = ReflectionCache.getCachedConstructor(cacheKey);
     if (cached != null) {
       return new Object[] {cached.constructor, cached.prepareArgs(args)};
     }
@@ -1585,7 +1205,7 @@ public class GatunServer {
 
     // Cache the result
     CachedConstructor toCache = new CachedConstructor(resolvedCtor);
-    constructorCache.put(cacheKey, toCache);
+    ReflectionCache.cacheConstructor(cacheKey, toCache);
 
     return new Object[] {resolvedCtor, toCache.prepareArgs(args)};
   }
