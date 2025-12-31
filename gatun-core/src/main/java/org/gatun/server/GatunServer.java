@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.net.StandardProtocolFamily;
@@ -153,12 +155,15 @@ public class GatunServer {
     return ctor;
   }
 
-  // --- NO-ARG METHOD CACHE ---
-  // Caches no-arg methods separately for fast lookup (most common case: size(), isEmpty(), etc)
-  // Uses a simple two-level map: Class -> methodName -> Method
-  // This avoids the overhead of MethodCacheKey allocation for the common case
-  private static final Map<Class<?>, Map<String, java.lang.reflect.Method>> noArgMethodCache =
+  // --- NO-ARG METHOD HANDLE CACHE ---
+  // Caches no-arg methods as MethodHandles for fast invocation (most common case: size(), isEmpty(), etc)
+  // MethodHandles are significantly faster than Method.invoke() after JIT warmup
+  // Uses a simple two-level map: Class -> methodName -> MethodHandle
+  private static final Map<Class<?>, Map<String, MethodHandle>> noArgMethodHandleCache =
       new ConcurrentHashMap<>();
+
+  /** Lookup for converting Methods to MethodHandles. */
+  private static final MethodHandles.Lookup METHOD_LOOKUP = MethodHandles.publicLookup();
 
   /** Empty Class array constant to avoid allocation. */
   private static final Class<?>[] EMPTY_CLASS_ARRAY = new Class<?>[0];
@@ -167,27 +172,28 @@ public class GatunServer {
   private static final Object[] EMPTY_OBJECT_ARRAY = new Object[0];
 
   /**
-   * Get no-arg method for a class, using fast cache lookup.
+   * Get no-arg method handle for a class, using fast cache lookup.
    *
-   * @return the Method, or null if not found (caller should fall back to normal resolution)
+   * @return the MethodHandle, or null if not found (caller should fall back to normal resolution)
    */
-  private static java.lang.reflect.Method getNoArgMethod(Class<?> clazz, String methodName) {
-    Map<String, java.lang.reflect.Method> classMethods = noArgMethodCache.get(clazz);
+  private static MethodHandle getNoArgMethodHandle(Class<?> clazz, String methodName) {
+    Map<String, MethodHandle> classMethods = noArgMethodHandleCache.get(clazz);
     if (classMethods != null) {
-      java.lang.reflect.Method cached = classMethods.get(methodName);
+      MethodHandle cached = classMethods.get(methodName);
       if (cached != null) {
         return cached;
       }
     }
 
-    // Try to find the no-arg method
+    // Try to find the no-arg method and convert to MethodHandle
     try {
       java.lang.reflect.Method method = clazz.getMethod(methodName);
+      MethodHandle handle = METHOD_LOOKUP.unreflect(method);
       // Cache it
-      noArgMethodCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, method);
-      return method;
-    } catch (NoSuchMethodException e) {
-      // Not a simple no-arg method - return null so caller uses normal resolution
+      noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
+      return handle;
+    } catch (NoSuchMethodException | IllegalAccessException e) {
+      // Not a simple no-arg method or not accessible - return null so caller uses normal resolution
       return null;
     }
   }
@@ -355,9 +361,10 @@ public class GatunServer {
     }
   }
 
-  /** Cached method resolution result. */
+  /** Cached method resolution result with MethodHandle for fast invocation. */
   private static final class CachedMethod {
     final java.lang.reflect.Method method;
+    final MethodHandle handle; // MethodHandle for faster invocation
     final boolean isVarArgs;
     final int fixedArgCount; // For varargs: number of fixed args before vararg array
     final Class<?> varargComponentType; // For varargs: component type of vararg array
@@ -373,7 +380,18 @@ public class GatunServer {
         this.fixedArgCount = 0;
         this.varargComponentType = null;
       }
+      // Convert to MethodHandle for faster invocation
+      MethodHandle h = null;
+      try {
+        h = METHOD_LOOKUP.unreflect(method);
+      } catch (IllegalAccessException e) {
+        // Fall back to null - will use Method.invoke
+      }
+      this.handle = h;
+      this.isStatic = java.lang.reflect.Modifier.isStatic(method.getModifiers());
     }
+
+    final boolean isStatic;
 
     /** Prepare arguments for invocation, repacking varargs if needed. */
     Object[] prepareArgs(Object[] args) {
@@ -392,6 +410,23 @@ public class GatunServer {
       }
       newArgs[fixedArgCount] = varargArray;
       return newArgs;
+    }
+
+    /** Invoke the method using MethodHandle if available, otherwise fall back to reflection. */
+    Object invoke(Object target, Object[] args) throws Throwable {
+      if (handle != null) {
+        // Use invokeWithArguments for flexibility with different arg counts
+        if (isStatic) {
+          return handle.invokeWithArguments(args);
+        } else {
+          // For instance methods, prepend target to args
+          Object[] fullArgs = new Object[args.length + 1];
+          fullArgs[0] = target;
+          System.arraycopy(args, 0, fullArgs, 1, args.length);
+          return handle.invokeWithArguments(fullArgs);
+        }
+      }
+      return method.invoke(target, args);
     }
   }
 
@@ -676,16 +711,16 @@ public class GatunServer {
             int argCount = cmd.argsLength();
 
             // Fast path for no-arg methods (most common case: size(), isEmpty(), toString(), etc)
+            // Uses MethodHandle for faster invocation after JIT warmup
             if (argCount == 0) {
-              java.lang.reflect.Method method = getNoArgMethod(target.getClass(), methodName);
-              if (method != null) {
-                result = method.invoke(target);
+              MethodHandle handle = getNoArgMethodHandle(target.getClass(), methodName);
+              if (handle != null) {
+                result = handle.invoke(target);
               } else {
                 // Fallback: use normal resolution (handles inherited methods, etc)
-                Object[] methodAndArgs =
+                MethodWithArgs mwa =
                     findMethodWithArgs(target.getClass(), methodName, EMPTY_CLASS_ARRAY, EMPTY_OBJECT_ARRAY);
-                java.lang.reflect.Method resolvedMethod = (java.lang.reflect.Method) methodAndArgs[0];
-                result = resolvedMethod.invoke(target);
+                result = mwa.cached.invoke(target, mwa.args);
               }
             } else {
               // Convert FlatBuffer arguments to Java objects
@@ -699,12 +734,10 @@ public class GatunServer {
                 argTypes[i] = (Class<?>) converted[1];
               }
 
-              // Find and invoke method via reflection (with varargs support)
-              Object[] methodAndArgs =
+              // Find and invoke method via MethodHandle (faster than reflection)
+              MethodWithArgs mwa =
                   findMethodWithArgs(target.getClass(), methodName, argTypes, javaArgs);
-              java.lang.reflect.Method method = (java.lang.reflect.Method) methodAndArgs[0];
-              Object[] finalArgs = (Object[]) methodAndArgs[1];
-              result = method.invoke(target, finalArgs);
+              result = mwa.cached.invoke(target, mwa.args);
             }
 
             // Wrap returned objects in registry
@@ -742,11 +775,9 @@ public class GatunServer {
               argTypes[i] = (Class<?>) converted[1];
             }
 
-            // Find and invoke static method via reflection (with varargs support)
-            Object[] methodAndArgs = findMethodWithArgs(clazz, methodName, argTypes, javaArgs);
-            java.lang.reflect.Method method = (java.lang.reflect.Method) methodAndArgs[0];
-            Object[] finalArgs = (Object[]) methodAndArgs[1];
-            result = method.invoke(null, finalArgs);
+            // Find and invoke static method via MethodHandle (faster than reflection)
+            MethodWithArgs mwa = findMethodWithArgs(clazz, methodName, argTypes, javaArgs);
+            result = mwa.cached.invoke(null, mwa.args);
 
             // Wrap returned objects in registry
             // If returnObjectRef is true, always wrap as ObjectRef (no auto-conversion)
@@ -1339,14 +1370,25 @@ public class GatunServer {
   // --- HELPER: Find method by name and compatible argument types ---
   // Returns Object[] { Method, Object[] adjustedArgs } to handle varargs repacking
   // Uses method cache for faster repeated lookups.
-  private static Object[] findMethodWithArgs(
+  /** Result of method resolution with prepared arguments. */
+  private static final class MethodWithArgs {
+    final CachedMethod cached;
+    final Object[] args;
+
+    MethodWithArgs(CachedMethod cached, Object[] args) {
+      this.cached = cached;
+      this.args = args;
+    }
+  }
+
+  private static MethodWithArgs findMethodWithArgs(
       Class<?> clazz, String name, Class<?>[] argTypes, Object[] args)
       throws NoSuchMethodException {
     // Check cache first
     MethodCacheKey cacheKey = new MethodCacheKey(clazz, name, argTypes);
     CachedMethod cached = methodCache.get(cacheKey);
     if (cached != null) {
-      return new Object[] {cached.method, cached.prepareArgs(args)};
+      return new MethodWithArgs(cached, cached.prepareArgs(args));
     }
 
     // Not in cache - do full resolution
@@ -1356,7 +1398,7 @@ public class GatunServer {
     CachedMethod toCache = new CachedMethod(resolvedMethod);
     methodCache.put(cacheKey, toCache);
 
-    return new Object[] {resolvedMethod, toCache.prepareArgs(args)};
+    return new MethodWithArgs(toCache, toCache.prepareArgs(args));
   }
 
   // --- HELPER: Resolve method without caching (called on cache miss) ---
