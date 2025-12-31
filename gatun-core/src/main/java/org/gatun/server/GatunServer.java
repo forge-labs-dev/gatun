@@ -1081,11 +1081,98 @@ public class GatunServer {
       type = (value != null) ? value.getClass() : Object.class;
     } else if (valType == Value.ListVal) {
       // Convert Python list to Java ArrayList
+      // Use fast path for homogeneous lists (all elements same type)
       ListVal lv = (ListVal) arg.val(new ListVal());
-      java.util.ArrayList<Object> list = new java.util.ArrayList<>();
-      for (int i = 0; i < lv.itemsLength(); i++) {
-        Object[] converted = convertArgument(lv.items(i));
-        list.add(converted[0]);
+      int len = lv.itemsLength();
+      java.util.ArrayList<Object> list = new java.util.ArrayList<>(len);
+
+      if (len > 0) {
+        // Check first element type to determine if we can use fast path
+        Argument first = lv.items(0);
+        byte firstType = first.valType();
+
+        // Fast paths for common homogeneous list types
+        if (firstType == Value.StringVal) {
+          // Try homogeneous string list
+          boolean allStrings = true;
+          for (int i = 1; i < len && allStrings; i++) {
+            if (lv.items(i).valType() != Value.StringVal) allStrings = false;
+          }
+          if (allStrings) {
+            for (int i = 0; i < len; i++) {
+              StringVal sv = (StringVal) lv.items(i).val(new StringVal());
+              list.add(sv.v());
+            }
+          } else {
+            // Fall back to per-element conversion
+            for (int i = 0; i < len; i++) {
+              Object[] converted = convertArgument(lv.items(i));
+              list.add(converted[0]);
+            }
+          }
+        } else if (firstType == Value.IntVal) {
+          // Try homogeneous int/long list
+          boolean allInts = true;
+          for (int i = 1; i < len && allInts; i++) {
+            if (lv.items(i).valType() != Value.IntVal) allInts = false;
+          }
+          if (allInts) {
+            for (int i = 0; i < len; i++) {
+              IntVal iv = (IntVal) lv.items(i).val(new IntVal());
+              long longVal = iv.v();
+              if (longVal >= Integer.MIN_VALUE && longVal <= Integer.MAX_VALUE) {
+                list.add((int) longVal);
+              } else {
+                list.add(longVal);
+              }
+            }
+          } else {
+            for (int i = 0; i < len; i++) {
+              Object[] converted = convertArgument(lv.items(i));
+              list.add(converted[0]);
+            }
+          }
+        } else if (firstType == Value.DoubleVal) {
+          // Try homogeneous double list
+          boolean allDoubles = true;
+          for (int i = 1; i < len && allDoubles; i++) {
+            if (lv.items(i).valType() != Value.DoubleVal) allDoubles = false;
+          }
+          if (allDoubles) {
+            for (int i = 0; i < len; i++) {
+              DoubleVal dv = (DoubleVal) lv.items(i).val(new DoubleVal());
+              list.add(dv.v());
+            }
+          } else {
+            for (int i = 0; i < len; i++) {
+              Object[] converted = convertArgument(lv.items(i));
+              list.add(converted[0]);
+            }
+          }
+        } else if (firstType == Value.ObjectRef) {
+          // Try homogeneous object ref list
+          boolean allRefs = true;
+          for (int i = 1; i < len && allRefs; i++) {
+            if (lv.items(i).valType() != Value.ObjectRef) allRefs = false;
+          }
+          if (allRefs) {
+            for (int i = 0; i < len; i++) {
+              ObjectRef ref = (ObjectRef) lv.items(i).val(new ObjectRef());
+              list.add(objectRegistry.get(ref.id()));
+            }
+          } else {
+            for (int i = 0; i < len; i++) {
+              Object[] converted = convertArgument(lv.items(i));
+              list.add(converted[0]);
+            }
+          }
+        } else {
+          // Other types or mixed: use generic conversion
+          for (int i = 0; i < len; i++) {
+            Object[] converted = convertArgument(lv.items(i));
+            list.add(converted[0]);
+          }
+        }
       }
       value = list;
       type = java.util.ArrayList.class;
