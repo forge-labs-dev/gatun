@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+from collections import OrderedDict
 import ctypes
 import logging
 import mmap
@@ -745,9 +746,11 @@ class JVMView:
                         # Try the package.name path - verify it exists first
                         full_path = f"{package}.{name}"
                         # Use reflection to check if this class exists
-                        if full_path not in _reflect_cache:
-                            _reflect_cache[full_path] = self._client.reflect(full_path)
-                        if _reflect_cache[full_path] in ("class", "method", "field"):
+                        cached_type = _reflect_cache.get(full_path)
+                        if cached_type is None:
+                            cached_type = self._client.reflect(full_path)
+                            _reflect_cache.set(full_path, cached_type)
+                        if cached_type in ("class", "method", "field"):
                             return _JVMNode(self._client, full_path)
 
         if self._package_path:
@@ -765,9 +768,48 @@ class JVMView:
         return "<JVMView>"
 
 
+# Maximum size for LRU caches to prevent unbounded memory growth
+_CACHE_MAX_SIZE = 10000
+
+
+class _LRUCache[V]:
+    """Simple LRU cache with bounded size.
+
+    Uses OrderedDict to maintain insertion order. When the cache is full,
+    the oldest entry is evicted. Access (get) moves the entry to the end.
+    """
+
+    def __init__(self, maxsize: int = _CACHE_MAX_SIZE):
+        self._cache: OrderedDict[str, V] = OrderedDict()
+        self._maxsize = maxsize
+
+    def get(self, key: str) -> V | None:
+        """Get a value from the cache, moving it to the end (most recent)."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return None
+
+    def set(self, key: str, value: V) -> None:
+        """Set a value in the cache, evicting oldest if full."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)  # Remove oldest
+        self._cache[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
 # Cache for reflection results to avoid repeated Java calls
 # Maps fully qualified name -> type ("class", "method", "field", "none")
-_reflect_cache: dict[str, str] = {}
+# Bounded to prevent memory bloat in long-running applications
+_reflect_cache = _LRUCache(_CACHE_MAX_SIZE)
 
 
 class _JVMNode:
@@ -792,9 +834,11 @@ class _JVMNode:
 
     def _get_type(self) -> str:
         """Get the type of this path via reflection (cached)."""
-        if self._path not in _reflect_cache:
-            _reflect_cache[self._path] = self._client.reflect(self._path)
-        return _reflect_cache[self._path]
+        cached = _reflect_cache.get(self._path)
+        if cached is None:
+            cached = self._client.reflect(self._path)
+            _reflect_cache.set(self._path, cached)
+        return cached
 
     def __getattr__(self, name):
         """Navigate deeper or access static method/field."""
@@ -916,7 +960,8 @@ class GatunClient:
 
         # String encoding cache - cache UTF-8 encoded bytes for commonly used strings
         # This avoids repeated str.encode() calls for class/method names
-        self._string_cache: dict[str, bytes] = {}
+        # Bounded to prevent memory bloat in long-running applications
+        self._string_cache: _LRUCache[bytes] = _LRUCache(_CACHE_MAX_SIZE)
 
         # Count of fire-and-forget commands sent without reading responses
         # These responses must be drained before the next synchronous command
@@ -926,13 +971,12 @@ class GatunClient:
         """Create a FlatBuffers string with caching of encoded bytes.
 
         Caches the UTF-8 encoded bytes of strings to avoid repeated encoding.
-        The cache grows unbounded but in practice is limited to the set of
-        class names, method names, and field names used by the application.
+        Bounded to 10,000 entries to prevent memory bloat.
         """
         encoded = self._string_cache.get(s)
         if encoded is None:
             encoded = s.encode("utf-8")
-            self._string_cache[s] = encoded
+            self._string_cache.set(s, encoded)
         return builder.CreateString(encoded)
 
     def _get_builder(self, large: bool = False) -> flatbuffers.Builder:

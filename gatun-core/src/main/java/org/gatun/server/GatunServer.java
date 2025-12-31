@@ -174,6 +174,75 @@ public class GatunServer {
     return field;
   }
 
+  // --- INSTANCE FIELD CACHE ---
+  // Caches instance field lookups (including hierarchy search) to avoid repeated reflection.
+  // Key: "className.fieldName" -> Field object (or sentinel for not found)
+  private static final Map<String, java.lang.reflect.Field> instanceFieldCache =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Get an instance field by class and name, using cache.
+   * Searches the class hierarchy and caches the result.
+   */
+  private static java.lang.reflect.Field getInstanceField(Class<?> clazz, String fieldName)
+      throws NoSuchFieldException {
+    String key = clazz.getName() + "." + fieldName;
+    java.lang.reflect.Field field = instanceFieldCache.get(key);
+    if (field != null) {
+      return field;
+    }
+    // Search up the class hierarchy
+    Class<?> current = clazz;
+    while (current != null) {
+      try {
+        field = current.getDeclaredField(fieldName);
+        instanceFieldCache.put(key, field);
+        return field;
+      } catch (NoSuchFieldException e) {
+        current = current.getSuperclass();
+      }
+    }
+    throw new NoSuchFieldException("No field named '" + fieldName + "' in " + clazz.getName());
+  }
+
+  // --- METHODS CACHE ---
+  // Caches getMethods() results to avoid repeated reflection overhead.
+  // Key: Class -> Method[] array
+  private static final Map<Class<?>, java.lang.reflect.Method[]> methodsCache =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Get all public methods for a class, using cache.
+   */
+  private static java.lang.reflect.Method[] getCachedMethods(Class<?> clazz) {
+    java.lang.reflect.Method[] methods = methodsCache.get(clazz);
+    if (methods != null) {
+      return methods;
+    }
+    methods = clazz.getMethods();
+    methodsCache.put(clazz, methods);
+    return methods;
+  }
+
+  // --- CONSTRUCTORS CACHE ---
+  // Caches getConstructors() results to avoid repeated reflection overhead.
+  // Key: Class -> Constructor[] array
+  private static final Map<Class<?>, java.lang.reflect.Constructor<?>[]> constructorsCache =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Get all public constructors for a class, using cache.
+   */
+  private static java.lang.reflect.Constructor<?>[] getCachedConstructors(Class<?> clazz) {
+    java.lang.reflect.Constructor<?>[] constructors = constructorsCache.get(clazz);
+    if (constructors != null) {
+      return constructors;
+    }
+    constructors = clazz.getConstructors();
+    constructorsCache.put(clazz, constructors);
+    return constructors;
+  }
+
   // --- CLASS CACHE ---
   // Caches Class.forName lookups to avoid repeated class loading overhead.
   // Key: fully qualified class name -> Class object
@@ -640,7 +709,7 @@ public class GatunServer {
 
             if (target == null) throw new RuntimeException("Object " + targetId + " not found");
 
-            java.lang.reflect.Field field = findField(target.getClass(), fieldName);
+            java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
             field.setAccessible(true);
             result = field.get(target);
 
@@ -665,7 +734,7 @@ public class GatunServer {
             Object[] converted = convertArgument(arg);
             Object value = converted[0];
 
-            java.lang.reflect.Field field = findField(target.getClass(), fieldName);
+            java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
             field.setAccessible(true);
             field.set(target, value);
             result = null;
@@ -854,7 +923,7 @@ public class GatunServer {
                   if (parentClass != null) {
                     // Check if memberName is a method
                     boolean isMethod = false;
-                    for (java.lang.reflect.Method m : parentClass.getMethods()) {
+                    for (java.lang.reflect.Method m : getCachedMethods(parentClass)) {
                       if (m.getName().equals(memberName)) {
                         isMethod = true;
                         break;
@@ -1165,7 +1234,7 @@ public class GatunServer {
     java.lang.reflect.Method bestMatch = null;
     int bestScore = Integer.MIN_VALUE;
 
-    for (java.lang.reflect.Method m : clazz.getMethods()) {
+    for (java.lang.reflect.Method m : getCachedMethods(clazz)) {
       if (!m.getName().equals(name)) continue;
       Class<?>[] paramTypes = m.getParameterTypes();
 
@@ -1277,21 +1346,6 @@ public class GatunServer {
     return newArgs;
   }
 
-  // --- HELPER: Find field by name (searches class hierarchy) ---
-  private static java.lang.reflect.Field findField(Class<?> clazz, String name)
-      throws NoSuchFieldException {
-    // Search up the class hierarchy
-    Class<?> current = clazz;
-    while (current != null) {
-      try {
-        return current.getDeclaredField(name);
-      } catch (NoSuchFieldException e) {
-        current = current.getSuperclass();
-      }
-    }
-    throw new NoSuchFieldException("No field named '" + name + "' in " + clazz.getName());
-  }
-
   // --- HELPER: Find constructor with compatible argument types ---
   // Returns Object[] { Constructor, Object[] adjustedArgs } to handle varargs repacking
   // Uses constructor cache for faster repeated lookups.
@@ -1328,7 +1382,7 @@ public class GatunServer {
     java.lang.reflect.Constructor<?> bestMatch = null;
     int bestScore = Integer.MIN_VALUE;
 
-    for (java.lang.reflect.Constructor<?> c : clazz.getConstructors()) {
+    for (java.lang.reflect.Constructor<?> c : getCachedConstructors(clazz)) {
       Class<?>[] paramTypes = c.getParameterTypes();
 
       // Check for varargs match
