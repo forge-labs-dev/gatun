@@ -162,7 +162,7 @@ def profile_breakdown():
 
     # String encoding (uncached)
     unique_names = [f"method_{i}" for i in range(iterations)]
-    client._string_cache.clear()
+    client._string_cache._cache.clear()  # Access underlying OrderedDict
     start = time.perf_counter_ns()
     for name in unique_names:
         builder = client._get_builder()

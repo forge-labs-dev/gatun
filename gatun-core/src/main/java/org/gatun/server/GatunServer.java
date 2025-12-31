@@ -153,6 +153,45 @@ public class GatunServer {
     return ctor;
   }
 
+  // --- NO-ARG METHOD CACHE ---
+  // Caches no-arg methods separately for fast lookup (most common case: size(), isEmpty(), etc)
+  // Uses a simple two-level map: Class -> methodName -> Method
+  // This avoids the overhead of MethodCacheKey allocation for the common case
+  private static final Map<Class<?>, Map<String, java.lang.reflect.Method>> noArgMethodCache =
+      new ConcurrentHashMap<>();
+
+  /** Empty Class array constant to avoid allocation. */
+  private static final Class<?>[] EMPTY_CLASS_ARRAY = new Class<?>[0];
+
+  /** Empty Object array constant to avoid allocation. */
+  private static final Object[] EMPTY_OBJECT_ARRAY = new Object[0];
+
+  /**
+   * Get no-arg method for a class, using fast cache lookup.
+   *
+   * @return the Method, or null if not found (caller should fall back to normal resolution)
+   */
+  private static java.lang.reflect.Method getNoArgMethod(Class<?> clazz, String methodName) {
+    Map<String, java.lang.reflect.Method> classMethods = noArgMethodCache.get(clazz);
+    if (classMethods != null) {
+      java.lang.reflect.Method cached = classMethods.get(methodName);
+      if (cached != null) {
+        return cached;
+      }
+    }
+
+    // Try to find the no-arg method
+    try {
+      java.lang.reflect.Method method = clazz.getMethod(methodName);
+      // Cache it
+      noArgMethodCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, method);
+      return method;
+    } catch (NoSuchMethodException e) {
+      // Not a simple no-arg method - return null so caller uses normal resolution
+      return null;
+    }
+  }
+
   // --- STATIC FIELD CACHE ---
   // Caches static field lookups to avoid repeated reflection overhead.
   // Key: "className.fieldName" -> Field object
@@ -634,24 +673,39 @@ public class GatunServer {
 
             if (target == null) throw new RuntimeException("Object " + targetId + " not found");
 
-            // Convert FlatBuffer arguments to Java objects
             int argCount = cmd.argsLength();
-            Object[] javaArgs = new Object[argCount];
-            Class<?>[] argTypes = new Class<?>[argCount];
 
-            for (int i = 0; i < argCount; i++) {
-              Argument arg = cmd.args(i);
-              Object[] converted = convertArgument(arg);
-              javaArgs[i] = converted[0];
-              argTypes[i] = (Class<?>) converted[1];
+            // Fast path for no-arg methods (most common case: size(), isEmpty(), toString(), etc)
+            if (argCount == 0) {
+              java.lang.reflect.Method method = getNoArgMethod(target.getClass(), methodName);
+              if (method != null) {
+                result = method.invoke(target);
+              } else {
+                // Fallback: use normal resolution (handles inherited methods, etc)
+                Object[] methodAndArgs =
+                    findMethodWithArgs(target.getClass(), methodName, EMPTY_CLASS_ARRAY, EMPTY_OBJECT_ARRAY);
+                java.lang.reflect.Method resolvedMethod = (java.lang.reflect.Method) methodAndArgs[0];
+                result = resolvedMethod.invoke(target);
+              }
+            } else {
+              // Convert FlatBuffer arguments to Java objects
+              Object[] javaArgs = new Object[argCount];
+              Class<?>[] argTypes = new Class<?>[argCount];
+
+              for (int i = 0; i < argCount; i++) {
+                Argument arg = cmd.args(i);
+                Object[] converted = convertArgument(arg);
+                javaArgs[i] = converted[0];
+                argTypes[i] = (Class<?>) converted[1];
+              }
+
+              // Find and invoke method via reflection (with varargs support)
+              Object[] methodAndArgs =
+                  findMethodWithArgs(target.getClass(), methodName, argTypes, javaArgs);
+              java.lang.reflect.Method method = (java.lang.reflect.Method) methodAndArgs[0];
+              Object[] finalArgs = (Object[]) methodAndArgs[1];
+              result = method.invoke(target, finalArgs);
             }
-
-            // Find and invoke method via reflection (with varargs support)
-            Object[] methodAndArgs =
-                findMethodWithArgs(target.getClass(), methodName, argTypes, javaArgs);
-            java.lang.reflect.Method method = (java.lang.reflect.Method) methodAndArgs[0];
-            Object[] finalArgs = (Object[]) methodAndArgs[1];
-            result = method.invoke(target, finalArgs);
 
             // Wrap returned objects in registry
             if (result != null && !isAutoConvertible(result)) {
