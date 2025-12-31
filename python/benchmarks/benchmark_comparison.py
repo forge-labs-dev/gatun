@@ -25,11 +25,9 @@ Fairness notes:
     - Batch timing used for fast operations to reduce Python overhead
 """
 
-import glob
 import json
 import os
 import platform
-import socket
 import statistics
 import subprocess
 import sys
@@ -100,7 +98,7 @@ def print_environment():
 
         config = load_config()
         print(f"Gatun memory:  {config.memory}")
-        print(f"Gatun socket:  Unix domain socket (default)")
+        print("Gatun socket:  Unix domain socket (default)")
     except Exception as e:
         print(f"Gatun config:  Error loading: {e}")
 
@@ -148,7 +146,9 @@ def aggregate_trials(trial_results: list[list[dict]]) -> list[dict]:
     # Verify all trials have same benchmarks
     for i, trial in enumerate(trial_results):
         if len(trial) != num_benchmarks:
-            raise ValueError(f"Trial {i} has {len(trial)} benchmarks, expected {num_benchmarks}")
+            raise ValueError(
+                f"Trial {i} has {len(trial)} benchmarks, expected {num_benchmarks}"
+            )
 
     aggregated = []
     for bench_idx in range(num_benchmarks):
@@ -166,7 +166,9 @@ def aggregate_trials(trial_results: list[list[dict]]) -> list[dict]:
         agg = {
             "name": name,
             "iterations": bench_results[0].get("iterations", 0),
-            "warmup_count": int(statistics.median(r.get("warmup_count", 0) for r in bench_results)),
+            "warmup_count": int(
+                statistics.median(r.get("warmup_count", 0) for r in bench_results)
+            ),
             "mean_us": statistics.median(r["mean_us"] for r in bench_results),
             "median_us": statistics.median(r["median_us"] for r in bench_results),
             "stdev_us": statistics.median(r["stdev_us"] for r in bench_results),
@@ -218,9 +220,13 @@ def aggregate_throughput_trials(trial_results: list[list[dict]]) -> list[dict]:
         if "total_ms" in bench_results[0]:
             agg["total_ms"] = statistics.median(r["total_ms"] for r in bench_results)
         if "duration_sec" in bench_results[0]:
-            agg["duration_sec"] = statistics.median(r["duration_sec"] for r in bench_results)
+            agg["duration_sec"] = statistics.median(
+                r["duration_sec"] for r in bench_results
+            )
         if "iter_per_sec" in bench_results[0]:
-            agg["iter_per_sec"] = statistics.median(r["iter_per_sec"] for r in bench_results)
+            agg["iter_per_sec"] = statistics.median(
+                r["iter_per_sec"] for r in bench_results
+            )
 
         aggregated.append(agg)
 
@@ -240,7 +246,10 @@ def run_benchmark(
     # Time-based warmup (minimum iterations + time threshold)
     warmup_count = 0
     warmup_start = time.perf_counter()
-    while warmup_count < WARMUP_MIN_ITERATIONS or (time.perf_counter() - warmup_start) < warmup_seconds:
+    while (
+        warmup_count < WARMUP_MIN_ITERATIONS
+        or (time.perf_counter() - warmup_start) < warmup_seconds
+    ):
         func()
         warmup_count += 1
 
@@ -320,7 +329,10 @@ def run_batch_benchmark(
     # Time-based warmup
     warmup_count = 0
     warmup_start = time.perf_counter()
-    while warmup_count < WARMUP_MIN_ITERATIONS or (time.perf_counter() - warmup_start) < warmup_seconds:
+    while (
+        warmup_count < WARMUP_MIN_ITERATIONS
+        or (time.perf_counter() - warmup_start) < warmup_seconds
+    ):
         func()
         warmup_count += 1
 
@@ -330,7 +342,9 @@ def run_batch_benchmark(
         start = time.perf_counter_ns()
         for _ in range(batch_size):
             func()
-        elapsed = (time.perf_counter_ns() - start) / 1_000 / batch_size  # microseconds per call
+        elapsed = (
+            (time.perf_counter_ns() - start) / 1_000 / batch_size
+        )  # microseconds per call
         times.append(elapsed)
 
     sorted_times = sorted(times)
@@ -381,7 +395,9 @@ def print_results(results: list[dict], title: str):
     print(f" {title}")
     # Show number of trials if aggregated
     if results and results[0].get("num_trials"):
-        print(f" (aggregated from {results[0]['num_trials']} trials using median-of-medians)")
+        print(
+            f" (aggregated from {results[0]['num_trials']} trials using median-of-medians)"
+        )
     print(f"{'=' * 90}")
     print(f"{'Benchmark':<45} {'Mean (μs)':>10} {'Median':>10} {'P95':>10} {'P99':>10}")
     print(f"{'-' * 90}")
@@ -473,12 +489,12 @@ def print_comparison(
         if median_speedup >= 1:
             median_str = f"{median_speedup:.2f}x"
         else:
-            median_str = f"{1/median_speedup:.2f}x slow"
+            median_str = f"{1 / median_speedup:.2f}x slow"
 
         if mean_speedup >= 1:
             mean_str = f"{mean_speedup:.2f}x"
         else:
-            mean_str = f"{1/mean_speedup:.2f}x slow"
+            mean_str = f"{1 / mean_speedup:.2f}x slow"
 
         # p99 ratio: <1 means Gatun has better tail, >1 means worse tail
         if p99_ratio <= 1:
@@ -495,8 +511,12 @@ def print_comparison(
     if median_speedups and mean_speedups:
         geo_median = statistics.geometric_mean(median_speedups)
         geo_mean = statistics.geometric_mean(mean_speedups)
-        median_label = f"{geo_median:.2f}x" if geo_median >= 1 else f"{1/geo_median:.2f}x slow"
-        mean_label = f"{geo_mean:.2f}x" if geo_mean >= 1 else f"{1/geo_mean:.2f}x slow"
+        median_label = (
+            f"{geo_median:.2f}x" if geo_median >= 1 else f"{1 / geo_median:.2f}x slow"
+        )
+        mean_label = (
+            f"{geo_mean:.2f}x" if geo_mean >= 1 else f"{1 / geo_mean:.2f}x slow"
+        )
         print(
             f"{'Geometric Mean':<32} {'':>8} {'':>9} {'':>8} {'':>9} {median_label:>12} {mean_label:>11} {'':>10}"
         )
@@ -745,7 +765,9 @@ def benchmark_gatun() -> tuple[list[dict], dict]:
     _test_arr = client.create_object("java.util.ArrayList")
     _test_arr.add(small_bytes)
     _test_bytes = _test_arr.get(0)
-    assert client.jvm.java.lang.reflect.Array.getLength(_test_bytes) == 110, "bytes(110) verification failed"
+    assert client.jvm.java.lang.reflect.Array.getLength(_test_bytes) == 110, (
+        "bytes(110) verification failed"
+    )
 
     results.append(run_benchmark("5.4 bytes(110) verified", transfer_bytes_small))
 
@@ -763,7 +785,9 @@ def benchmark_gatun() -> tuple[list[dict], dict]:
     _test_arr = client.create_object("java.util.ArrayList")
     _test_arr.add(medium_bytes)
     _test_bytes = _test_arr.get(0)
-    assert client.jvm.java.lang.reflect.Array.getLength(_test_bytes) == 1000, "bytes(1KB) verification failed"
+    assert client.jvm.java.lang.reflect.Array.getLength(_test_bytes) == 1000, (
+        "bytes(1KB) verification failed"
+    )
 
     results.append(run_benchmark("5.5 bytes(1KB) verified", transfer_bytes_1kb))
 
@@ -814,7 +838,9 @@ def benchmark_gatun() -> tuple[list[dict], dict]:
         except Exception:
             pass
 
-    results.append(run_benchmark("7.1 bridge error propagation", catch_bridge_exception))
+    results.append(
+        run_benchmark("7.1 bridge error propagation", catch_bridge_exception)
+    )
 
     # 7.2 Java-side try/catch (exception thrown and caught on Java side, call succeeds)
     # This isolates Java exception creation cost from cross-language transport
@@ -825,7 +851,9 @@ def benchmark_gatun() -> tuple[list[dict], dict]:
         # before successfully parsing as decimal. The call itself succeeds.
         client.jvm.java.lang.Integer.decode("12345")
 
-    results.append(run_benchmark("7.2 java internal try/catch", java_internal_exception))
+    results.append(
+        run_benchmark("7.2 java internal try/catch", java_internal_exception)
+    )
 
     # =========================================================================
     # 8. TYPE CHECKING (fast ops, use batch timing)
@@ -972,12 +1000,16 @@ def print_sweep_results(
     print(f"{'=' * 100}")
 
     # String results
-    print(f"\n  String Operations:")
+    print("\n  String Operations:")
     print(f"  {'-' * 90}")
     if has_py4j:
-        print(f"  {'Operation':<18} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}")
+        print(
+            f"  {'Operation':<18} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}"
+        )
     else:
-        print(f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}")
+        print(
+            f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}"
+        )
     print(f"  {'-' * 90}")
     for r in string_results:
         size = r["size_bytes"]
@@ -987,7 +1019,9 @@ def print_sweep_results(
         if has_py4j and r["name"] in py4j_str_by_name:
             py4j_r = py4j_str_by_name[r["name"]]
             speedup = py4j_r["mean_us"] / r["mean_us"] if r["mean_us"] > 0 else 0
-            speedup_str = f"{speedup:.2f}x" if speedup >= 1 else f"{1/speedup:.2f}x slow"
+            speedup_str = (
+                f"{speedup:.2f}x" if speedup >= 1 else f"{1 / speedup:.2f}x slow"
+            )
             print(
                 f"  {r['name']:<18} {size_str:>8} {r['mean_us']:>10.1f} {py4j_r['mean_us']:>10.1f} {speedup_str:>10} {us_per_kb:>10.1f}"
             )
@@ -1000,12 +1034,16 @@ def print_sweep_results(
     send_results = [r for r in bytes_results if "send" in r["name"]]
     echo_results = [r for r in bytes_results if "echo" in r["name"]]
 
-    print(f"\n  Bytes Send-Only (Python -> Java, no return conversion):")
+    print("\n  Bytes Send-Only (Python -> Java, no return conversion):")
     print(f"  {'-' * 90}")
     if has_py4j:
-        print(f"  {'Operation':<20} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}")
+        print(
+            f"  {'Operation':<20} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}"
+        )
     else:
-        print(f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}")
+        print(
+            f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}"
+        )
     print(f"  {'-' * 90}")
     for r in send_results:
         size = r["size_bytes"]
@@ -1015,7 +1053,9 @@ def print_sweep_results(
         if has_py4j and r["name"] in py4j_bytes_by_name:
             py4j_r = py4j_bytes_by_name[r["name"]]
             speedup = py4j_r["mean_us"] / r["mean_us"] if r["mean_us"] > 0 else 0
-            speedup_str = f"{speedup:.2f}x" if speedup >= 1 else f"{1/speedup:.2f}x slow"
+            speedup_str = (
+                f"{speedup:.2f}x" if speedup >= 1 else f"{1 / speedup:.2f}x slow"
+            )
             print(
                 f"  {r['name']:<20} {size_str:>8} {r['mean_us']:>10.1f} {py4j_r['mean_us']:>10.1f} {speedup_str:>10} {us_per_kb:>10.1f}"
             )
@@ -1024,12 +1064,16 @@ def print_sweep_results(
                 f"  {r['name']:<20} {size_str:>10} {r['mean_us']:>12.1f} {r['median_us']:>12.1f} {us_per_kb:>12.1f}"
             )
 
-    print(f"\n  Bytes Round-Trip (Java -> Python, with return conversion):")
+    print("\n  Bytes Round-Trip (Java -> Python, with return conversion):")
     print(f"  {'-' * 90}")
     if has_py4j:
-        print(f"  {'Operation':<20} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}")
+        print(
+            f"  {'Operation':<20} {'Size':>8} {'Gatun':>10} {'Py4J':>10} {'Speedup':>10} {'μs/KB':>10}"
+        )
     else:
-        print(f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}")
+        print(
+            f"  {'Operation':<20} {'Size':>10} {'Mean (μs)':>12} {'Median':>12} {'μs/KB':>12}"
+        )
     print(f"  {'-' * 90}")
     for r in echo_results:
         size = r["size_bytes"]
@@ -1039,7 +1083,9 @@ def print_sweep_results(
         if has_py4j and r["name"] in py4j_bytes_by_name:
             py4j_r = py4j_bytes_by_name[r["name"]]
             speedup = py4j_r["mean_us"] / r["mean_us"] if r["mean_us"] > 0 else 0
-            speedup_str = f"{speedup:.2f}x" if speedup >= 1 else f"{1/speedup:.2f}x slow"
+            speedup_str = (
+                f"{speedup:.2f}x" if speedup >= 1 else f"{1 / speedup:.2f}x slow"
+            )
             print(
                 f"  {r['name']:<20} {size_str:>8} {r['mean_us']:>10.1f} {py4j_r['mean_us']:>10.1f} {speedup_str:>10} {us_per_kb:>10.1f}"
             )
@@ -1145,7 +1191,9 @@ def print_throughput_results(results: list[dict], title: str):
     print(f" {title}")
     # Show number of trials if aggregated
     if results and results[0].get("num_trials"):
-        print(f" (aggregated from {results[0]['num_trials']} trials using median-of-medians)")
+        print(
+            f" (aggregated from {results[0]['num_trials']} trials using median-of-medians)"
+        )
     print(f"{'=' * 90}")
     print(f"{'Benchmark':<50} {'Total (ms)':>12} {'Iter/sec':>12} {'Ops/sec':>12}")
     print(f"{'-' * 90}")
@@ -1163,9 +1211,7 @@ def print_throughput_results(results: list[dict], title: str):
     print()
 
 
-def print_throughput_comparison(
-    gatun_results: list[dict], py4j_results: list[dict]
-):
+def print_throughput_comparison(gatun_results: list[dict], py4j_results: list[dict]):
     """Print throughput comparison."""
     # Verify alignment by benchmark name
     assert len(gatun_results) == len(py4j_results), (
@@ -1179,9 +1225,7 @@ def print_throughput_comparison(
     print(f"\n{'=' * 100}")
     print(" Throughput Comparison: Gatun vs Py4J (ops/sec)")
     print(f"{'=' * 100}")
-    print(
-        f"{'Benchmark':<55} {'Gatun ops/s':>14} {'Py4J ops/s':>14} {'Speedup':>12}"
-    )
+    print(f"{'Benchmark':<55} {'Gatun ops/s':>14} {'Py4J ops/s':>14} {'Speedup':>12}")
     print(f"{'-' * 100}")
 
     speedups = []
@@ -1707,7 +1751,7 @@ def run_py4j_benchmarks() -> dict:
     )
 
     if result.returncode != 0:
-        print(f"  Py4J benchmark subprocess failed:")
+        print("  Py4J benchmark subprocess failed:")
         print(f"  stderr: {result.stderr[:500]}")
         return {}
 
@@ -1800,7 +1844,9 @@ def main():
     print("  8. Type Checking")
     print()
     print("Fairness notes:")
-    print("  - Py4J tested with both auto_convert=True (PySpark) and auto_convert=False")
+    print(
+        "  - Py4J tested with both auto_convert=True (PySpark) and auto_convert=False"
+    )
     print("  - Baseline measurements included for computing net bridge cost")
     print("  - Multiple trials aggregated using median-of-medians for robustness")
 
@@ -1817,7 +1863,9 @@ def main():
         if gatun_baseline is None:
             gatun_baseline = baseline
 
-        print(f"[Trial {trial + 1}/{NUM_TRIALS}] Running Gatun throughput benchmarks...")
+        print(
+            f"[Trial {trial + 1}/{NUM_TRIALS}] Running Gatun throughput benchmarks..."
+        )
         throughput = benchmark_gatun_throughput()
         gatun_throughput_trials.append(throughput)
 
@@ -1852,10 +1900,24 @@ def main():
             py4j_throughput_no_auto_trials.append(py4j_results["throughput_auto_false"])
 
     # Aggregate Py4J trials
-    py4j_latency_auto = aggregate_trials(py4j_latency_auto_trials) if py4j_latency_auto_trials else None
-    py4j_latency_no_auto = aggregate_trials(py4j_latency_no_auto_trials) if py4j_latency_no_auto_trials else None
-    py4j_throughput_auto = aggregate_throughput_trials(py4j_throughput_auto_trials) if py4j_throughput_auto_trials else None
-    py4j_throughput_no_auto = aggregate_throughput_trials(py4j_throughput_no_auto_trials) if py4j_throughput_no_auto_trials else None
+    py4j_latency_auto = (
+        aggregate_trials(py4j_latency_auto_trials) if py4j_latency_auto_trials else None
+    )
+    py4j_latency_no_auto = (
+        aggregate_trials(py4j_latency_no_auto_trials)
+        if py4j_latency_no_auto_trials
+        else None
+    )
+    py4j_throughput_auto = (
+        aggregate_throughput_trials(py4j_throughput_auto_trials)
+        if py4j_throughput_auto_trials
+        else None
+    )
+    py4j_throughput_no_auto = (
+        aggregate_throughput_trials(py4j_throughput_no_auto_trials)
+        if py4j_throughput_no_auto_trials
+        else None
+    )
 
     # Print baseline
     print_baseline(gatun_baseline, py4j_baseline)
@@ -1864,17 +1926,25 @@ def main():
     print_results(gatun_latency, "Gatun Latency Results")
 
     if py4j_latency_auto:
-        print_results(py4j_latency_auto, "Py4J Latency Results (auto_convert=True, PySpark default)")
+        print_results(
+            py4j_latency_auto,
+            "Py4J Latency Results (auto_convert=True, PySpark default)",
+        )
         print_comparison(gatun_latency, py4j_latency_auto)
 
     if py4j_latency_no_auto:
-        print_results(py4j_latency_no_auto, "Py4J Latency Results (auto_convert=False, thin bridge)")
+        print_results(
+            py4j_latency_no_auto,
+            "Py4J Latency Results (auto_convert=False, thin bridge)",
+        )
         print_comparison(gatun_latency, py4j_latency_no_auto)
 
     print_throughput_results(gatun_throughput, "Gatun Throughput Results")
 
     if py4j_throughput_auto:
-        print_throughput_results(py4j_throughput_auto, "Py4J Throughput (auto_convert=True)")
+        print_throughput_results(
+            py4j_throughput_auto, "Py4J Throughput (auto_convert=True)"
+        )
         print_throughput_comparison(gatun_throughput, py4j_throughput_auto)
 
     # Summary
@@ -1887,7 +1957,9 @@ def main():
 
     if py4j_latency_auto:
         avg_py4j_auto = statistics.mean(r["mean_us"] for r in py4j_latency_auto)
-        print(f"Py4J (auto_convert=True) average latency:  {avg_py4j_auto:.1f} μs per operation")
+        print(
+            f"Py4J (auto_convert=True) average latency:  {avg_py4j_auto:.1f} μs per operation"
+        )
 
         speedups = [
             p["mean_us"] / g["mean_us"]
@@ -1895,14 +1967,21 @@ def main():
             if g["mean_us"] > 0
         ]
         geo_mean = statistics.geometric_mean(speedups)
-        print(f"\nGatun vs Py4J (auto_convert=True): {geo_mean:.2f}x faster (geometric mean)")
+        print(
+            f"\nGatun vs Py4J (auto_convert=True): {geo_mean:.2f}x faster (geometric mean)"
+        )
 
     if py4j_latency_no_auto:
         import math
-        valid_results = [r["mean_us"] for r in py4j_latency_no_auto if not math.isnan(r["mean_us"])]
+
+        valid_results = [
+            r["mean_us"] for r in py4j_latency_no_auto if not math.isnan(r["mean_us"])
+        ]
         if valid_results:
             avg_py4j_no_auto = statistics.mean(valid_results)
-            print(f"Py4J (auto_convert=False) average latency: {avg_py4j_no_auto:.1f} μs per operation")
+            print(
+                f"Py4J (auto_convert=False) average latency: {avg_py4j_no_auto:.1f} μs per operation"
+            )
 
             speedups = [
                 p["mean_us"] / g["mean_us"]
@@ -1911,17 +1990,23 @@ def main():
             ]
             if speedups:
                 geo_mean = statistics.geometric_mean(speedups)
-                print(f"Gatun vs Py4J (auto_convert=False): {geo_mean:.2f}x faster (geometric mean)")
+                print(
+                    f"Gatun vs Py4J (auto_convert=False): {geo_mean:.2f}x faster (geometric mean)"
+                )
 
     if py4j_throughput_auto and gatun_throughput:
         gatun_ops = sum(r["ops_per_sec"] for r in gatun_throughput)
         py4j_ops = sum(r["ops_per_sec"] for r in py4j_throughput_auto)
-        print(f"\nTotal throughput: Gatun {gatun_ops:,.0f} ops/s vs Py4J {py4j_ops:,.0f} ops/s")
+        print(
+            f"\nTotal throughput: Gatun {gatun_ops:,.0f} ops/s vs Py4J {py4j_ops:,.0f} ops/s"
+        )
 
     if py4j_throughput_no_auto and gatun_throughput:
         gatun_ops = sum(r["ops_per_sec"] for r in gatun_throughput)
         py4j_ops = sum(r["ops_per_sec"] for r in py4j_throughput_no_auto)
-        print(f"Total throughput (no auto): Gatun {gatun_ops:,.0f} ops/s vs Py4J {py4j_ops:,.0f} ops/s")
+        print(
+            f"Total throughput (no auto): Gatun {gatun_ops:,.0f} ops/s vs Py4J {py4j_ops:,.0f} ops/s"
+        )
 
     # Run payload sweep to identify crossover points
     print("\n" + "-" * 80)
