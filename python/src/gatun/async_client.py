@@ -203,7 +203,7 @@ class AsyncGatunClient:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
-        self.memory_path = socket_path + ".shm"
+        self.memory_path = None  # Set during connect() from server handshake
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -234,15 +234,23 @@ class AsyncGatunClient:
                 self.socket_path
             )
 
-            # Read handshake
-            handshake_data = await self._reader.readexactly(16)
-            server_version, _, self.memory_size = struct.unpack("<IIQ", handshake_data)
+            # Read handshake header
+            # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
+            #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
+            handshake_header = await self._reader.readexactly(18)
+            server_version, _, self.memory_size, shm_path_len = struct.unpack(
+                "<IIQH", handshake_header
+            )
 
             if server_version != PROTOCOL_VERSION:
                 raise RuntimeError(
                     f"Protocol version mismatch: client={PROTOCOL_VERSION}, "
                     f"server={server_version}"
                 )
+
+            # Read SHM path
+            shm_path_bytes = await self._reader.readexactly(shm_path_len)
+            self.memory_path = shm_path_bytes.decode("utf-8")
 
             self.response_offset = self.memory_size - 65536  # 64KB response zone
 

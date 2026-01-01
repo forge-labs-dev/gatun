@@ -14,11 +14,13 @@ Gatun is a high-performance Python-to-Java bridge using shared memory (mmap) and
 - **schemas/commands.fbs**: FlatBuffers schema defining the wire protocol
 
 ### Communication Flow
-1. Python launcher starts Java server subprocess with shared memory file
-2. Client connects via Unix domain socket, receives protocol version and memory size in handshake
-3. Commands are serialized to FlatBuffers, written to shared memory
-4. Length prefix sent over socket signals Java to process command
-5. Response written to shared memory, length sent back to Python
+1. Python launcher starts Java server subprocess
+2. Client connects via Unix domain socket
+3. Server creates per-client shared memory file and sends handshake with SHM path
+4. Commands are serialized to FlatBuffers, written to shared memory
+5. Length prefix sent over socket signals Java to process command
+6. Response written to shared memory, length sent back to Python
+7. On disconnect, server cleans up the client's shared memory file
 
 ### Memory Layout
 - Command zone: offset 0
@@ -26,9 +28,10 @@ Gatun is a high-performance Python-to-Java bridge using shared memory (mmap) and
 - Response zone: last 4KB of shared memory
 
 ### Protocol Handshake
-Format: `[4 bytes: version][4 bytes: reserved][8 bytes: memory size]`
-- Protocol version (currently 1) is verified on connect
+Format: `[4 bytes: version][4 bytes: arena_epoch][8 bytes: memory size][2 bytes: shm_path_len][N bytes: shm_path]`
+- Protocol version (currently 2) is verified on connect
 - Version mismatch raises RuntimeError with upgrade instructions
+- SHM path is the per-client shared memory file path (e.g., `/tmp/gatun.sock.1.shm`)
 
 ## Build Commands
 
@@ -408,8 +411,11 @@ Only these classes can be instantiated or used for static methods (hardcoded in 
 Attempting to use non-allowlisted classes (e.g., `Runtime`, `ProcessBuilder`) raises `SecurityException`.
 
 ### Session Isolation
+- Each client session gets its own shared memory file (per-client SHM)
+- Multiple clients can connect concurrently without data races
 - Each client session tracks its own object IDs
 - Objects are automatically cleaned up when session ends
+- SHM files are deleted when the client disconnects
 - Double-free attempts are silently ignored
 
 ## Configuration

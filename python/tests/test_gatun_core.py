@@ -548,3 +548,112 @@ def test_batch_large(client):
 
     # Verify all items added
     assert arr.size() == n
+
+
+# --- Multi-Client Tests ---
+
+
+def test_multi_client_isolation(java_gateway):
+    """Test that multiple clients have isolated shared memory."""
+    from gatun import GatunClient
+
+    socket_path = str(java_gateway.socket_path)
+
+    # Create two clients connecting to the same server
+    client1 = GatunClient(socket_path)
+    client2 = GatunClient(socket_path)
+
+    assert client1.connect()
+    assert client2.connect()
+
+    # Verify they have different SHM paths
+    assert client1.memory_path != client2.memory_path
+    assert ".shm" in client1.memory_path
+    assert ".shm" in client2.memory_path
+
+    # Create objects in each client
+    arr1 = client1.create_object("java.util.ArrayList")
+    arr2 = client2.create_object("java.util.ArrayList")
+
+    # Add different items to each
+    arr1.add("client1_item")
+    arr2.add("client2_item_a")
+    arr2.add("client2_item_b")
+
+    # Verify isolation - each sees only its own items
+    assert arr1.size() == 1
+    assert arr2.size() == 2
+
+    client1.close()
+    client2.close()
+
+
+def test_multi_client_concurrent_operations(java_gateway):
+    """Test concurrent operations from multiple clients don't interfere."""
+    import threading
+    from gatun import GatunClient
+
+    socket_path = str(java_gateway.socket_path)
+    results = {}
+    errors = []
+
+    def client_work(client_id, iterations):
+        try:
+            client = GatunClient(socket_path)
+            if not client.connect():
+                errors.append(f"Client {client_id} failed to connect")
+                return
+
+            arr = client.create_object("java.util.ArrayList")
+
+            # Add items
+            for i in range(iterations):
+                arr.add(f"client{client_id}_item{i}")
+
+            # Verify count
+            size = arr.size()
+            results[client_id] = size
+
+            client.close()
+        except Exception as e:
+            errors.append(f"Client {client_id} error: {e}")
+
+    # Run 3 clients concurrently
+    threads = []
+    for i in range(3):
+        t = threading.Thread(target=client_work, args=(i, 50))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    # Check no errors
+    assert not errors, f"Errors occurred: {errors}"
+
+    # Each client should have added exactly 50 items
+    assert len(results) == 3
+    for client_id, size in results.items():
+        assert size == 50, f"Client {client_id} has {size} items, expected 50"
+
+
+def test_multi_client_shm_cleanup(java_gateway):
+    """Test that SHM files are cleaned up when clients disconnect."""
+    import os
+    import time
+    from gatun import GatunClient
+
+    socket_path = str(java_gateway.socket_path)
+
+    client = GatunClient(socket_path)
+    assert client.connect()
+
+    shm_path = client.memory_path
+    assert os.path.exists(shm_path), "SHM file should exist while connected"
+
+    client.close()
+
+    # Give server time to clean up
+    time.sleep(0.1)
+
+    assert not os.path.exists(shm_path), "SHM file should be deleted after disconnect"

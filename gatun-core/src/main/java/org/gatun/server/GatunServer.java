@@ -37,10 +37,10 @@ public class GatunServer {
   private static final Logger LOG = Logger.getLogger(GatunServer.class.getName());
 
   // Protocol version - increment when making breaking changes to the protocol
-  public static final int PROTOCOL_VERSION = 1;
+  // Version 2: Per-client shared memory (handshake includes SHM path)
+  public static final int PROTOCOL_VERSION = 2;
 
   private final Path socketPath;
-  private final Path memoryPath;
   private final long memorySize;
   private final long responseOffset;
   private final ExecutorService threadPool;
@@ -102,6 +102,9 @@ public class GatunServer {
   // --- THE OBJECT REGISTRY ---
   private final Map<Long, Object> objectRegistry = new ConcurrentHashMap<>();
   private final AtomicLong objectIdCounter = new AtomicLong(1);
+
+  // Session counter for unique per-client SHM paths
+  private final AtomicLong sessionCounter = new AtomicLong(0);
 
   // --- CALLBACK REGISTRY ---
   // Maps callback ID -> CallbackInfo (interface name + proxy object)
@@ -171,7 +174,6 @@ public class GatunServer {
 
   public GatunServer(String socketPathStr, long memorySize) {
     this.socketPath = Path.of(socketPathStr);
-    this.memoryPath = Path.of(socketPathStr + ".shm");
     this.memorySize = memorySize;
     this.responseOffset = memorySize - RESPONSE_ZONE_SIZE;
     this.threadPool = Executors.newVirtualThreadPerTaskExecutor();
@@ -180,66 +182,72 @@ public class GatunServer {
   public void start() throws IOException {
     Files.deleteIfExists(socketPath);
 
-    // --- 1. SETUP SHARED MEMORY (PANAMA) ---
-    try (RandomAccessFile raf = new RandomAccessFile(memoryPath.toFile(), "rw");
-        Arena arena = Arena.ofShared()) {
-      raf.setLength(this.memorySize);
+    // --- Register shutdown hook for cleanup ---
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                () -> {
+                  LOG.info("Shutting down...");
+                  threadPool.shutdownNow();
+                  allocator.close();
+                  try {
+                    Files.deleteIfExists(socketPath);
+                    // Note: Per-session SHM files are cleaned up when each session ends
+                  } catch (IOException e) {
+                    // Ignore cleanup errors on shutdown
+                  }
+                }));
 
-      FileChannel channel = raf.getChannel();
-      MemorySegment sharedMem =
-          channel.map(FileChannel.MapMode.READ_WRITE, 0, this.memorySize, arena);
+    // --- START SOCKET SERVER ---
+    try (ServerSocketChannel serverChannel =
+        ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+      serverChannel.bind(UnixDomainSocketAddress.of(socketPath));
+      LOG.info("Server ready at: " + socketPath);
 
-      sharedMem.fill((byte) 0);
-      LOG.info("Shared memory mapped at: " + memoryPath);
-
-      // --- Register shutdown hook for cleanup ---
-      Runtime.getRuntime()
-          .addShutdownHook(
-              new Thread(
-                  () -> {
-                    LOG.info("Shutting down...");
-                    threadPool.shutdownNow();
-                    allocator.close();
-                    try {
-                      Files.deleteIfExists(socketPath);
-                      Files.deleteIfExists(memoryPath);
-                    } catch (IOException e) {
-                      // Ignore cleanup errors on shutdown
-                    }
-                  }));
-
-      // --- 2. START SOCKET SERVER ---
-      try (ServerSocketChannel serverChannel =
-          ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
-        serverChannel.bind(UnixDomainSocketAddress.of(socketPath));
-        LOG.info("Server ready at: " + socketPath);
-
-        while (true) {
-          SocketChannel client = serverChannel.accept();
-          threadPool.submit(() -> handleClient(client, sharedMem));
-        }
+      while (true) {
+        SocketChannel client = serverChannel.accept();
+        long sessionId = sessionCounter.incrementAndGet();
+        threadPool.submit(() -> handleClient(client, sessionId));
       }
     }
   }
 
-  private void handleClient(SocketChannel client, MemorySegment sharedMem) {
+  private void handleClient(SocketChannel client, long sessionId) {
     Set<Long> sessionObjectIds = new HashSet<>();
     Set<Long> sessionCallbackIds = new HashSet<>();
-    LOG.fine("New client session started");
+    LOG.fine("New client session " + sessionId + " started");
 
-    // Set up thread-local session context for callbacks
-    sessionChannel.set(client);
-    sessionSharedMem.set(sharedMem);
+    // Create per-session shared memory file
+    Path sessionShmPath = Path.of(socketPath.toString() + "." + sessionId + ".shm");
 
-    try (client) {
+    try (client;
+        RandomAccessFile raf = new RandomAccessFile(sessionShmPath.toFile(), "rw");
+        Arena arena = Arena.ofConfined()) {
 
-      // --- HANDSHAKE: Send Protocol Version and Memory Size to Client ---
+      // Create and map the session's shared memory
+      raf.setLength(this.memorySize);
+      FileChannel channel = raf.getChannel();
+      MemorySegment sharedMem =
+          channel.map(FileChannel.MapMode.READ_WRITE, 0, this.memorySize, arena);
+      sharedMem.fill((byte) 0);
+
+      LOG.fine("Session " + sessionId + " SHM mapped at: " + sessionShmPath);
+
+      // Set up thread-local session context for callbacks
+      sessionChannel.set(client);
+      sessionSharedMem.set(sharedMem);
+
+      // --- HANDSHAKE: Send Protocol Version, Memory Size, and SHM Path to Client ---
       // Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
-      ByteBuffer handshakeBuf = ByteBuffer.allocate(16);
+      //         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
+      byte[] shmPathBytes = sessionShmPath.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+      ByteBuffer handshakeBuf = ByteBuffer.allocate(16 + 2 + shmPathBytes.length);
       handshakeBuf.order(ByteOrder.LITTLE_ENDIAN);
       handshakeBuf.putInt(PROTOCOL_VERSION);
       handshakeBuf.putInt((int) arrowHandler.getArenaEpoch()); // Current epoch for synchronization
       handshakeBuf.putLong(this.memorySize);
+      handshakeBuf.putShort((short) shmPathBytes.length);
+      handshakeBuf.put(shmPathBytes);
       handshakeBuf.flip();
 
       while (handshakeBuf.hasRemaining()) {
@@ -822,13 +830,20 @@ public class GatunServer {
         currentRequestId.remove();
       }
     } catch (IOException e) {
-      LOG.fine("Client session ended");
+      LOG.fine("Client session " + sessionId + " ended: " + e.getMessage());
     } finally {
       // Cleanup orphans...
       for (Long id : sessionObjectIds) objectRegistry.remove(id);
       // Clear thread-locals
       cancelledRequests.get().clear();
       currentRequestId.remove();
+      // Clean up session shared memory file
+      try {
+        Files.deleteIfExists(sessionShmPath);
+        LOG.fine("Session " + sessionId + " SHM file deleted: " + sessionShmPath);
+      } catch (IOException e) {
+        LOG.warning("Failed to delete session SHM file: " + sessionShmPath);
+      }
     }
   }
 

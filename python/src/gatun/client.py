@@ -44,7 +44,8 @@ from gatun.generated.org.gatun.protocol import (
 logger = logging.getLogger(__name__)
 
 # Protocol version - must match the server version
-PROTOCOL_VERSION = 1
+# Version 2: Per-client shared memory (handshake includes SHM path)
+PROTOCOL_VERSION = 2
 
 # Memory zone sizes - must match GatunServer.java constants
 COMMAND_ZONE_SIZE = 65536  # 64KB for commands
@@ -909,7 +910,7 @@ class GatunClient:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
-        self.memory_path = socket_path + ".shm"
+        self.memory_path = None  # Set during connect() from server handshake
 
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.shm_file = None
@@ -997,11 +998,12 @@ class GatunClient:
             # None = no timeout (blocking mode)
             self.sock.settimeout(None)
 
-            # 1. Handshake - read version, epoch, and memory size
+            # 1. Handshake - read version, epoch, memory size, and SHM path
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
-            handshake_data = _recv_exactly(self.sock, 16)
-            server_version, arena_epoch, self.memory_size = struct.unpack(
-                "<IIQ", handshake_data
+            #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
+            handshake_header = _recv_exactly(self.sock, 18)
+            server_version, arena_epoch, self.memory_size, shm_path_len = struct.unpack(
+                "<IIQH", handshake_header
             )
 
             # Verify protocol version
@@ -1011,6 +1013,10 @@ class GatunClient:
                     f"server={server_version}. Please update your client or server."
                 )
 
+            # Read SHM path
+            shm_path_bytes = _recv_exactly(self.sock, shm_path_len)
+            self.memory_path = shm_path_bytes.decode("utf-8")
+
             # Synchronize arena epoch with server
             self._arena_epoch = arena_epoch
 
@@ -1018,12 +1024,13 @@ class GatunClient:
             # Response zone size must match GatunServer.RESPONSE_ZONE_SIZE (64KB)
             self.response_offset = self.memory_size - 65536
 
-            # 3. Map Memory
+            # 3. Map Memory (session-specific SHM file created by server)
             self.shm_file = open(self.memory_path, "r+b")
             self.shm = mmap.mmap(self.shm_file.fileno(), self.memory_size)
             logger.info(
-                "Connected to %s (shared memory: %.2f MB)",
+                "Connected to %s (shared memory: %s, %.2f MB)",
                 self.socket_path,
+                self.memory_path,
                 self.memory_size / 1024 / 1024,
             )
 
