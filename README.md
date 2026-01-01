@@ -11,7 +11,6 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **Python Callbacks**: Register Python functions as Java interfaces
 - **Request Cancellation**: Cancel long-running operations
 - **JVM View API**: Pythonic package-style navigation (`client.jvm.java.util.ArrayList`)
-- **Py4J Compatible**: Drop-in replacement for Py4J in many cases
 - **PySpark Integration**: Use as backend for PySpark via BridgeAdapter
 - **Pythonic JavaObjects**: Iteration, indexing, and len() support on Java collections
 
@@ -296,23 +295,6 @@ size = client.get_field(obj, "size")
 client.set_field(obj, "fieldName", value)
 ```
 
-## Py4J Compatibility
-
-For migrating from Py4J (e.g., PySpark):
-
-```python
-from gatun.py4j_compat import JavaGateway, launch_gateway, java_import
-
-# Launch gateway (starts Gatun server)
-gateway = launch_gateway()
-
-# Or use context manager
-with JavaGateway() as gateway:
-    ArrayList = gateway.jvm.java.util.ArrayList
-    arr = ArrayList()
-    arr.add("hello")
-```
-
 ## PySpark Integration
 
 Use Gatun as the JVM communication backend for PySpark:
@@ -402,14 +384,88 @@ except JavaNumberFormatException as e:
     print(f"Parse error: {e}")
 ```
 
+## Architecture
+
+Gatun uses a client-server architecture with shared memory for high-performance IPC:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Python Client                            │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
+│  │ GatunClient │  │ AsyncClient  │  │    BridgeAdapter       │  │
+│  └──────┬──────┘  └──────┬───────┘  └───────────┬────────────┘  │
+│         └────────────────┼──────────────────────┘               │
+│                          ▼                                       │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              FlatBuffers Serialization                     │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ Unix Domain Socket (length prefix)
+                             │ + Shared Memory (command/response data)
+┌────────────────────────────▼────────────────────────────────────┐
+│                          Java Server                             │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                      GatunServer                           │  │
+│  │  - Command dispatch (create, invoke, field access, etc.)  │  │
+│  │  - Object registry and session management                  │  │
+│  │  - Security allowlist enforcement                          │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────┐ ┌─────────────────┐ ┌──────────────────┐  │
+│  │ ReflectionCache │ │ MethodResolver  │ │ ArrowMemoryHandler│  │
+│  │ - Method cache  │ │ - Overload res. │ │ - Arrow IPC       │  │
+│  │ - Constructor   │ │ - Varargs       │ │ - Zero-copy xfer  │  │
+│  │ - Field cache   │ │ - Type compat.  │ │                   │  │
+│  └─────────────────┘ └─────────────────┘ └──────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Communication Flow
+
+1. Python serializes command to FlatBuffers, writes to shared memory
+2. Length prefix sent over Unix socket signals Java to process
+3. Java reads command from shared memory, executes, writes response
+4. Response length sent back over socket
+5. Python reads response from shared memory
+
+### Memory Layout
+
+- Command zone: offset 0 (Python writes, Java reads)
+- Payload zone: offset 4096 (Arrow data)
+- Response zone: last 4KB (Java writes, Python reads)
+
 ## Development
 
 ```bash
+# Python (from python/ directory)
 cd python
 JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync  # Install deps and build JAR
 uv run pytest              # Run tests
 uv run ruff check .        # Lint
 uv run ruff format .       # Format
+
+# Java (from repository root)
+./gradlew :gatun-core:build       # Build
+./gradlew :gatun-core:shadowJar   # Build fat JAR
+```
+
+### Project Structure
+
+```
+gatun/
+├── python/
+│   └── src/gatun/         # Python client library
+│       ├── client.py      # Sync client
+│       ├── async_client.py# Async client
+│       ├── launcher.py    # Server process management
+│       └── bridge.py      # BridgeAdapter interface
+├── gatun-core/
+│   └── src/main/java/org/gatun/server/
+│       ├── GatunServer.java       # Main server
+│       ├── ReflectionCache.java   # Caching layer
+│       ├── MethodResolver.java    # Method resolution
+│       └── ArrowMemoryHandler.java# Arrow integration
+└── schemas/
+    └── commands.fbs       # FlatBuffers protocol schema
 ```
 
 ## License

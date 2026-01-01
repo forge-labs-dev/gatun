@@ -91,7 +91,7 @@ client.close()
 ## Supported Operations
 
 ### JVM View API (Recommended)
-The `client.jvm` property provides package-style navigation similar to Py4J:
+The `client.jvm` property provides package-style navigation:
 ```python
 # Access classes via package path
 ArrayList = client.jvm.java.util.ArrayList
@@ -111,7 +111,7 @@ result = client.jvm.java.lang.String.valueOf(123)     # "123"
 result = client.jvm.java.lang.String.format("Hello %s!", "World")  # "Hello World!"
 ```
 
-### java_import (Py4J Compatible)
+### java_import
 Import classes for shorter access paths:
 ```python
 from gatun import java_import
@@ -235,7 +235,7 @@ client.cancel(request_id)  # Returns True on acknowledgement
 # Maps to CancelledException in Python
 ```
 
-### is_instance_of (Py4J Compatible)
+### is_instance_of
 Check if a Java object is an instance of a class (equivalent to `instanceof`):
 ```python
 arr = client.create_object("java.util.ArrayList")
@@ -396,26 +396,9 @@ GATUN_MEMORY=64MB
 GATUN_SOCKET_PATH=/tmp/gatun.sock
 ```
 
-## Py4J Compatibility Layer
-
-For migrating from Py4J (e.g., PySpark integration):
-```python
-from gatun.py4j_compat import JavaGateway, launch_gateway, java_import
-
-# Launch gateway (starts Gatun server)
-gateway = launch_gateway()
-
-# Or use context manager
-with JavaGateway() as gateway:
-    ArrayList = gateway.jvm.java.util.ArrayList
-    arr = ArrayList()
-    arr.add("hello")
-```
-
 ## BridgeAdapter (PySpark Integration)
 
-The `BridgeAdapter` abstract class provides a unified interface for JVM communication,
-enabling PySpark to work with either Py4J or Gatun backends:
+The `BridgeAdapter` abstract class provides a unified interface for JVM communication:
 
 ```python
 from gatun.bridge import BridgeAdapter
@@ -454,7 +437,7 @@ export PYSPARK_USE_GATUN=true
 export GATUN_MEMORY=256MB
 ```
 
-Then use PySpark normally - it will use Gatun instead of Py4J for JVM communication.
+Then use PySpark normally - it will use Gatun for JVM communication.
 
 ## Logging
 
