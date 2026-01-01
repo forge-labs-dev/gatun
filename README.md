@@ -436,17 +436,14 @@ Gatun uses a client-server architecture with shared memory for high-performance 
 ## Development
 
 ```bash
-# Python (from python/ directory)
 cd python
 JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync  # Install deps and build JAR
 uv run pytest              # Run tests
 uv run ruff check .        # Lint
 uv run ruff format .       # Format
-
-# Java (from repository root)
-./gradlew :gatun-core:build       # Build
-./gradlew :gatun-core:shadowJar   # Build fat JAR
 ```
+
+The `uv sync` command automatically builds the Java JAR via the custom build backend.
 
 ### Project Structure
 
