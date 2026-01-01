@@ -384,3 +384,167 @@ def test_return_object_ref_allows_mutation(client):
 
     # Verify length
     assert client.invoke_static_method("java.lang.reflect.Array", "getLength", arr) == 3
+
+
+# --- Batch API Tests ---
+
+
+def test_batch_basic_operations(client):
+    """Test basic batch operations with context manager."""
+    arr = client.create_object("java.util.ArrayList")
+
+    with client.batch() as b:
+        r1 = b.call(arr, "add", "hello")
+        r2 = b.call(arr, "add", "world")
+        r3 = b.call(arr, "size")
+
+    # Results should be available after context exit
+    assert r1.get() is True  # ArrayList.add returns true
+    assert r2.get() is True
+    assert r3.get() == 2
+
+
+def test_batch_manual_execute(client):
+    """Test batch with manual execute() call."""
+    batch = client.batch()
+    r1 = batch.call_static("java.lang.Integer", "parseInt", "42")
+    r2 = batch.call_static("java.lang.Math", "max", 10, 20)
+    r3 = batch.call_static("java.lang.Math", "min", 5, 3)
+
+    # Results not available before execute
+    with pytest.raises(RuntimeError, match="Must call batch.execute"):
+        r1.get()
+
+    batch.execute()
+
+    assert r1.get() == 42
+    assert r2.get() == 20
+    assert r3.get() == 3
+
+
+def test_batch_create_objects(client):
+    """Test creating multiple objects in a batch."""
+    with client.batch() as b:
+        r1 = b.create("java.util.ArrayList")
+        r2 = b.create("java.util.HashMap")
+        r3 = b.create("java.lang.StringBuilder", "hello")
+
+    # All should return JavaObjects
+    arr = r1.get()
+    hm = r2.get()
+    sb = r3.get()
+
+    assert arr is not None
+    assert hm is not None
+    assert sb is not None
+
+    # Verify objects work
+    arr.add("test")
+    assert arr.size() == 1
+
+    hm.put("key", "value")
+    assert hm.get("key") == "value"
+
+    assert sb.toString() == "hello"
+
+
+def test_batch_mixed_operations(client):
+    """Test batch with mixed operation types."""
+    with client.batch() as b:
+        # Create an object
+        arr_result = b.create("java.util.ArrayList")
+        # Static method call
+        parsed = b.call_static("java.lang.Integer", "parseInt", "123")
+
+    arr = arr_result.get()
+    assert parsed.get() == 123
+
+    # Use the created object in another batch
+    with client.batch() as b:
+        r1 = b.call(arr, "add", "first")
+        r2 = b.call(arr, "add", "second")
+        r3 = b.call(arr, "size")
+
+    assert r3.get() == 2
+
+
+def test_batch_error_handling_continue(client):
+    """Test batch error handling with stop_on_error=False (default)."""
+    arr = client.create_object("java.util.ArrayList")
+
+    with client.batch(stop_on_error=False) as b:
+        r1 = b.call(arr, "add", "valid")
+        r2 = b.call_static("java.lang.Integer", "parseInt", "not_a_number")
+        r3 = b.call(arr, "size")
+
+    # First operation succeeds
+    assert r1.get() is True
+
+    # Second operation fails
+    assert r2.is_error
+    with pytest.raises(JavaNumberFormatException):
+        r2.get()
+
+    # Third operation still executes (stop_on_error=False)
+    assert r3.get() == 1
+
+
+def test_batch_error_handling_stop(client):
+    """Test batch error handling with stop_on_error=True."""
+    arr = client.create_object("java.util.ArrayList")
+    arr.add("initial")
+
+    with client.batch(stop_on_error=True) as b:
+        r1 = b.call(arr, "add", "second")
+        r2 = b.call_static("java.lang.Integer", "parseInt", "not_a_number")
+        r3 = b.call(arr, "add", "third")  # Should not execute
+
+    # First operation succeeds
+    assert r1.get() is True
+
+    # Second operation fails
+    assert r2.is_error
+
+    # Third operation was skipped (stop_on_error=True)
+    # Its result should be None
+    assert r3.get() is None
+
+    # Verify only 2 items in array (initial + second, not third)
+    assert arr.size() == 2
+
+
+def test_batch_empty(client):
+    """Test empty batch."""
+    with client.batch() as b:
+        pass  # No operations
+
+    # Should not raise
+
+
+def test_batch_idempotent_execute(client):
+    """Test that execute() is idempotent."""
+    batch = client.batch()
+    r1 = batch.call_static("java.lang.Math", "max", 1, 2)
+
+    results1 = batch.execute()
+    results2 = batch.execute()
+
+    # Same results returned
+    assert results1 is results2
+    assert r1.get() == 2
+
+
+def test_batch_large(client):
+    """Test batch with many operations."""
+    arr = client.create_object("java.util.ArrayList")
+
+    n = 100
+    with client.batch() as b:
+        results = [b.call(arr, "add", i) for i in range(n)]
+
+    # All should succeed
+    for r in results:
+        assert r.get() is True
+
+    # Verify all items added
+    assert arr.size() == n

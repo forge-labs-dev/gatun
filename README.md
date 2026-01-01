@@ -13,6 +13,7 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **JVM View API**: Pythonic package-style navigation (`client.jvm.java.util.ArrayList`)
 - **PySpark Integration**: Use as backend for PySpark via BridgeAdapter
 - **Pythonic JavaObjects**: Iteration, indexing, and len() support on Java collections
+- **Batch API**: Execute multiple commands in a single round-trip (6x speedup for bulk ops)
 
 ## Installation
 
@@ -234,6 +235,37 @@ print(len(arr))  # 3
 
 # Convert to Python list
 items = list(arr)  # ["a", "b", "c"]
+```
+
+### Batch API
+
+Execute multiple commands in a single round-trip to reduce per-call overhead:
+
+```python
+arr = client.create_object("java.util.ArrayList")
+
+# Batch 100 operations in one round-trip (6x faster than individual calls)
+with client.batch() as b:
+    for i in range(100):
+        b.call(arr, "add", i)
+    size_result = b.call(arr, "size")
+
+print(size_result.get())  # 100
+
+# Mix different operation types
+with client.batch() as b:
+    obj = b.create("java.util.HashMap")
+    r1 = b.call_static("java.lang.Integer", "parseInt", "42")
+    r2 = b.call_static("java.lang.Math", "max", 10, 20)
+
+print(r1.get())  # 42
+print(r2.get())  # 20
+
+# Error handling: continue on error (default) or stop on first error
+with client.batch(stop_on_error=True) as b:
+    r1 = b.call(arr, "add", "valid")
+    r2 = b.call_static("java.lang.Integer", "parseInt", "invalid")  # Will error
+    r3 = b.call(arr, "size")  # Skipped when stop_on_error=True
 ```
 
 ### JavaArray for Array Round-Tripping

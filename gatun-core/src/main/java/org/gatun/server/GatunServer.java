@@ -684,6 +684,83 @@ public class GatunServer {
             } catch (Exception e) {
               result = "none";
             }
+          } else if (cmd.action() == Action.Batch) {
+            // Batch command: execute multiple sub-commands in sequence
+            BatchCommand batch = cmd.batch();
+            if (batch == null) {
+              throw new IllegalArgumentException("Batch action requires batch field");
+            }
+
+            int commandCount = batch.commandsLength();
+            boolean stopOnError = batch.stopOnError();
+
+            // Execute each sub-command, collect response offsets
+            int[] subResponseOffsets = new int[commandCount];
+            int errorIndex = -1;
+            int executedCount = 0;
+
+            for (int i = 0; i < commandCount; i++) {
+              Command subCmd = batch.commands(i);
+
+              try {
+                // Execute sub-command and get result
+                Object subResult = executeCommand(subCmd, sessionObjectIds, sessionCallbackIds, sharedMem);
+                subResponseOffsets[i] = packSuccessWithSession(builder, subResult, sessionObjectIds);
+                executedCount++;
+              } catch (Throwable subT) {
+                // Pack error for this sub-command
+                Throwable subCause = subT;
+                if (subT instanceof java.lang.reflect.InvocationTargetException && subT.getCause() != null) {
+                  subCause = subT.getCause();
+                }
+                String subMessage = formatException(subCause);
+                String subErrorType = subCause.getClass().getName();
+                subResponseOffsets[i] = packError(builder, subMessage, subErrorType);
+                executedCount++;
+
+                if (stopOnError) {
+                  errorIndex = i;
+                  break;  // Stop executing remaining commands
+                }
+              }
+            }
+
+            // Build BatchResponse
+            responseOffset = packBatchResponse(builder, subResponseOffsets, executedCount, errorIndex);
+
+            // Skip normal packSuccess - we've already built the response
+            builder.finish(responseOffset);
+            ByteBuffer resBuf = builder.dataBuffer();
+            int resSize = resBuf.remaining();
+
+            // Validate response size fits in zone
+            if (resSize > RESPONSE_ZONE_SIZE) {
+              builder = new FlatBufferBuilder(256);
+              String errorMsg =
+                  String.format(
+                      "Response too large: %d bytes exceeds %d byte limit",
+                      resSize, RESPONSE_ZONE_SIZE);
+              responseOffset = packError(builder, errorMsg, "org.gatun.PayloadTooLargeException");
+              builder.finish(responseOffset);
+              resBuf = builder.dataBuffer();
+              resSize = resBuf.remaining();
+            }
+
+            MemorySegment responseSlice = sharedMem.asSlice(this.responseOffset, resSize);
+            responseSlice.copyFrom(MemorySegment.ofBuffer(resBuf));
+
+            // Signal Python
+            lengthBuf.putInt(resSize);
+            lengthBuf.flip();
+            client.write(lengthBuf);
+            lengthBuf.clear();
+
+            // Clean up and continue to next command
+            if (requestId != 0) {
+              cancelledRequests.get().remove(requestId);
+            }
+            currentRequestId.remove();
+            continue;  // Skip the normal response logic below
           }
 
           // 3. Pack Success
@@ -776,6 +853,267 @@ public class GatunServer {
   public static boolean isCancelled() {
     Long reqId = currentRequestId.get();
     return reqId != null && reqId != 0 && cancelledRequests.get().contains(reqId);
+  }
+
+  /**
+   * Execute a single command and return the result.
+   *
+   * <p>This method is used by batch processing to execute sub-commands. It handles all action types
+   * except Batch (to prevent recursion) and Cancel (which is handled specially).
+   *
+   * @param cmd The command to execute
+   * @param sessionObjectIds Set of object IDs owned by this session (for cleanup)
+   * @param sessionCallbackIds Set of callback IDs owned by this session
+   * @param sharedMem Shared memory segment for Arrow operations
+   * @return The result object (may be null, primitive, String, ObjectRefT, etc.)
+   * @throws Throwable Any exception from command execution
+   */
+  private Object executeCommand(
+      Command cmd,
+      Set<Long> sessionObjectIds,
+      Set<Long> sessionCallbackIds,
+      MemorySegment sharedMem)
+      throws Throwable {
+
+    // Disallow nested batch commands
+    if (cmd.action() == Action.Batch) {
+      throw new IllegalArgumentException("Nested batch commands are not supported");
+    }
+
+    // Disallow Cancel in batch (should be handled at top level)
+    if (cmd.action() == Action.Cancel) {
+      throw new IllegalArgumentException("Cancel action cannot be used in batch");
+    }
+
+    Object result = null;
+
+    if (cmd.action() == Action.CreateObject) {
+      String className = cmd.targetName();
+      if (!isClassAllowed(className)) {
+        throw new SecurityException("Class not allowed: " + className);
+      }
+      Class<?> clazz = getClass(className);
+
+      int argCount = cmd.argsLength();
+      Object instance;
+
+      if (argCount == 0) {
+        instance = getNoArgConstructor(clazz).newInstance();
+      } else {
+        Object[] javaArgs = new Object[argCount];
+        Class<?>[] argTypes = new Class<?>[argCount];
+
+        for (int i = 0; i < argCount; i++) {
+          Argument arg = cmd.args(i);
+          Object[] converted = convertArgument(arg);
+          javaArgs[i] = converted[0];
+          argTypes[i] = (Class<?>) converted[1];
+        }
+
+        var ctorResult = MethodResolver.findConstructorWithArgs(clazz, argTypes, javaArgs);
+        instance = ctorResult.constructor.newInstance(ctorResult.args);
+      }
+
+      long newId = objectIdCounter.getAndIncrement();
+      objectRegistry.put(newId, instance);
+      sessionObjectIds.add(newId);
+      result = new ObjectRefT(newId);
+
+    } else if (cmd.action() == Action.FreeObject) {
+      long targetId = cmd.targetId();
+      if (sessionObjectIds.contains(targetId)) {
+        objectRegistry.remove(targetId);
+        sessionObjectIds.remove(targetId);
+      }
+      result = null;
+
+    } else if (cmd.action() == Action.InvokeMethod) {
+      long targetId = cmd.targetId();
+      Object target = objectRegistry.get(targetId);
+      String methodName = cmd.targetName();
+
+      if (target == null) throw new RuntimeException("Object " + targetId + " not found");
+
+      int argCount = cmd.argsLength();
+
+      if (argCount == 0) {
+        MethodHandle handle = getNoArgMethodHandle(target.getClass(), methodName);
+        if (handle != null) {
+          result = handle.invoke(target);
+        } else {
+          MethodWithArgs mwa =
+              MethodResolver.findMethodWithArgs(
+                  target.getClass(),
+                  methodName,
+                  ReflectionCache.EMPTY_CLASS_ARRAY,
+                  ReflectionCache.EMPTY_OBJECT_ARRAY);
+          result = mwa.cached.invoke(target, mwa.args);
+        }
+      } else {
+        Object[] javaArgs = new Object[argCount];
+        Class<?>[] argTypes = new Class<?>[argCount];
+
+        for (int i = 0; i < argCount; i++) {
+          Argument arg = cmd.args(i);
+          Object[] converted = convertArgument(arg);
+          javaArgs[i] = converted[0];
+          argTypes[i] = (Class<?>) converted[1];
+        }
+
+        MethodWithArgs mwa =
+            MethodResolver.findMethodWithArgs(target.getClass(), methodName, argTypes, javaArgs);
+        result = mwa.cached.invoke(target, mwa.args);
+      }
+
+      // Wrap returned objects in registry
+      if (result != null && !MethodResolver.isAutoConvertible(result)) {
+        long newId = objectIdCounter.getAndIncrement();
+        objectRegistry.put(newId, result);
+        sessionObjectIds.add(newId);
+        result = new ObjectRefT(newId);
+      }
+
+    } else if (cmd.action() == Action.InvokeStaticMethod) {
+      String fullName = cmd.targetName();
+      int lastDot = fullName.lastIndexOf('.');
+      if (lastDot == -1) {
+        throw new IllegalArgumentException("Invalid static method format: " + fullName);
+      }
+      String className = fullName.substring(0, lastDot);
+      String methodName = fullName.substring(lastDot + 1);
+
+      if (!isClassAllowed(className)) {
+        throw new SecurityException("Class not allowed: " + className);
+      }
+
+      Class<?> clazz = getClass(className);
+
+      int argCount = cmd.argsLength();
+      Object[] javaArgs = new Object[argCount];
+      Class<?>[] argTypes = new Class<?>[argCount];
+
+      for (int i = 0; i < argCount; i++) {
+        Argument arg = cmd.args(i);
+        Object[] converted = convertArgument(arg);
+        javaArgs[i] = converted[0];
+        argTypes[i] = (Class<?>) converted[1];
+      }
+
+      MethodWithArgs mwa = MethodResolver.findMethodWithArgs(clazz, methodName, argTypes, javaArgs);
+      result = mwa.cached.invoke(null, mwa.args);
+
+      // Wrap returned objects in registry
+      if (result != null && (cmd.returnObjectRef() || !MethodResolver.isAutoConvertible(result))) {
+        long newId = objectIdCounter.getAndIncrement();
+        objectRegistry.put(newId, result);
+        sessionObjectIds.add(newId);
+        result = new ObjectRefT(newId);
+      }
+
+    } else if (cmd.action() == Action.GetField) {
+      long targetId = cmd.targetId();
+      Object target = objectRegistry.get(targetId);
+      String fieldName = cmd.targetName();
+
+      if (target == null) throw new RuntimeException("Object " + targetId + " not found");
+
+      java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+      field.setAccessible(true);
+      result = field.get(target);
+
+      if (result != null && !MethodResolver.isAutoConvertible(result)) {
+        long newId = objectIdCounter.getAndIncrement();
+        objectRegistry.put(newId, result);
+        sessionObjectIds.add(newId);
+        result = new ObjectRefT(newId);
+      }
+
+    } else if (cmd.action() == Action.SetField) {
+      long targetId = cmd.targetId();
+      Object target = objectRegistry.get(targetId);
+      String fieldName = cmd.targetName();
+
+      if (target == null) throw new RuntimeException("Object " + targetId + " not found");
+
+      if (cmd.argsLength() != 1)
+        throw new IllegalArgumentException("SetField requires exactly one argument");
+
+      Argument arg = cmd.args(0);
+      Object[] converted = convertArgument(arg);
+      Object value = converted[0];
+
+      java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+      field.setAccessible(true);
+      field.set(target, value);
+      result = null;
+
+    } else if (cmd.action() == Action.IsInstanceOf) {
+      long targetId = cmd.targetId();
+      Object target = objectRegistry.get(targetId);
+      String className = cmd.targetName();
+
+      if (target == null) throw new RuntimeException("Object " + targetId + " not found");
+
+      Class<?> clazz = getClass(className);
+      result = clazz.isInstance(target);
+
+    } else if (cmd.action() == Action.GetStaticField) {
+      String fullName = cmd.targetName();
+      int lastDot = fullName.lastIndexOf('.');
+      if (lastDot == -1) {
+        throw new IllegalArgumentException("Invalid static field format: " + fullName);
+      }
+      String className = fullName.substring(0, lastDot);
+      String fieldName = fullName.substring(lastDot + 1);
+
+      if (!isClassAllowed(className)) {
+        throw new SecurityException("Class not allowed: " + className);
+      }
+
+      Class<?> clazz = getClass(className);
+      java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+      result = field.get(null);
+
+      if (result != null && !MethodResolver.isAutoConvertible(result)) {
+        long newId = objectIdCounter.getAndIncrement();
+        objectRegistry.put(newId, result);
+        sessionObjectIds.add(newId);
+        result = new ObjectRefT(newId);
+      }
+
+    } else if (cmd.action() == Action.SetStaticField) {
+      String fullName = cmd.targetName();
+      int lastDot = fullName.lastIndexOf('.');
+      if (lastDot == -1) {
+        throw new IllegalArgumentException("Invalid static field format: " + fullName);
+      }
+      String className = fullName.substring(0, lastDot);
+      String fieldName = fullName.substring(lastDot + 1);
+
+      if (!isClassAllowed(className)) {
+        throw new SecurityException("Class not allowed: " + className);
+      }
+
+      if (cmd.argsLength() != 1) {
+        throw new IllegalArgumentException("SetStaticField requires exactly one argument");
+      }
+
+      Argument arg = cmd.args(0);
+      Object[] converted = convertArgument(arg);
+      Object value = converted[0];
+
+      Class<?> clazz = getClass(className);
+      java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+      field.set(null, value);
+      result = null;
+
+    } else {
+      // Actions not supported in batch: Arrow operations, callbacks, etc.
+      throw new UnsupportedOperationException(
+          "Action " + cmd.action() + " is not supported in batch mode");
+    }
+
+    return result;
   }
 
   // --- HELPER: Convert FlatBuffer Argument to Java Object ---
@@ -1375,6 +1713,35 @@ public class GatunServer {
     Response.addIsError(builder, true);
     Response.addErrorMsg(builder, errOff);
     Response.addErrorType(builder, typeOff);
+    return Response.endResponse(builder);
+  }
+
+  /**
+   * Pack a batch of responses into a BatchResponse.
+   *
+   * @param builder The FlatBuffer builder
+   * @param responseOffsets Array of Response offsets (already built)
+   * @param count Number of responses that were actually built
+   * @param errorIndex Index of first error (-1 if no errors)
+   */
+  private int packBatchResponse(
+      FlatBufferBuilder builder, int[] responseOffsets, int count, int errorIndex) {
+    // Create vector of response offsets (only include executed ones)
+    int[] toInclude = count == responseOffsets.length
+        ? responseOffsets
+        : java.util.Arrays.copyOf(responseOffsets, count);
+    int responsesVec = BatchResponse.createResponsesVector(builder, toInclude);
+
+    // Build BatchResponse
+    BatchResponse.startBatchResponse(builder);
+    BatchResponse.addResponses(builder, responsesVec);
+    BatchResponse.addErrorIndex(builder, errorIndex);
+    int batchRespOffset = BatchResponse.endBatchResponse(builder);
+
+    // Wrap in outer Response
+    Response.startResponse(builder);
+    Response.addIsError(builder, false);
+    Response.addBatch(builder, batchRespOffset);
     return Response.endResponse(builder);
   }
 

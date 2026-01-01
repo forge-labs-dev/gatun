@@ -244,6 +244,37 @@ client.is_instance_of(arr, "java.util.Collection") # True
 client.is_instance_of(arr, "java.util.Map")        # False
 ```
 
+### Batch API
+Execute multiple commands in a single round-trip (6x speedup for bulk operations):
+```python
+arr = client.create_object("java.util.ArrayList")
+
+# Batch operations - single round-trip for all commands
+with client.batch() as b:
+    for i in range(100):
+        b.call(arr, "add", i)
+    size_result = b.call(arr, "size")
+
+print(size_result.get())  # 100
+
+# Available batch methods:
+# b.create(class_name, *args)           - Create object
+# b.call(obj, method_name, *args)       - Instance method
+# b.call_static(class_name, method, *args) - Static method
+# b.get_field(obj, field_name)          - Get field
+# b.set_field(obj, field_name, value)   - Set field
+
+# Error handling
+with client.batch(stop_on_error=True) as b:  # Stop on first error
+    r1 = b.call(arr, "add", "valid")
+    r2 = b.call_static("java.lang.Integer", "parseInt", "invalid")  # Errors
+    r3 = b.call(arr, "size")  # Skipped
+
+# Results via BatchResult.get() - raises exception if command failed
+print(r1.get())      # True
+print(r2.is_error)   # True
+```
+
 ### Low-Level API
 For direct control:
 ```python

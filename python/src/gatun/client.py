@@ -37,6 +37,8 @@ from gatun.generated.org.gatun.protocol import (
     ArrowBatchDescriptor,
     BufferDescriptor,
     FieldNode,
+    BatchCommand,
+    BatchResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -2431,6 +2433,43 @@ class GatunClient:
         result = self._send_raw(builder.Output())
         return result is True
 
+    def batch(self, stop_on_error: bool = False) -> "BatchContext":
+        """Create a batch context for executing multiple commands in one round-trip.
+
+        Batching amortizes the per-call overhead (~100-150μs) across multiple
+        operations. Commands are queued locally and sent together when the
+        context exits or execute() is called.
+
+        Args:
+            stop_on_error: If True, stop executing on first error.
+                          If False (default), continue and collect all results/errors.
+
+        Returns:
+            BatchContext that can be used as a context manager.
+
+        Example:
+            # Context manager (auto-execute on exit):
+            with client.batch() as b:
+                r1 = b.call(arr, "add", 1)
+                r2 = b.call(arr, "add", 2)
+                r3 = b.call(arr, "size")
+            print(r3.get())  # 2
+
+            # Manual execute:
+            batch = client.batch()
+            r1 = batch.call(arr, "add", 1)
+            r2 = batch.call_static("java.lang.Math", "max", 10, 20)
+            batch.execute()
+            print(r2.get())  # 20
+
+            # Stop on error:
+            with client.batch(stop_on_error=True) as b:
+                r1 = b.call(arr, "add", 1)
+                r2 = b.call(invalid_obj, "bad_method")  # Will error
+                r3 = b.call(arr, "size")  # Skipped if stop_on_error=True
+        """
+        return BatchContext(self, stop_on_error)
+
     def close(self):
         try:
             if self.shm:
@@ -2452,3 +2491,329 @@ class GatunClient:
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
         self.close()
         return False
+
+
+class BatchResult:
+    """Lazy result placeholder that resolves after batch.execute().
+
+    BatchResult objects are returned when queueing commands in a BatchContext.
+    The actual result is not available until execute() is called.
+    """
+
+    __slots__ = ("_batch", "_index")
+
+    def __init__(self, batch: "BatchContext", index: int):
+        self._batch = batch
+        self._index = index
+
+    def get(self):
+        """Get the result value.
+
+        Returns:
+            The result of the command (same as calling the method directly).
+
+        Raises:
+            RuntimeError: If execute() has not been called yet.
+            JavaException: If the command raised a Java exception.
+        """
+        if not self._batch._executed:
+            raise RuntimeError("Must call batch.execute() before getting results")
+        result = self._batch._results[self._index]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    @property
+    def is_error(self) -> bool:
+        """Check if this result is an error.
+
+        Raises:
+            RuntimeError: If execute() has not been called yet.
+        """
+        if not self._batch._executed:
+            raise RuntimeError("Must call batch.execute() before checking errors")
+        return isinstance(self._batch._results[self._index], Exception)
+
+
+class BatchContext:
+    """Context manager for batching multiple commands into a single round-trip.
+
+    Commands queued in a batch are sent together when execute() is called
+    (or automatically when exiting a context manager). This reduces per-call
+    overhead from ~100-150μs to ~10μs per operation.
+
+    Attributes:
+        stop_on_error: If True, Java stops executing after first error.
+    """
+
+    def __init__(self, client: GatunClient, stop_on_error: bool = False):
+        self._client = client
+        self._stop_on_error = stop_on_error
+        self._command_data: list[tuple[int, int, str | None, tuple]] = []
+        self._results: list = []
+        self._executed = False
+
+    def __enter__(self) -> "BatchContext":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None and not self._executed:
+            self.execute()
+        return False
+
+    def create(self, class_name: str, *args) -> BatchResult:
+        """Queue object creation.
+
+        Args:
+            class_name: Fully qualified Java class name.
+            *args: Constructor arguments.
+
+        Returns:
+            BatchResult that will contain the JavaObject after execute().
+        """
+        idx = len(self._command_data)
+        self._command_data.append(
+            (Act.Action.CreateObject, 0, class_name, args)
+        )
+        return BatchResult(self, idx)
+
+    def call(self, obj: "JavaObject", method_name: str, *args) -> BatchResult:
+        """Queue an instance method call.
+
+        Args:
+            obj: JavaObject to call method on.
+            method_name: Name of the method to call.
+            *args: Method arguments.
+
+        Returns:
+            BatchResult that will contain the return value after execute().
+        """
+        idx = len(self._command_data)
+        self._command_data.append(
+            (Act.Action.InvokeMethod, obj.object_id, method_name, args)
+        )
+        return BatchResult(self, idx)
+
+    def call_static(
+        self, class_name: str, method_name: str, *args
+    ) -> BatchResult:
+        """Queue a static method call.
+
+        Args:
+            class_name: Fully qualified Java class name.
+            method_name: Name of the static method to call.
+            *args: Method arguments.
+
+        Returns:
+            BatchResult that will contain the return value after execute().
+        """
+        idx = len(self._command_data)
+        full_name = f"{class_name}.{method_name}"
+        self._command_data.append(
+            (Act.Action.InvokeStaticMethod, 0, full_name, args)
+        )
+        return BatchResult(self, idx)
+
+    def get_field(self, obj: "JavaObject", field_name: str) -> BatchResult:
+        """Queue a field get operation.
+
+        Args:
+            obj: JavaObject to get field from.
+            field_name: Name of the field.
+
+        Returns:
+            BatchResult that will contain the field value after execute().
+        """
+        idx = len(self._command_data)
+        self._command_data.append(
+            (Act.Action.GetField, obj.object_id, field_name, ())
+        )
+        return BatchResult(self, idx)
+
+    def set_field(self, obj: "JavaObject", field_name: str, value) -> BatchResult:
+        """Queue a field set operation.
+
+        Args:
+            obj: JavaObject to set field on.
+            field_name: Name of the field.
+            value: Value to set.
+
+        Returns:
+            BatchResult (value will be None after execute()).
+        """
+        idx = len(self._command_data)
+        self._command_data.append(
+            (Act.Action.SetField, obj.object_id, field_name, (value,))
+        )
+        return BatchResult(self, idx)
+
+    def execute(self) -> list:
+        """Execute all queued commands in a single round-trip.
+
+        Returns:
+            List of results in the same order as commands were queued.
+            Errors are stored as Exception objects in the list.
+
+        Raises:
+            RuntimeError: If execute() was already called.
+        """
+        if self._executed:
+            return self._results
+        self._executed = True
+
+        if not self._command_data:
+            return []
+
+        # Build the batch command
+        builder = self._client._get_builder(large=True)
+
+        # Build all sub-commands first (must be done before BatchCommand)
+        sub_cmd_offsets = []
+        for action, target_id, target_name, args in self._command_data:
+            # Build argument tables
+            arg_offsets = []
+            for arg in args:
+                arg_offsets.append(self._client._build_argument(builder, arg))
+
+            # Build arguments vector
+            args_vec = None
+            if arg_offsets:
+                Cmd.CommandStartArgsVector(builder, len(arg_offsets))
+                for offset in reversed(arg_offsets):
+                    builder.PrependUOffsetTRelative(offset)
+                args_vec = builder.EndVector()
+
+            # Build target name string
+            name_off = None
+            if target_name:
+                name_off = self._client._create_string(builder, target_name)
+
+            # Build sub-command
+            Cmd.CommandStart(builder)
+            Cmd.CommandAddAction(builder, action)
+            if target_id:
+                Cmd.CommandAddTargetId(builder, target_id)
+            if name_off:
+                Cmd.CommandAddTargetName(builder, name_off)
+            if args_vec:
+                Cmd.CommandAddArgs(builder, args_vec)
+            sub_cmd_offsets.append(Cmd.CommandEnd(builder))
+
+        # Build commands vector for BatchCommand
+        BatchCommand.StartCommandsVector(builder, len(sub_cmd_offsets))
+        for offset in reversed(sub_cmd_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        commands_vec = builder.EndVector()
+
+        # Build BatchCommand
+        BatchCommand.Start(builder)
+        BatchCommand.AddCommands(builder, commands_vec)
+        BatchCommand.AddStopOnError(builder, self._stop_on_error)
+        batch_cmd_off = BatchCommand.End(builder)
+
+        # Build outer Command with Action.Batch
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.Batch)
+        Cmd.CommandAddBatch(builder, batch_cmd_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        # Send and get response
+        # We need to handle the batch response specially
+        data = builder.Output()
+
+        # Validate command size
+        max_command_size = self._client.payload_offset
+        if len(data) > max_command_size:
+            raise PayloadTooLargeError(len(data), max_command_size, "Command")
+
+        # Drain pending responses
+        self._client._drain_pending_responses()
+
+        # Write to shared memory
+        self._client.shm.seek(self._client.command_offset)
+        self._client.shm.write(data)
+
+        # Signal Java
+        self._client.sock.sendall(struct.pack("<I", len(data)))
+
+        # Read response
+        sz_data = _recv_exactly(self._client.sock, 4)
+        sz = struct.unpack("<I", sz_data)[0]
+        self._client.shm.seek(self._client.response_offset)
+        resp_buf = self._client.shm.read(sz)
+
+        # Parse response
+        resp = Response.Response.GetRootAsResponse(resp_buf, 0)
+
+        if resp.IsError():
+            # Top-level error (shouldn't happen for batch, but handle it)
+            error_msg = resp.ErrorMsg().decode("utf-8")
+            error_type_bytes = resp.ErrorType()
+            error_type = (
+                error_type_bytes.decode("utf-8")
+                if error_type_bytes
+                else "java.lang.RuntimeException"
+            )
+            self._client._raise_java_exception(error_type, error_msg)
+
+        # Unpack BatchResponse
+        batch_resp = resp.Batch()
+        if batch_resp is None:
+            raise RuntimeError("Expected BatchResponse but got None")
+
+        error_index = batch_resp.ErrorIndex()
+        response_count = batch_resp.ResponsesLength()
+
+        # Unpack each sub-response
+        for i in range(response_count):
+            sub_resp = batch_resp.Responses(i)
+            if sub_resp.IsError():
+                error_msg = sub_resp.ErrorMsg().decode("utf-8")
+                error_type_bytes = sub_resp.ErrorType()
+                error_type = (
+                    error_type_bytes.decode("utf-8")
+                    if error_type_bytes
+                    else "java.lang.RuntimeException"
+                )
+                # Store exception object instead of raising
+                exc = self._make_exception(error_type, error_msg)
+                self._results.append(exc)
+            else:
+                value = self._client._unpack_value(
+                    sub_resp.ReturnValType(), sub_resp.ReturnVal()
+                )
+                self._results.append(value)
+
+        # Fill remaining slots with None if stopped early
+        while len(self._results) < len(self._command_data):
+            self._results.append(None)
+
+        return self._results
+
+    def _make_exception(self, error_type: str, error_msg: str) -> Exception:
+        """Create an exception object without raising it."""
+        import re
+
+        # Handle special exception types
+        if error_type == "org.gatun.PayloadTooLargeException":
+            match = re.search(r"(\d+) bytes exceeds (\d+) byte", error_msg)
+            if match:
+                return PayloadTooLargeError(
+                    int(match.group(1)), int(match.group(2)), "Response"
+                )
+            return PayloadTooLargeError(0, 0, "Response")
+
+        if error_type == "java.lang.InterruptedException":
+            match = re.search(r"Request (\d+) was cancelled", error_msg)
+            request_id = int(match.group(1)) if match else 0
+            return CancelledException(request_id)
+
+        # Get exception class
+        exc_class = _JAVA_EXCEPTION_MAP.get(error_type, JavaException)
+
+        # Extract message
+        lines = error_msg.split("\n")
+        message = lines[0] if lines else error_msg
+
+        return exc_class(error_type, message, error_msg)

@@ -24,7 +24,8 @@ enum Action : byte {
   GetArrowData = 16,       // Request Arrow data from Java (returns via ArrowBatchDescriptor)
   GetStaticField = 17,     // Get static field value: target_name = "pkg.Class.FIELD"
   SetStaticField = 18,     // Set static field value: target_name = "pkg.Class.FIELD", args[0] = value
-  Reflect = 19             // Reflection query: check if name is class, get member type
+  Reflect = 19,            // Reflection query: check if name is class, get member type
+  Batch = 20               // Execute multiple commands in a single round-trip
 }
 
 // Element types for arrays
@@ -152,6 +153,12 @@ table ArrowBatchDescriptor {
   arena_epoch: uint64;
 }
 
+// --- Batch Command Support ---
+// For executing multiple commands in a single round-trip
+
+// Forward declaration needed for BatchCommand
+// Note: FlatBuffers allows forward references within the same file
+
 // Request from Python -> Java
 table Command {
   action: Action;
@@ -161,6 +168,13 @@ table Command {
   request_id: long;  // Optional: unique ID for this request, used for cancellation
   arrow_batch: ArrowBatchDescriptor;  // For SendArrowBuffers action
   return_object_ref: bool;  // If true, return result as ObjectRef instead of auto-converting
+  batch: BatchCommand;  // For Action.Batch: contains sub-commands to execute
+}
+
+// Batch of commands to execute sequentially
+table BatchCommand {
+  commands: [Command];      // Commands to execute in order
+  stop_on_error: bool;      // If true, stop on first error; if false, continue all
 }
 
 // Response from Java -> Python
@@ -188,6 +202,15 @@ table Response {
 
   // For Arrow data responses (Java -> Python zero-copy transfer)
   arrow_batch: ArrowBatchDescriptor;
+
+  // For batch responses (Action.Batch)
+  batch: BatchResponse;  // Contains results for each sub-command
+}
+
+// Batch of responses (one per command in BatchCommand)
+table BatchResponse {
+  responses: [Response];    // Results in same order as commands
+  error_index: int = -1;    // Index of first error (-1 if no errors)
 }
 
 // Callback result from Python -> Java (sent as a follow-up Command)

@@ -22,6 +22,8 @@ from gatun.client import (
     CancelledException,
     StaleArenaError,
     ArrowTableView,
+    BatchContext,
+    BatchResult,
 )
 from gatun.async_client import (
     AsyncGatunClient,
@@ -42,6 +44,8 @@ __all__ = [
     "JVMView",
     "JavaClass",
     "java_import",
+    "BatchContext",
+    "BatchResult",
     # Async client
     "AsyncGatunClient",
     "AsyncJavaObject",
