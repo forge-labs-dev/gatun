@@ -1063,10 +1063,11 @@ class GatunClient:
         payload_size = self.response_offset - self.payload_offset
         return PayloadArena.from_mmap(self.shm, self.payload_offset, payload_size)
 
-    def _send_raw(self, data: bytes, wait_for_response=True):
+    def _send_raw(self, data: bytes, wait_for_response=True, expects_response=True):
         """
         Writes command to SHM and signals Java.
         If wait_for_response is False, returns immediately (Fire-and-Forget).
+        If expects_response is False, Java won't send a response (used for CallbackResponse).
         """
         # 1. Validate command size
         max_command_size = self.payload_offset  # Command zone ends where payload starts
@@ -1094,9 +1095,11 @@ class GatunClient:
         # 5. Handle Response
         if wait_for_response:
             return self._read_response()
-        else:
+        elif expects_response:
             # Track that we have a pending response to drain later
+            # (fire-and-forget commands like FreeObject still get responses)
             self._pending_responses += 1
+        # If not wait_for_response and not expects_response: truly one-way (CallbackResponse)
 
     def _drain_pending_responses(self):
         """Drain any pending responses from fire-and-forget commands.
@@ -1402,7 +1405,8 @@ class GatunClient:
         builder.Finish(cmd_offset)
 
         # Send it (don't wait for response - Java is waiting for this)
-        self._send_raw(builder.Output(), wait_for_response=False)
+        # Java doesn't send a response for CallbackResponse, so expects_response=False
+        self._send_raw(builder.Output(), wait_for_response=False, expects_response=False)
 
     def create_object(self, class_name, *args):
         builder = self._get_builder(large=True)
