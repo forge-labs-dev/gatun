@@ -107,15 +107,28 @@ public class GatunServer {
   private final AtomicLong sessionCounter = new AtomicLong(0);
 
   // --- CALLBACK REGISTRY ---
-  // Maps callback ID -> CallbackInfo (interface name + proxy object)
+  // Maps callback ID -> CallbackInfo (interface name + proxy object + session context)
   // Note: callback IDs are allocated from objectIdCounter to ensure uniqueness
   private final Map<Long, CallbackInfo> callbackRegistry = new ConcurrentHashMap<>();
 
-  // Per-session: the socket channel for sending callback requests
-  private static final ThreadLocal<SocketChannel> sessionChannel = new ThreadLocal<>();
+  /**
+   * Holds session context for callback invocations. This is captured by the callback proxy so that
+   * callbacks can be invoked from any thread, not just the handleClient thread.
+   */
+  private static class SessionContext {
+    final SocketChannel channel;
+    final MemorySegment sharedMem;
+    final Object callbackLock; // Lock for serializing callback round-trips
 
-  // Per-session: shared memory segment
-  private static final ThreadLocal<MemorySegment> sessionSharedMem = new ThreadLocal<>();
+    SessionContext(SocketChannel channel, MemorySegment sharedMem) {
+      this.channel = channel;
+      this.sharedMem = sharedMem;
+      this.callbackLock = new Object();
+    }
+  }
+
+  // Per-session context stored in ThreadLocal for the handleClient thread
+  private static final ThreadLocal<SessionContext> sessionContext = new ThreadLocal<>();
 
   // Per-session: current request ID for cancellation support
   private static final ThreadLocal<Long> currentRequestId = new ThreadLocal<>();
@@ -164,11 +177,13 @@ public class GatunServer {
     final long id;
     final String interfaceName;
     final Object proxyInstance;
+    final SessionContext sessionContext; // Captured for cross-thread callback invocations
 
-    CallbackInfo(long id, String interfaceName, Object proxyInstance) {
+    CallbackInfo(long id, String interfaceName, Object proxyInstance, SessionContext ctx) {
       this.id = id;
       this.interfaceName = interfaceName;
       this.proxyInstance = proxyInstance;
+      this.sessionContext = ctx;
     }
   }
 
@@ -233,9 +248,9 @@ public class GatunServer {
 
       LOG.fine("Session " + sessionId + " SHM mapped at: " + sessionShmPath);
 
-      // Set up thread-local session context for callbacks
-      sessionChannel.set(client);
-      sessionSharedMem.set(sharedMem);
+      // Set up session context for callbacks (captured by callback proxies)
+      SessionContext ctx = new SessionContext(client, sharedMem);
+      sessionContext.set(ctx);
 
       // --- HANDSHAKE: Send Protocol Version, Memory Size, and SHM Path to Client ---
       // Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
@@ -543,10 +558,11 @@ public class GatunServer {
             long callbackId = objectIdCounter.getAndIncrement();
 
             // Create a dynamic proxy that will invoke Python when called
-            Object proxy = createCallbackProxy(callbackId, interfaceName);
+            // Use session context (captured at start of handleClient) for cross-thread callbacks
+            Object proxy = createCallbackProxy(callbackId, interfaceName, ctx);
 
-            // Store in callback registry
-            CallbackInfo info = new CallbackInfo(callbackId, interfaceName, proxy);
+            // Store in callback registry with session context
+            CallbackInfo info = new CallbackInfo(callbackId, interfaceName, proxy, ctx);
             callbackRegistry.put(callbackId, info);
             sessionCallbackIds.add(callbackId);
 
@@ -1569,8 +1585,11 @@ public class GatunServer {
   /**
    * Creates a dynamic proxy that implements the specified interface. When any method on the proxy
    * is called, it sends a callback request to Python and waits for the response.
+   *
+   * <p>The SessionContext is captured at proxy creation time so callbacks can be invoked from any
+   * thread (e.g., Spark executor threads), not just the handleClient thread.
    */
-  private Object createCallbackProxy(long callbackId, String interfaceName)
+  private Object createCallbackProxy(long callbackId, String interfaceName, SessionContext ctx)
       throws ClassNotFoundException {
     Class<?> interfaceClass = getClass(interfaceName);
     if (!interfaceClass.isInterface()) {
@@ -1592,7 +1611,8 @@ public class GatunServer {
           }
 
           // Send callback request to Python and wait for response
-          return invokeCallback(callbackId, method.getName(), args == null ? new Object[0] : args);
+          // Use captured session context so this works from any thread
+          return invokeCallback(callbackId, method.getName(), args == null ? new Object[0] : args, ctx);
         };
 
     return Proxy.newProxyInstance(
@@ -1602,106 +1622,114 @@ public class GatunServer {
   /**
    * Sends a callback invocation request to Python and blocks until Python responds. This is called
    * from the dynamic proxy when Java code invokes a method on the callback object.
+   *
+   * <p>The SessionContext is passed explicitly (captured at proxy creation time) so this method can
+   * be called from any thread, not just the handleClient thread. A lock ensures thread-safe
+   * round-trip communication when multiple threads invoke callbacks concurrently.
    */
-  private Object invokeCallback(long callbackId, String methodName, Object[] args)
+  private Object invokeCallback(long callbackId, String methodName, Object[] args, SessionContext ctx)
       throws Exception {
-    SocketChannel channel = sessionChannel.get();
-    MemorySegment sharedMem = sessionSharedMem.get();
-
-    if (channel == null || sharedMem == null) {
-      throw new IllegalStateException("Callback invoked outside of session context");
+    if (ctx == null || ctx.channel == null || ctx.sharedMem == null) {
+      throw new IllegalStateException("Callback invoked with invalid session context");
     }
 
-    // Build the callback request response
-    FlatBufferBuilder builder = new FlatBufferBuilder(1024);
+    SocketChannel channel = ctx.channel;
+    MemorySegment sharedMem = ctx.sharedMem;
 
-    // Build callback arguments
-    int[] argOffsets = new int[args.length];
-    for (int i = 0; i < args.length; i++) {
-      int[] packed = packValue(builder, args[i], null);
-      Argument.startArgument(builder);
-      Argument.addValType(builder, (byte) packed[0]);
-      Argument.addVal(builder, packed[1]);
-      argOffsets[i] = Argument.endArgument(builder);
-    }
+    // Lock to serialize callback round-trips from different threads
+    // This prevents interleaved writes/reads on the same socket/SHM
+    synchronized (ctx.callbackLock) {
+      // Build the callback request response
+      FlatBufferBuilder builder = new FlatBufferBuilder(1024);
 
-    int argsVec = Response.createCallbackArgsVector(builder, argOffsets);
-    int methodOff = builder.createString(methodName);
-
-    Response.startResponse(builder);
-    Response.addIsError(builder, false);
-    Response.addIsCallback(builder, true);
-    Response.addCallbackId(builder, callbackId);
-    Response.addCallbackMethod(builder, methodOff);
-    Response.addCallbackArgs(builder, argsVec);
-    int responseOffset = Response.endResponse(builder);
-
-    builder.finish(responseOffset);
-    ByteBuffer resBuf = builder.dataBuffer();
-    int resSize = resBuf.remaining();
-
-    // Write to response zone
-    MemorySegment responseSlice = sharedMem.asSlice(this.responseOffset, resSize);
-    responseSlice.copyFrom(MemorySegment.ofBuffer(resBuf));
-
-    // Signal Python with the response size
-    ByteBuffer lengthBuf = ByteBuffer.allocate(4);
-    lengthBuf.order(ByteOrder.LITTLE_ENDIAN);
-    lengthBuf.putInt(resSize);
-    lengthBuf.flip();
-    while (lengthBuf.hasRemaining()) {
-      channel.write(lengthBuf);
-    }
-
-    // Now we need to read the callback response directly from Python
-    // Python sends a CallbackResponse command back to us
-    lengthBuf.clear();
-    if (!readFully(channel, lengthBuf)) {
-      throw new IOException("Connection closed while waiting for callback response");
-    }
-    lengthBuf.flip();
-    int commandSize = lengthBuf.getInt();
-
-    // Read the command from command zone
-    MemorySegment cmdSlice = sharedMem.asSlice(COMMAND_OFFSET, commandSize);
-    ByteBuffer cmdBuf = cmdSlice.asByteBuffer();
-    cmdBuf.order(ByteOrder.LITTLE_ENDIAN);
-
-    Command cmd = Command.getRootAsCommand(cmdBuf);
-    if (cmd.action() != Action.CallbackResponse) {
-      throw new RuntimeException("Expected CallbackResponse but got action: " + cmd.action());
-    }
-
-    // Extract the result from the callback response
-    Object returnValue = null;
-    boolean isError = false;
-    String errorMsg = null;
-
-    if (cmd.argsLength() > 0) {
-      Argument arg = cmd.args(0);
-      Object[] converted = convertArgument(arg);
-      returnValue = converted[0];
-    }
-
-    // Check if there's an error flag (second arg if present)
-    if (cmd.argsLength() > 1) {
-      Argument errorArg = cmd.args(1);
-      Object[] converted = convertArgument(errorArg);
-      if (converted[0] instanceof Boolean) {
-        isError = (Boolean) converted[0];
+      // Build callback arguments
+      int[] argOffsets = new int[args.length];
+      for (int i = 0; i < args.length; i++) {
+        int[] packed = packValue(builder, args[i], null);
+        Argument.startArgument(builder);
+        Argument.addValType(builder, (byte) packed[0]);
+        Argument.addVal(builder, packed[1]);
+        argOffsets[i] = Argument.endArgument(builder);
       }
-    }
 
-    // Error message is in target_name for error responses
-    if (isError) {
-      errorMsg = cmd.targetName();
-    }
+      int argsVec = Response.createCallbackArgsVector(builder, argOffsets);
+      int methodOff = builder.createString(methodName);
 
-    if (isError) {
-      throw new RuntimeException("Callback error: " + errorMsg);
-    }
+      Response.startResponse(builder);
+      Response.addIsError(builder, false);
+      Response.addIsCallback(builder, true);
+      Response.addCallbackId(builder, callbackId);
+      Response.addCallbackMethod(builder, methodOff);
+      Response.addCallbackArgs(builder, argsVec);
+      int responseOffset = Response.endResponse(builder);
 
-    return returnValue;
+      builder.finish(responseOffset);
+      ByteBuffer resBuf = builder.dataBuffer();
+      int resSize = resBuf.remaining();
+
+      // Write to response zone
+      MemorySegment responseSlice = sharedMem.asSlice(this.responseOffset, resSize);
+      responseSlice.copyFrom(MemorySegment.ofBuffer(resBuf));
+
+      // Signal Python with the response size
+      ByteBuffer lengthBuf = ByteBuffer.allocate(4);
+      lengthBuf.order(ByteOrder.LITTLE_ENDIAN);
+      lengthBuf.putInt(resSize);
+      lengthBuf.flip();
+      while (lengthBuf.hasRemaining()) {
+        channel.write(lengthBuf);
+      }
+
+      // Now we need to read the callback response directly from Python
+      // Python sends a CallbackResponse command back to us
+      lengthBuf.clear();
+      if (!readFully(channel, lengthBuf)) {
+        throw new IOException("Connection closed while waiting for callback response");
+      }
+      lengthBuf.flip();
+      int commandSize = lengthBuf.getInt();
+
+      // Read the command from command zone
+      MemorySegment cmdSlice = sharedMem.asSlice(COMMAND_OFFSET, commandSize);
+      ByteBuffer cmdBuf = cmdSlice.asByteBuffer();
+      cmdBuf.order(ByteOrder.LITTLE_ENDIAN);
+
+      Command cmd = Command.getRootAsCommand(cmdBuf);
+      if (cmd.action() != Action.CallbackResponse) {
+        throw new RuntimeException("Expected CallbackResponse but got action: " + cmd.action());
+      }
+
+      // Extract the result from the callback response
+      Object returnValue = null;
+      boolean isError = false;
+      String errorMsg = null;
+
+      if (cmd.argsLength() > 0) {
+        Argument arg = cmd.args(0);
+        Object[] converted = convertArgument(arg);
+        returnValue = converted[0];
+      }
+
+      // Check if there's an error flag (second arg if present)
+      if (cmd.argsLength() > 1) {
+        Argument errorArg = cmd.args(1);
+        Object[] converted = convertArgument(errorArg);
+        if (converted[0] instanceof Boolean) {
+          isError = (Boolean) converted[0];
+        }
+      }
+
+      // Error message is in target_name for error responses
+      if (isError) {
+        errorMsg = cmd.targetName();
+      }
+
+      if (isError) {
+        throw new RuntimeException("Callback error: " + errorMsg);
+      }
+
+      return returnValue;
+    } // end synchronized
   }
 
   // --- HELPER: Pack Result into FlatBuffer ---
