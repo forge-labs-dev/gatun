@@ -377,7 +377,8 @@ public final class ReflectionCache {
           h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
         }
       } catch (IllegalAccessException e) {
-        // Fall back to null - will use Method.invoke
+        // Fall back to Method.invoke - make accessible for private inner classes (e.g. ArrayList$Itr)
+        method.setAccessible(true);
       }
       this.handle = h;
       this.isStatic = java.lang.reflect.Modifier.isStatic(method.getModifiers());

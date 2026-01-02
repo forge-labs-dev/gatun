@@ -17,6 +17,7 @@ backend-path = ["."]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.100.0",
     "py4j>=0.10.9.9",
     "pytest>=9.0.2",
     "pytest-asyncio>=0.25.0",
