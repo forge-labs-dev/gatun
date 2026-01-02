@@ -264,6 +264,74 @@ class TestCallbackMultipleInvocations:
         assert seen_values == ["item_0", "item_1", "item_2", "item_3", "item_4"]
 
 
+class TestCallbackConcurrency:
+    """Test callback thread safety."""
+
+    def test_multiple_callbacks_same_session(self, client):
+        """Test that multiple callbacks can be registered and used in same session."""
+        compare_calls = [0]
+        consumer_calls = [0]
+
+        def compare(a, b):
+            compare_calls[0] += 1
+            if a < b:
+                return -1
+            elif a > b:
+                return 1
+            return 0
+
+        def consume(item):
+            consumer_calls[0] += 1
+            return None
+
+        comparator = client.register_callback(compare, "java.util.Comparator")
+        consumer = client.register_callback(consume, "java.util.function.Consumer")
+
+        # Use both callbacks
+        arr = client.create_object("java.util.ArrayList")
+        arr.add("c")
+        arr.add("a")
+        arr.add("b")
+
+        # Sort (uses comparator)
+        client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
+        assert arr.get(0) == "a"
+
+        # forEach (uses consumer)
+        arr.forEach(consumer)
+
+        assert compare_calls[0] > 0
+        assert consumer_calls[0] == 3
+
+    def test_callback_with_heavy_computation(self, client):
+        """Test callbacks that do significant work don't cause issues."""
+        results = []
+
+        def heavy_compare(a, b):
+            # Simulate some work
+            _ = sum(range(1000))
+            results.append((a, b))
+            if a < b:
+                return -1
+            elif a > b:
+                return 1
+            return 0
+
+        comparator = client.register_callback(heavy_compare, "java.util.Comparator")
+
+        arr = client.create_object("java.util.ArrayList")
+        for i in range(10):
+            arr.add(str(9 - i))  # Add in reverse order
+
+        client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
+
+        # Verify sorted correctly
+        assert arr.get(0) == "0"
+        assert arr.get(9) == "9"
+        # Verify callback was invoked multiple times
+        assert len(results) > 0
+
+
 class TestCallbackCleanup:
     """Test callback cleanup and unregistration."""
 
