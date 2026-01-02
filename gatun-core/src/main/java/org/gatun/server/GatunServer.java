@@ -281,7 +281,28 @@ public class GatunServer {
         int commandSize = lengthBuf.getInt();
         lengthBuf.clear();
 
-        // --- CRITICAL FIX: Safe Buffer Slicing ---
+        // Validate command size to prevent OOB access or DoS
+        // Command zone is from COMMAND_OFFSET to PAYLOAD_OFFSET
+        if (commandSize <= 0 || commandSize > PAYLOAD_OFFSET) {
+          LOG.warning("Invalid command size: " + commandSize + " (max: " + PAYLOAD_OFFSET + ")");
+          // Send error response and continue
+          FlatBufferBuilder errBuilder = new FlatBufferBuilder(256);
+          int errOffset = packError(errBuilder,
+              "Invalid command size: " + commandSize + " bytes (max: " + PAYLOAD_OFFSET + ")",
+              "java.lang.IllegalArgumentException");
+          errBuilder.finish(errOffset);
+          ByteBuffer errBuf = errBuilder.dataBuffer();
+          int errSize = errBuf.remaining();
+          MemorySegment errSlice = sharedMem.asSlice(this.responseOffset, errSize);
+          errSlice.copyFrom(MemorySegment.ofBuffer(errBuf));
+          lengthBuf.putInt(errSize);
+          lengthBuf.flip();
+          client.write(lengthBuf);
+          lengthBuf.clear();
+          continue;
+        }
+
+        // --- Safe Buffer Slicing ---
         // We create a ByteBuffer isolated to just the command data.
         MemorySegment cmdSlice = sharedMem.asSlice(COMMAND_OFFSET, commandSize);
         ByteBuffer cmdBuf = cmdSlice.asByteBuffer();
@@ -1688,6 +1709,11 @@ public class GatunServer {
       }
       lengthBuf.flip();
       int commandSize = lengthBuf.getInt();
+
+      // Validate command size
+      if (commandSize <= 0 || commandSize > PAYLOAD_OFFSET) {
+        throw new IOException("Invalid callback response size: " + commandSize);
+      }
 
       // Read the command from command zone
       MemorySegment cmdSlice = sharedMem.asSlice(COMMAND_OFFSET, commandSize);
