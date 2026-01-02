@@ -25,7 +25,11 @@ enum Action : byte {
   GetStaticField = 17,     // Get static field value: target_name = "pkg.Class.FIELD"
   SetStaticField = 18,     // Set static field value: target_name = "pkg.Class.FIELD", args[0] = value
   Reflect = 19,            // Reflection query: check if name is class, get member type
-  Batch = 20               // Execute multiple commands in a single round-trip
+  Batch = 20,              // Execute multiple commands in a single round-trip
+  // Vectorized operations - single round-trip for multiple operations on same target
+  GetFields = 21,          // Get multiple fields from one object: target_id + field_names
+  InvokeMethods = 22,      // Invoke multiple methods on same target: target_id + method_calls
+  CreateObjects = 23       // Create multiple objects: class_names + args per object
 }
 
 // Element types for arrays
@@ -52,7 +56,8 @@ union Value {
   ListVal,
   MapVal,
   ArrayVal,
-  CallbackRef  // Reference to a Python callback function
+  CallbackRef,  // Reference to a Python callback function
+  CharVal       // Java char (single UTF-16 code unit)
 }
 
 table StringVal { v:string; }
@@ -61,6 +66,7 @@ table DoubleVal { v:double; }
 table BoolVal { v:bool; }
 table ObjectRef { id:long; }
 table NullVal {}
+table CharVal { v:ushort; }   // Java char is 16-bit unsigned
 
 // Reference to a Python callback function
 // When Java invokes this, it triggers a callback request to Python
@@ -100,6 +106,10 @@ table ArrayVal {
 
 table Argument {
   val: Value;
+  // Optional type hint for overload resolution
+  // When set, Java uses this type instead of inferring from val_type
+  // Examples: "int", "long", "java.lang.Integer", "java.util.List", "scala.collection.Seq"
+  type_hint: string;
 }
 
 // --- Arrow Zero-Copy Transfer Types ---
@@ -153,6 +163,35 @@ table ArrowBatchDescriptor {
   arena_epoch: uint64;
 }
 
+// --- Vectorized Command Support ---
+// For executing multiple similar operations in a single round-trip
+
+// For GetFields: get multiple field values from one object
+table GetFieldsRequest {
+  field_names: [string];    // List of field names to read
+}
+
+// For InvokeMethods: invoke multiple methods on same target
+table MethodCall {
+  method_name: string;      // Method name
+  args: [Argument];         // Arguments for this method call
+  return_object_ref: bool;  // If true, return as ObjectRef instead of auto-converting
+}
+
+table InvokeMethodsRequest {
+  method_calls: [MethodCall];  // List of method invocations
+}
+
+// For CreateObjects: create multiple objects in one round-trip
+table ObjectSpec {
+  class_name: string;       // Fully qualified class name
+  args: [Argument];         // Constructor arguments
+}
+
+table CreateObjectsRequest {
+  objects: [ObjectSpec];    // List of objects to create
+}
+
 // --- Batch Command Support ---
 // For executing multiple commands in a single round-trip
 
@@ -169,6 +208,10 @@ table Command {
   arrow_batch: ArrowBatchDescriptor;  // For SendArrowBuffers action
   return_object_ref: bool;  // If true, return result as ObjectRef instead of auto-converting
   batch: BatchCommand;  // For Action.Batch: contains sub-commands to execute
+  // Vectorized operation requests (for Action.GetFields, InvokeMethods, CreateObjects)
+  get_fields: GetFieldsRequest;
+  invoke_methods: InvokeMethodsRequest;
+  create_objects: CreateObjectsRequest;
 }
 
 // Batch of commands to execute sequentially
@@ -205,6 +248,12 @@ table Response {
 
   // For batch responses (Action.Batch)
   batch: BatchResponse;  // Contains results for each sub-command
+
+  // For vectorized responses (GetFields, InvokeMethods, CreateObjects)
+  // Returns ListVal containing results in same order as requests
+  // For GetFields: list of field values
+  // For InvokeMethods: list of method return values
+  // For CreateObjects: list of ObjectRef for created objects
 }
 
 // Batch of responses (one per command in BatchCommand)

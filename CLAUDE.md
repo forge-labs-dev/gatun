@@ -278,6 +278,52 @@ print(r1.get())      # True
 print(r2.is_error)   # True
 ```
 
+### Vectorized APIs
+For even faster bulk operations on the same target, use vectorized APIs (2-5x speedup):
+
+```python
+# invoke_methods - Multiple method calls on same object in one round-trip
+arr = client.create_object("java.util.ArrayList")
+results = client.invoke_methods(arr, [
+    ("add", ("a",)),
+    ("add", ("b",)),
+    ("add", ("c",)),
+    ("size", ()),
+])
+# results = [True, True, True, 3]
+
+# With return_object_ref for specific calls
+results = client.invoke_methods(arr, [
+    ("size", ()),
+    ("subList", (0, 2)),
+], return_object_refs=[False, True])  # Second result as JavaObject
+
+# create_objects - Create multiple objects in one round-trip
+list1, map1, set1 = client.create_objects([
+    ("java.util.ArrayList", ()),
+    ("java.util.HashMap", ()),
+    ("java.util.HashSet", ()),
+])
+
+# With constructor arguments
+objects = client.create_objects([
+    ("java.util.ArrayList", (100,)),      # Initial capacity
+    ("java.lang.StringBuilder", ("hi",)), # Initial string
+])
+
+# get_fields - Read multiple fields from one object in one round-trip
+sb = client.create_object("java.lang.StringBuilder", "hello")
+values = client.get_fields(sb, ["count"])  # [5]
+```
+
+**When to use which API:**
+| API | Best For |
+|-----|----------|
+| `invoke_methods` | Multiple method calls on **same object** |
+| `create_objects` | Creating multiple objects at startup |
+| `get_fields` | Reading multiple fields from one object |
+| `batch` | Mixed operations on **different objects** |
+
 ### Low-Level API
 For direct control:
 ```python
@@ -288,6 +334,11 @@ client.invoke_static_method("java.lang.Math", "max", 10, 20)
 client.get_field(obj, "fieldName")                    # Get field value
 client.set_field(obj, "fieldName", value)             # Set field value
 client.is_instance_of(obj, "java.util.List")          # Check instance type
+
+# Vectorized operations (single round-trip for multiple operations)
+client.get_fields(obj, ["field1", "field2"])          # Multiple field reads
+client.invoke_methods(obj, [("method1", (arg,)), ("method2", ())])  # Multiple calls
+client.create_objects([("class1", ()), ("class2", (arg,))])  # Multiple creations
 ```
 
 ### Arrow Data Transfer

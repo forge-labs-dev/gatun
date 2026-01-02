@@ -2,6 +2,7 @@ package org.gatun.server;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -50,6 +51,15 @@ public final class ReflectionCache {
   // --- INSTANCE FIELD CACHE ---
   // Key: "className.fieldName" -> Field object
   private static final Map<String, java.lang.reflect.Field> instanceFieldCache =
+      new ConcurrentHashMap<>();
+
+  // --- VAR HANDLE CACHE ---
+  // Key: "className.fieldName" -> VarHandle for faster field access
+  private static final Map<String, VarHandle> varHandleCache = new ConcurrentHashMap<>();
+
+  // --- STATIC VAR HANDLE CACHE ---
+  // Key: "className.fieldName" -> CachedStaticVarHandle with VarHandle + declaring class
+  private static final Map<String, CachedStaticVarHandle> staticVarHandleCache =
       new ConcurrentHashMap<>();
 
   // --- METHODS CACHE ---
@@ -361,6 +371,11 @@ public final class ReflectionCache {
       MethodHandle h = null;
       try {
         h = METHOD_LOOKUP.unreflect(method);
+        // For varargs methods, convert to collector so invokeWithArguments works naturally
+        if (isVarArgs && h != null) {
+          Class<?>[] paramTypes = method.getParameterTypes();
+          h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
+        }
       } catch (IllegalAccessException e) {
         // Fall back to null - will use Method.invoke
       }
@@ -368,12 +383,22 @@ public final class ReflectionCache {
       this.isStatic = java.lang.reflect.Modifier.isStatic(method.getModifiers());
     }
 
-    /** Prepare arguments for invocation, repacking varargs if needed. */
+    /**
+     * Prepare arguments for invocation.
+     *
+     * <p>For varargs methods with MethodHandle (using asVarargsCollector), we pass args as-is
+     * because the collector handles packing. For Method.invoke fallback, we need to repack.
+     */
     public Object[] prepareArgs(Object[] args) {
       if (!isVarArgs) {
         return args;
       }
-      // Repack: fixed args + varargs array
+      // When using MethodHandle with asVarargsCollector, pass args as-is
+      // The collector will pack trailing args into the varargs array automatically
+      if (handle != null) {
+        return args;
+      }
+      // Fallback for Method.invoke: manually repack varargs
       Object[] newArgs = new Object[fixedArgCount + 1];
       for (int i = 0; i < fixedArgCount; i++) {
         newArgs[i] = args[i];
@@ -438,9 +463,10 @@ public final class ReflectionCache {
     }
   }
 
-  /** Cached constructor resolution result. */
+  /** Cached constructor resolution result with MethodHandle for fast invocation. */
   public static final class CachedConstructor {
     public final java.lang.reflect.Constructor<?> constructor;
+    public final MethodHandle handle;
     public final boolean isVarArgs;
     public final int fixedArgCount;
     public final Class<?> varargComponentType;
@@ -456,6 +482,19 @@ public final class ReflectionCache {
         this.fixedArgCount = 0;
         this.varargComponentType = null;
       }
+      // Convert to MethodHandle for faster invocation
+      MethodHandle h = null;
+      try {
+        h = METHOD_LOOKUP.unreflectConstructor(constructor);
+        // For varargs constructors, convert to collector
+        if (isVarArgs && h != null) {
+          Class<?>[] paramTypes = constructor.getParameterTypes();
+          h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
+        }
+      } catch (IllegalAccessException e) {
+        // Fall back to null - will use Constructor.newInstance
+      }
+      this.handle = h;
     }
 
     /** Prepare arguments for invocation, repacking varargs if needed. */
@@ -463,6 +502,11 @@ public final class ReflectionCache {
       if (!isVarArgs) {
         return args;
       }
+      // When using MethodHandle with asVarargsCollector, pass args as-is
+      if (handle != null) {
+        return args;
+      }
+      // Fallback for Constructor.newInstance: manually repack varargs
       Object[] newArgs = new Object[fixedArgCount + 1];
       for (int i = 0; i < fixedArgCount; i++) {
         newArgs[i] = args[i];
@@ -474,6 +518,74 @@ public final class ReflectionCache {
       }
       newArgs[fixedArgCount] = varargArray;
       return newArgs;
+    }
+
+    /** Invoke the constructor using MethodHandle if available. */
+    public Object newInstance(Object[] args) throws Throwable {
+      if (handle != null) {
+        return handle.invokeWithArguments(args);
+      }
+      return constructor.newInstance(args);
+    }
+  }
+
+  // ========== VAR HANDLE SUPPORT ==========
+
+  /** Cached static VarHandle with declaring class for static field access. */
+  public static final class CachedStaticVarHandle {
+    public final VarHandle handle;
+    public final Class<?> declaringClass;
+
+    public CachedStaticVarHandle(VarHandle handle, Class<?> declaringClass) {
+      this.handle = handle;
+      this.declaringClass = declaringClass;
+    }
+  }
+
+  /**
+   * Get VarHandle for instance field access. Returns null if not available.
+   * VarHandle is faster than Field.get/set after JIT warmup.
+   */
+  public static VarHandle getInstanceVarHandle(Class<?> clazz, String fieldName) {
+    String key = clazz.getName() + "." + fieldName;
+    VarHandle cached = varHandleCache.get(key);
+    if (cached != null) {
+      return cached;
+    }
+
+    // Try to create VarHandle
+    try {
+      java.lang.reflect.Field field = getInstanceField(clazz, fieldName);
+      // Use privateLookupIn for private fields
+      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
+      VarHandle vh = lookup.unreflectVarHandle(field);
+      varHandleCache.put(key, vh);
+      return vh;
+    } catch (NoSuchFieldException | IllegalAccessException e) {
+      // Fall back to Field-based access
+      return null;
+    }
+  }
+
+  /**
+   * Get VarHandle for static field access. Returns null if not available.
+   */
+  public static CachedStaticVarHandle getStaticVarHandle(Class<?> clazz, String fieldName) {
+    String key = clazz.getName() + "." + fieldName;
+    CachedStaticVarHandle cached = staticVarHandleCache.get(key);
+    if (cached != null) {
+      return cached;
+    }
+
+    try {
+      java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
+      VarHandle vh = lookup.unreflectVarHandle(field);
+      CachedStaticVarHandle result = new CachedStaticVarHandle(vh, field.getDeclaringClass());
+      staticVarHandleCache.put(key, result);
+      return result;
+    } catch (NoSuchFieldException | IllegalAccessException e) {
+      return null;
     }
   }
 }

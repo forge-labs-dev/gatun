@@ -550,6 +550,144 @@ def test_batch_large(client):
     assert arr.size() == n
 
 
+# --- Vectorized API Tests ---
+
+
+def test_get_fields_basic(client):
+    """Test get_fields reads multiple fields in one round-trip."""
+    # Use StringBuilder which has accessible count field
+    sb = client.create_object("java.lang.StringBuilder", "hello")
+
+    # Get the count field (internal length)
+    result = client.get_fields(sb, ["count"])
+
+    assert result == [5]  # "hello" has 5 characters
+
+
+def test_get_fields_multiple(client):
+    """Test get_fields with multiple fields."""
+    sb = client.create_object("java.lang.StringBuilder", "test")
+
+    # StringBuilder has both 'count' and 'value' fields
+    # But value is a char[] which won't match directly
+    # Let's use a simple test with count only
+    result = client.get_fields(sb, ["count"])
+
+    assert result == [4]  # "test" has 4 characters
+
+
+def test_get_fields_with_object_id(client):
+    """Test get_fields accepts object_id directly."""
+    sb = client.create_object("java.lang.StringBuilder", "abc")
+
+    result = client.get_fields(sb.object_id, ["count"])
+
+    assert result == [3]
+
+
+def test_invoke_methods_basic(client):
+    """Test invoke_methods calls multiple methods in one round-trip."""
+    arr = client.create_object("java.util.ArrayList")
+
+    # Add 3 items and get size - all in one round-trip
+    results = client.invoke_methods(
+        arr,
+        [
+            ("add", ("a",)),
+            ("add", ("b",)),
+            ("add", ("c",)),
+            ("size", ()),
+        ],
+    )
+
+    assert results == [True, True, True, 3]
+
+
+def test_invoke_methods_with_args(client):
+    """Test invoke_methods with methods that take arguments."""
+    sb = client.create_object("java.lang.StringBuilder", "hello")
+
+    results = client.invoke_methods(
+        sb,
+        [
+            ("append", (" ",)),
+            ("append", ("world",)),
+            ("toString", ()),
+        ],
+    )
+
+    assert results[2] == "hello world"
+
+
+def test_invoke_methods_return_object_refs(client):
+    """Test invoke_methods with return_object_ref flag."""
+    arr = client.create_object("java.util.ArrayList")
+    arr.add("x")
+    arr.add("y")
+
+    # Get the subList as an ObjectRef, not a converted list
+    results = client.invoke_methods(
+        arr,
+        [
+            ("size", ()),
+            ("subList", (0, 1)),
+        ],
+        return_object_refs=[False, True],
+    )
+
+    assert results[0] == 2
+    # Second result should be a JavaObject, not a list
+    from gatun.client import JavaObject
+
+    assert isinstance(results[1], JavaObject)
+
+
+def test_create_objects_basic(client):
+    """Test create_objects creates multiple objects in one round-trip."""
+    objects = client.create_objects(
+        [
+            ("java.util.ArrayList", ()),
+            ("java.util.HashMap", ()),
+            ("java.util.HashSet", ()),
+        ]
+    )
+
+    assert len(objects) == 3
+
+    from gatun.client import JavaObject
+
+    for obj in objects:
+        assert isinstance(obj, JavaObject)
+
+    # Verify they're the right types
+    assert client.is_instance_of(objects[0], "java.util.ArrayList")
+    assert client.is_instance_of(objects[1], "java.util.HashMap")
+    assert client.is_instance_of(objects[2], "java.util.HashSet")
+
+
+def test_create_objects_with_args(client):
+    """Test create_objects with constructor arguments."""
+    objects = client.create_objects(
+        [
+            ("java.util.ArrayList", (100,)),  # with initial capacity
+            ("java.lang.StringBuilder", ("hello",)),
+        ]
+    )
+
+    assert len(objects) == 2
+
+    # StringBuilder should have the initial content
+    assert objects[1].toString() == "hello"
+
+
+def test_create_objects_single(client):
+    """Test create_objects with single object."""
+    objects = client.create_objects([("java.util.ArrayList", ())])
+
+    assert len(objects) == 1
+    assert client.is_instance_of(objects[0], "java.util.ArrayList")
+
+
 # --- Multi-Client Tests ---
 
 

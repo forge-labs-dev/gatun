@@ -27,6 +27,7 @@ from gatun.generated.org.gatun.protocol import (
     IntVal,
     DoubleVal,
     BoolVal,
+    CharVal,
     ObjectRef,
     Argument,
     ListVal,
@@ -39,6 +40,11 @@ from gatun.generated.org.gatun.protocol import (
     FieldNode,
     BatchCommand,
     BatchResponse,
+    GetFieldsRequest,
+    InvokeMethodsRequest,
+    MethodCall,
+    CreateObjectsRequest,
+    ObjectSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,6 +152,43 @@ class CancelledException(Exception):
     def __init__(self, request_id: int):
         self.request_id = request_id
         super().__init__(f"Request {request_id} was cancelled")
+
+
+class TypeHint:
+    """Wrapper to provide an explicit Java type hint for overload resolution.
+
+    Use this when Python's automatic type inference doesn't select the correct
+    Java method overload. This is common with Spark/Scala APIs that have many
+    overloaded methods.
+
+    Examples:
+        # Force long instead of int
+        client.invoke_method(obj, "method", TypeHint(42, "long"))
+
+        # Use interface type instead of implementation
+        client.invoke_method(obj, "method", TypeHint(my_list, "java.util.List"))
+
+        # Scala collection types
+        client.invoke_method(obj, "method", TypeHint(my_list, "scala.collection.Seq"))
+    """
+
+    __slots__ = ("value", "java_type")
+
+    def __init__(self, value, java_type: str):
+        """Create a type-hinted value.
+
+        Args:
+            value: The Python value to pass
+            java_type: The Java type to use for overload resolution.
+                       Can be a primitive ("int", "long", "double"), a boxed type
+                       ("Integer", "Long"), a full class name ("java.util.List"),
+                       or a Scala type ("scala.collection.Seq").
+        """
+        self.value = value
+        self.java_type = java_type
+
+    def __repr__(self):
+        return f"TypeHint({self.value!r}, {self.java_type!r})"
 
 
 # Mapping from Java exception class names to Python exception classes
@@ -1137,6 +1180,10 @@ class GatunClient:
             union_obj = BoolVal.BoolVal()
             union_obj.Init(val_table.Bytes, val_table.Pos)
             return union_obj.V()
+        elif val_type == Value.Value.CharVal:
+            union_obj = CharVal.CharVal()
+            union_obj.Init(val_table.Bytes, val_table.Pos)
+            return chr(union_obj.V())  # Convert to Python str (single char)
         elif val_type == Value.Value.ObjectRef:
             union_obj = ObjectRef.ObjectRef()
             union_obj.Init(val_table.Bytes, val_table.Pos)
@@ -1685,6 +1732,215 @@ class GatunClient:
 
         return self._send_raw(builder.Output())
 
+    def get_fields(self, obj, field_names: list[str]) -> list:
+        """Get multiple field values from a Java object in a single round-trip.
+
+        This is more efficient than calling get_field() multiple times when
+        you need to read several fields from the same object.
+
+        Args:
+            obj: JavaObject instance or object ID
+            field_names: List of field names to read
+
+        Returns:
+            List of field values in the same order as field_names.
+
+        Example:
+            point = client.create_object("java.awt.Point", 10, 20)
+            x, y = client.get_fields(point, ["x", "y"])  # Single round-trip
+        """
+        if isinstance(obj, JavaObject):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        builder = self._get_builder(large=True)
+
+        # Build field names vector (strings must be created before the table)
+        field_name_offsets = [
+            self._create_string(builder, name) for name in field_names
+        ]
+        GetFieldsRequest.StartFieldNamesVector(builder, len(field_name_offsets))
+        for offset in reversed(field_name_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        field_names_vec = builder.EndVector()
+
+        # Build GetFieldsRequest
+        GetFieldsRequest.Start(builder)
+        GetFieldsRequest.AddFieldNames(builder, field_names_vec)
+        get_fields_off = GetFieldsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetFields)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddGetFields(builder, get_fields_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def invoke_methods(
+        self,
+        obj,
+        calls: list[tuple[str, tuple]],
+        return_object_refs: bool | list[bool] = False,
+    ) -> list:
+        """Invoke multiple methods on the same Java object in a single round-trip.
+
+        This is more efficient than calling invoke_method() multiple times when
+        you need to call several methods on the same object.
+
+        Args:
+            obj: JavaObject instance or object ID
+            calls: List of (method_name, args_tuple) pairs.
+                   Each tuple is (method_name, (arg1, arg2, ...))
+            return_object_refs: If True (or list of bools), return results as
+                               ObjectRefs instead of auto-converting to Python.
+
+        Returns:
+            List of results in the same order as calls.
+
+        Example:
+            arr = client.create_object("java.util.ArrayList")
+            # Add 3 items and get size in one round-trip
+            results = client.invoke_methods(arr, [
+                ("add", ("a",)),
+                ("add", ("b",)),
+                ("add", ("c",)),
+                ("size", ()),
+            ])
+            # results = [True, True, True, 3]
+        """
+        if isinstance(obj, JavaObject):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        # Normalize return_object_refs to a list
+        if isinstance(return_object_refs, bool):
+            return_object_refs = [return_object_refs] * len(calls)
+
+        builder = self._get_builder(large=True)
+
+        # Build each MethodCall (must be done in reverse order for FlatBuffers)
+        method_call_offsets = []
+        for i, (method_name, args) in enumerate(calls):
+            # Build method name string
+            method_name_off = self._create_string(builder, method_name)
+
+            # Build arguments
+            arg_offsets = []
+            for arg in args:
+                arg_offset = self._build_argument(builder, arg)
+                arg_offsets.append(arg_offset)
+
+            args_vec = None
+            if arg_offsets:
+                MethodCall.StartArgsVector(builder, len(arg_offsets))
+                for offset in reversed(arg_offsets):
+                    builder.PrependUOffsetTRelative(offset)
+                args_vec = builder.EndVector()
+
+            # Build MethodCall
+            MethodCall.Start(builder)
+            MethodCall.AddMethodName(builder, method_name_off)
+            if args_vec:
+                MethodCall.AddArgs(builder, args_vec)
+            if return_object_refs[i]:
+                MethodCall.AddReturnObjectRef(builder, True)
+            method_call_offsets.append(MethodCall.End(builder))
+
+        # Build method calls vector
+        InvokeMethodsRequest.StartMethodCallsVector(builder, len(method_call_offsets))
+        for offset in reversed(method_call_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        method_calls_vec = builder.EndVector()
+
+        # Build InvokeMethodsRequest
+        InvokeMethodsRequest.Start(builder)
+        InvokeMethodsRequest.AddMethodCalls(builder, method_calls_vec)
+        invoke_methods_off = InvokeMethodsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.InvokeMethods)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddInvokeMethods(builder, invoke_methods_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def create_objects(self, specs: list[tuple[str, tuple]]) -> list["JavaObject"]:
+        """Create multiple Java objects in a single round-trip.
+
+        This is more efficient than calling create_object() multiple times when
+        you need to create several objects.
+
+        Args:
+            specs: List of (class_name, args_tuple) pairs.
+                   Each tuple is (fully_qualified_class_name, (arg1, arg2, ...))
+
+        Returns:
+            List of JavaObject instances in the same order as specs.
+
+        Example:
+            # Create 3 ArrayLists in one round-trip
+            lists = client.create_objects([
+                ("java.util.ArrayList", ()),
+                ("java.util.ArrayList", (100,)),  # with initial capacity
+                ("java.util.HashMap", ()),
+            ])
+        """
+        builder = self._get_builder(large=True)
+
+        # Build each ObjectSpec
+        object_spec_offsets = []
+        for class_name, args in specs:
+            # Build class name string
+            class_name_off = self._create_string(builder, class_name)
+
+            # Build arguments
+            arg_offsets = []
+            for arg in args:
+                arg_offset = self._build_argument(builder, arg)
+                arg_offsets.append(arg_offset)
+
+            args_vec = None
+            if arg_offsets:
+                ObjectSpec.StartArgsVector(builder, len(arg_offsets))
+                for offset in reversed(arg_offsets):
+                    builder.PrependUOffsetTRelative(offset)
+                args_vec = builder.EndVector()
+
+            # Build ObjectSpec
+            ObjectSpec.Start(builder)
+            ObjectSpec.AddClassName(builder, class_name_off)
+            if args_vec:
+                ObjectSpec.AddArgs(builder, args_vec)
+            object_spec_offsets.append(ObjectSpec.End(builder))
+
+        # Build objects vector
+        CreateObjectsRequest.StartObjectsVector(builder, len(object_spec_offsets))
+        for offset in reversed(object_spec_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        objects_vec = builder.EndVector()
+
+        # Build CreateObjectsRequest
+        CreateObjectsRequest.Start(builder)
+        CreateObjectsRequest.AddObjects(builder, objects_vec)
+        create_objects_off = CreateObjectsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.CreateObjects)
+        Cmd.CommandAddCreateObjects(builder, create_objects_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
     def register_callback(
         self, callback_fn: callable, interface_name: str
     ) -> "JavaObject":
@@ -1755,12 +2011,44 @@ class GatunClient:
         self._send_raw(builder.Output())
 
     def _build_argument(self, builder, value):
-        """Convert a Python value to a FlatBuffer Argument."""
-        val_type, val_off = self._build_value(builder, value)
+        """Convert a Python value to a FlatBuffer Argument.
+
+        If value is a TypeHint wrapper, extracts the actual value and
+        includes the type hint for Java overload resolution.
+        """
+        # Extract type hint if present
+        type_hint = None
+        if isinstance(value, TypeHint):
+            type_hint = value.java_type
+            value = value.value
+
+        # Special case: char type hint with single-character string
+        if type_hint in ("char", "Character", "java.lang.Character"):
+            if isinstance(value, str) and len(value) == 1:
+                CharVal.Start(builder)
+                CharVal.AddV(builder, ord(value[0]))
+                val_type, val_off = Value.Value.CharVal, CharVal.End(builder)
+            elif isinstance(value, int):
+                CharVal.Start(builder)
+                CharVal.AddV(builder, value)
+                val_type, val_off = Value.Value.CharVal, CharVal.End(builder)
+            else:
+                raise ValueError(
+                    f"char type hint requires single-character string or int, got {type(value)}"
+                )
+        else:
+            val_type, val_off = self._build_value(builder, value)
+
+        # Build type hint string offset if present (must be before Start)
+        type_hint_off = 0
+        if type_hint:
+            type_hint_off = self._create_string(builder, type_hint)
 
         Argument.Start(builder)
         Argument.AddValType(builder, val_type)
         Argument.AddVal(builder, val_off)
+        if type_hint_off:
+            Argument.AddTypeHint(builder, type_hint_off)
         return Argument.End(builder)
 
     def _build_value(self, builder, value):

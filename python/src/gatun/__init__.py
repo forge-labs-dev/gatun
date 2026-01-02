@@ -24,6 +24,7 @@ from gatun.client import (
     ArrowTableView,
     BatchContext,
     BatchResult,
+    TypeHint,
 )
 from gatun.async_client import (
     AsyncGatunClient,
@@ -46,6 +47,7 @@ __all__ = [
     "java_import",
     "BatchContext",
     "BatchResult",
+    "TypeHint",
     # Async client
     "AsyncGatunClient",
     "AsyncJavaObject",

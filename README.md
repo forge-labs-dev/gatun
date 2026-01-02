@@ -14,6 +14,7 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **PySpark Integration**: Use as backend for PySpark via BridgeAdapter
 - **Pythonic JavaObjects**: Iteration, indexing, and len() support on Java collections
 - **Batch API**: Execute multiple commands in a single round-trip (6x speedup for bulk ops)
+- **Vectorized APIs**: invoke_methods, create_objects, get_fields for 2-5x additional speedup
 
 ## Installation
 
@@ -268,6 +269,41 @@ with client.batch(stop_on_error=True) as b:
     r3 = b.call(arr, "size")  # Skipped when stop_on_error=True
 ```
 
+### Vectorized APIs
+
+For even faster bulk operations on the same target (2-5x speedup over batch):
+
+```python
+# invoke_methods - Multiple calls on same object in one round-trip
+arr = client.create_object("java.util.ArrayList")
+results = client.invoke_methods(arr, [
+    ("add", ("a",)),
+    ("add", ("b",)),
+    ("add", ("c",)),
+    ("size", ()),
+])
+# results = [True, True, True, 3]
+
+# create_objects - Create multiple objects in one round-trip
+list1, map1, set1 = client.create_objects([
+    ("java.util.ArrayList", ()),
+    ("java.util.HashMap", ()),
+    ("java.util.HashSet", ()),
+])
+
+# get_fields - Read multiple fields from one object
+sb = client.create_object("java.lang.StringBuilder", "hello")
+values = client.get_fields(sb, ["count"])  # [5]
+```
+
+**When to use which API:**
+| API | Best For |
+|-----|----------|
+| `invoke_methods` | Multiple method calls on **same object** |
+| `create_objects` | Creating multiple objects at startup |
+| `get_fields` | Reading multiple fields from one object |
+| `batch` | Mixed operations on **different objects** |
+
 ### JavaArray for Array Round-Tripping
 
 When Java returns arrays, they're wrapped as `JavaArray` to preserve type when passed back:
@@ -325,6 +361,11 @@ result = client.invoke_static_method("java.lang.Math", "max", 10, 20)
 # Access fields
 size = client.get_field(obj, "size")
 client.set_field(obj, "fieldName", value)
+
+# Vectorized operations (single round-trip for multiple operations)
+client.get_fields(obj, ["field1", "field2"])
+client.invoke_methods(obj, [("method1", (arg,)), ("method2", ())])
+client.create_objects([("class1", ()), ("class2", (arg,))])
 ```
 
 ## PySpark Integration

@@ -95,18 +95,15 @@ public final class MethodResolver {
         boolean match = true;
         int specificity = 0; // Higher = more specific type matches
         for (int i = 0; i < paramTypes.length; i++) {
-          if (!isAssignable(paramTypes[i], argTypes[i])) {
-            match = false;
-            break;
+          int typeScore = getTypeSpecificity(paramTypes[i], argTypes[i]);
+          if (typeScore == 0) {
+            // Check if still assignable (for edge cases)
+            if (!isAssignable(paramTypes[i], argTypes[i])) {
+              match = false;
+              break;
+            }
           }
-          // Score specificity: exact type match gets 10 points, Object param gets 0
-          if (paramTypes[i] == argTypes[i]) {
-            specificity += 10;
-          } else if (paramTypes[i] != Object.class && paramTypes[i].isAssignableFrom(argTypes[i])) {
-            // Specific type that accepts our arg gets 5 points
-            specificity += 5;
-          }
-          // Object.class as param type gets 0 points (least specific)
+          specificity += typeScore;
         }
         if (match) {
           // Score: base 1000 for non-varargs, plus specificity bonus
@@ -142,13 +139,13 @@ public final class MethodResolver {
 
   // ========== CONSTRUCTOR RESOLUTION ==========
 
-  /** Result of constructor resolution. */
+  /** Result of constructor resolution with cached MethodHandle. */
   public static final class ConstructorWithArgs {
-    public final java.lang.reflect.Constructor<?> constructor;
+    public final CachedConstructor cached;
     public final Object[] args;
 
-    public ConstructorWithArgs(java.lang.reflect.Constructor<?> constructor, Object[] args) {
-      this.constructor = constructor;
+    public ConstructorWithArgs(CachedConstructor cached, Object[] args) {
+      this.cached = cached;
       this.args = args;
     }
   }
@@ -164,7 +161,7 @@ public final class MethodResolver {
     ConstructorCacheKey cacheKey = new ConstructorCacheKey(clazz, argTypes);
     CachedConstructor cached = ReflectionCache.getCachedConstructor(cacheKey);
     if (cached != null) {
-      return new ConstructorWithArgs(cached.constructor, cached.prepareArgs(args));
+      return new ConstructorWithArgs(cached, cached.prepareArgs(args));
     }
 
     // Not in cache - do full resolution
@@ -174,7 +171,7 @@ public final class MethodResolver {
     CachedConstructor toCache = new CachedConstructor(resolvedCtor);
     ReflectionCache.cacheConstructor(cacheKey, toCache);
 
-    return new ConstructorWithArgs(resolvedCtor, toCache.prepareArgs(args));
+    return new ConstructorWithArgs(toCache, toCache.prepareArgs(args));
   }
 
   /**
@@ -213,16 +210,14 @@ public final class MethodResolver {
       boolean match = true;
       int specificity = 0;
       for (int i = 0; i < paramTypes.length; i++) {
-        if (!isAssignable(paramTypes[i], argTypes[i])) {
-          match = false;
-          break;
+        int typeScore = getTypeSpecificity(paramTypes[i], argTypes[i]);
+        if (typeScore == 0) {
+          if (!isAssignable(paramTypes[i], argTypes[i])) {
+            match = false;
+            break;
+          }
         }
-        // Score specificity: exact type match gets 10 points
-        if (paramTypes[i] == argTypes[i]) {
-          specificity += 10;
-        } else if (paramTypes[i] != Object.class && paramTypes[i].isAssignableFrom(argTypes[i])) {
-          specificity += 5;
-        }
+        specificity += typeScore;
       }
       if (match) {
         int score = 1000 + specificity;
@@ -309,35 +304,218 @@ public final class MethodResolver {
 
   // ========== TYPE CHECKING ==========
 
+  // Boxing/unboxing pairs
+  private static final java.util.Map<Class<?>, Class<?>> PRIMITIVE_TO_WRAPPER;
+  private static final java.util.Map<Class<?>, Class<?>> WRAPPER_TO_PRIMITIVE;
+
+  static {
+    PRIMITIVE_TO_WRAPPER = new java.util.HashMap<>();
+    PRIMITIVE_TO_WRAPPER.put(boolean.class, Boolean.class);
+    PRIMITIVE_TO_WRAPPER.put(byte.class, Byte.class);
+    PRIMITIVE_TO_WRAPPER.put(char.class, Character.class);
+    PRIMITIVE_TO_WRAPPER.put(short.class, Short.class);
+    PRIMITIVE_TO_WRAPPER.put(int.class, Integer.class);
+    PRIMITIVE_TO_WRAPPER.put(long.class, Long.class);
+    PRIMITIVE_TO_WRAPPER.put(float.class, Float.class);
+    PRIMITIVE_TO_WRAPPER.put(double.class, Double.class);
+
+    WRAPPER_TO_PRIMITIVE = new java.util.HashMap<>();
+    for (var entry : PRIMITIVE_TO_WRAPPER.entrySet()) {
+      WRAPPER_TO_PRIMITIVE.put(entry.getValue(), entry.getKey());
+    }
+  }
+
   /**
    * Check if argType can be assigned to paramType.
    *
-   * <p>Handles:
-   * <ul>
-   *   <li>Standard Java assignability</li>
-   *   <li>Object accepting anything</li>
-   *   <li>Primitive widening conversions (int -> long -> double)</li>
-   * </ul>
+   * <p>Handles (in order of preference for scoring):
+   * <ol>
+   *   <li>Exact match</li>
+   *   <li>Boxing/unboxing (int <-> Integer)</li>
+   *   <li>Primitive widening (byte -> short -> int -> long -> float -> double)</li>
+   *   <li>Reference widening (subclass -> superclass/interface)</li>
+   *   <li>Object accepts anything (except null to primitive)</li>
+   * </ol>
+   *
+   * <p>Note: null (represented as Object.class with null value) cannot be assigned to primitives.
    */
   public static boolean isAssignable(Class<?> paramType, Class<?> argType) {
+    // Exact match
+    if (paramType == argType) return true;
+
+    // Standard Java assignability (handles reference widening)
     if (paramType.isAssignableFrom(argType)) return true;
-    // Handle Object accepting anything (used for String args and object refs)
+
+    // Boxing: primitive param accepts its wrapper
+    if (paramType.isPrimitive()) {
+      Class<?> wrapper = PRIMITIVE_TO_WRAPPER.get(paramType);
+      if (wrapper != null && wrapper.isAssignableFrom(argType)) return true;
+    }
+
+    // Unboxing: wrapper param accepts its primitive
+    if (!paramType.isPrimitive()) {
+      Class<?> primitive = WRAPPER_TO_PRIMITIVE.get(paramType);
+      if (primitive != null && primitive == argType) return true;
+    }
+
+    // Primitive widening conversions (JLS 5.1.2)
+    if (paramType.isPrimitive() && argType.isPrimitive()) {
+      return isPrimitiveWidening(paramType, argType);
+    }
+
+    // Boxed widening: Integer -> Long parameter (requires unbox + widen + box)
+    // Java doesn't do this implicitly, but we support it for convenience
+    Class<?> paramPrimitive = WRAPPER_TO_PRIMITIVE.get(paramType);
+    Class<?> argPrimitive = WRAPPER_TO_PRIMITIVE.get(argType);
+    if (paramPrimitive != null && argPrimitive != null) {
+      if (isPrimitiveWidening(paramPrimitive, argPrimitive)) return true;
+    }
+
+    // Primitive param with boxed arg that can widen
+    if (paramType.isPrimitive() && argPrimitive != null) {
+      if (isPrimitiveWidening(paramType, argPrimitive)) return true;
+    }
+
+    // Boxed param with primitive arg that can widen
+    if (paramPrimitive != null && argType.isPrimitive()) {
+      if (isPrimitiveWidening(paramPrimitive, argType)) return true;
+    }
+
+    // Object accepts anything (primitives auto-box at runtime)
     if (paramType == Object.class) return true;
-    // Handle argType=Object matching any reference type (String args come as Object.class)
+
+    // argType=Object (from null or untyped) matches any reference type
+    // Note: null to primitive is handled by caller (convertArgument)
     if (argType == Object.class && !paramType.isPrimitive()) return true;
-    // Handle primitive widening conversions (Java allows these implicitly)
-    if (paramType == int.class && argType == int.class) return true;
-    if (paramType == long.class && (argType == int.class || argType == long.class)) return true;
-    // Allow int/long -> double widening (e.g., Math.pow(2, 10) should work)
-    if (paramType == double.class
-        && (argType == double.class
-            || argType == float.class
-            || argType == int.class
-            || argType == long.class)) return true;
-    if (paramType == float.class
-        && (argType == float.class || argType == int.class || argType == long.class)) return true;
-    if (paramType == boolean.class && argType == boolean.class) return true;
+
     return false;
+  }
+
+  /**
+   * Check if primitive widening conversion is valid (JLS 5.1.2).
+   * Widening: byte -> short -> int -> long -> float -> double
+   *           char -> int -> long -> float -> double
+   */
+  private static boolean isPrimitiveWidening(Class<?> to, Class<?> from) {
+    if (to == from) return true;
+
+    // byte widens to short, int, long, float, double
+    if (from == byte.class) {
+      return to == short.class || to == int.class || to == long.class
+          || to == float.class || to == double.class;
+    }
+    // short widens to int, long, float, double
+    if (from == short.class) {
+      return to == int.class || to == long.class || to == float.class || to == double.class;
+    }
+    // char widens to int, long, float, double
+    if (from == char.class) {
+      return to == int.class || to == long.class || to == float.class || to == double.class;
+    }
+    // int widens to long, float, double
+    if (from == int.class) {
+      return to == long.class || to == float.class || to == double.class;
+    }
+    // long widens to float, double
+    if (from == long.class) {
+      return to == float.class || to == double.class;
+    }
+    // float widens to double
+    if (from == float.class) {
+      return to == double.class;
+    }
+    return false;
+  }
+
+  /**
+   * Calculate specificity score for a type match. Higher = more specific = preferred.
+   *
+   * <p>Scoring (based on Java method resolution order):
+   * <ul>
+   *   <li>100: Exact match</li>
+   *   <li>90: Boxing/unboxing match</li>
+   *   <li>80: Primitive widening (closer types score higher)</li>
+   *   <li>70: Boxed type widening</li>
+   *   <li>50: Specific interface/superclass match</li>
+   *   <li>10: Object parameter (least specific)</li>
+   *   <li>0: No match</li>
+   * </ul>
+   */
+  public static int getTypeSpecificity(Class<?> paramType, Class<?> argType) {
+    // Exact match - highest priority
+    if (paramType == argType) return 100;
+
+    // Boxing/unboxing - second highest
+    if (paramType.isPrimitive()) {
+      Class<?> wrapper = PRIMITIVE_TO_WRAPPER.get(paramType);
+      if (wrapper == argType) return 90;
+    }
+    if (!paramType.isPrimitive()) {
+      Class<?> primitive = WRAPPER_TO_PRIMITIVE.get(paramType);
+      if (primitive == argType) return 90;
+    }
+
+    // Primitive widening - score based on "distance"
+    if (paramType.isPrimitive() && argType.isPrimitive() && isPrimitiveWidening(paramType, argType)) {
+      return 80 - getPrimitiveWideningDistance(paramType, argType);
+    }
+
+    // Boxed widening
+    Class<?> paramPrimitive = WRAPPER_TO_PRIMITIVE.get(paramType);
+    Class<?> argPrimitive = WRAPPER_TO_PRIMITIVE.get(argType);
+    if (paramPrimitive != null && argPrimitive != null && isPrimitiveWidening(paramPrimitive, argPrimitive)) {
+      return 70 - getPrimitiveWideningDistance(paramPrimitive, argPrimitive);
+    }
+
+    // Mixed primitive/boxed widening
+    if (paramType.isPrimitive() && argPrimitive != null && isPrimitiveWidening(paramType, argPrimitive)) {
+      return 75 - getPrimitiveWideningDistance(paramType, argPrimitive);
+    }
+    if (paramPrimitive != null && argType.isPrimitive() && isPrimitiveWidening(paramPrimitive, argType)) {
+      return 75 - getPrimitiveWideningDistance(paramPrimitive, argType);
+    }
+
+    // Reference type hierarchy
+    if (paramType.isAssignableFrom(argType)) {
+      if (paramType == Object.class) return 10; // Object is least specific
+      if (paramType.isInterface()) return 50;   // Interface match
+      return 60; // Superclass match
+    }
+
+    // Object parameter accepts primitives (auto-boxing at runtime)
+    if (paramType == Object.class && argType.isPrimitive()) {
+      return 10; // Same as Object accepting reference types
+    }
+
+    // Object.class arg (null or untyped) to reference type
+    if (argType == Object.class && !paramType.isPrimitive()) {
+      return paramType == Object.class ? 10 : 30;
+    }
+
+    return 0; // No match
+  }
+
+  /**
+   * Get the "distance" for primitive widening (used to prefer closer conversions).
+   * Lower distance = less widening = more preferred.
+   */
+  private static int getPrimitiveWideningDistance(Class<?> to, Class<?> from) {
+    // Order: byte(0) < short(1) < int(2) < long(3) < float(4) < double(5)
+    // char is treated as level 2 (same as int for widening purposes)
+    int fromLevel = getPrimitiveLevel(from);
+    int toLevel = getPrimitiveLevel(to);
+    return toLevel - fromLevel;
+  }
+
+  private static int getPrimitiveLevel(Class<?> type) {
+    if (type == byte.class) return 0;
+    if (type == short.class) return 1;
+    if (type == char.class) return 2;
+    if (type == int.class) return 2;
+    if (type == long.class) return 3;
+    if (type == float.class) return 4;
+    if (type == double.class) return 5;
+    return -1;
   }
 
   /**

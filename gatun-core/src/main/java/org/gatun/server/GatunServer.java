@@ -68,7 +68,11 @@ public class GatunServer {
           "java.lang.Integer",
           "java.lang.Long",
           "java.lang.Double",
+          "java.lang.Float",
           "java.lang.Boolean",
+          "java.lang.Byte",
+          "java.lang.Short",
+          "java.lang.Character",
           "java.lang.Math",
           "java.lang.StringBuilder",
           "java.lang.StringBuffer",
@@ -119,11 +123,13 @@ public class GatunServer {
     final SocketChannel channel;
     final MemorySegment sharedMem;
     final Object callbackLock; // Lock for serializing callback round-trips
+    final Set<Long> sessionObjectIds; // Track object IDs for cleanup
 
-    SessionContext(SocketChannel channel, MemorySegment sharedMem) {
+    SessionContext(SocketChannel channel, MemorySegment sharedMem, Set<Long> sessionObjectIds) {
       this.channel = channel;
       this.sharedMem = sharedMem;
       this.callbackLock = new Object();
+      this.sessionObjectIds = sessionObjectIds;
     }
   }
 
@@ -136,6 +142,25 @@ public class GatunServer {
   // Per-session: cancelled request IDs
   private static final ThreadLocal<Set<Long>> cancelledRequests =
       ThreadLocal.withInitial(HashSet::new);
+
+  // --- REUSABLE FLATBUFFER TEMP OBJECTS ---
+  // These are ThreadLocal to avoid per-request allocation overhead.
+  // FlatBuffer table wrappers are lightweight and can be reused via Init().
+  private static final ThreadLocal<StringVal> tempStringVal =
+      ThreadLocal.withInitial(StringVal::new);
+  private static final ThreadLocal<IntVal> tempIntVal = ThreadLocal.withInitial(IntVal::new);
+  private static final ThreadLocal<DoubleVal> tempDoubleVal =
+      ThreadLocal.withInitial(DoubleVal::new);
+  private static final ThreadLocal<BoolVal> tempBoolVal = ThreadLocal.withInitial(BoolVal::new);
+  private static final ThreadLocal<CharVal> tempCharVal = ThreadLocal.withInitial(CharVal::new);
+  private static final ThreadLocal<ObjectRef> tempObjectRef =
+      ThreadLocal.withInitial(ObjectRef::new);
+  private static final ThreadLocal<ListVal> tempListVal = ThreadLocal.withInitial(ListVal::new);
+  private static final ThreadLocal<MapVal> tempMapVal = ThreadLocal.withInitial(MapVal::new);
+  private static final ThreadLocal<ArrayVal> tempArrayVal =
+      ThreadLocal.withInitial(ArrayVal::new);
+  private static final ThreadLocal<CallbackRef> tempCallbackRef =
+      ThreadLocal.withInitial(CallbackRef::new);
 
   private final BufferAllocator allocator = new RootAllocator();
   private final ArrowMemoryHandler arrowHandler = new ArrowMemoryHandler(allocator);
@@ -158,6 +183,15 @@ public class GatunServer {
   private static java.lang.reflect.Field getInstanceField(Class<?> clazz, String fieldName)
       throws NoSuchFieldException {
     return ReflectionCache.getInstanceField(clazz, fieldName);
+  }
+
+  private static java.lang.invoke.VarHandle getInstanceVarHandle(Class<?> clazz, String fieldName) {
+    return ReflectionCache.getInstanceVarHandle(clazz, fieldName);
+  }
+
+  private static ReflectionCache.CachedStaticVarHandle getStaticVarHandle(
+      Class<?> clazz, String fieldName) {
+    return ReflectionCache.getStaticVarHandle(clazz, fieldName);
   }
 
   private static java.lang.reflect.Method[] getCachedMethods(Class<?> clazz) {
@@ -249,7 +283,7 @@ public class GatunServer {
       LOG.fine("Session " + sessionId + " SHM mapped at: " + sessionShmPath);
 
       // Set up session context for callbacks (captured by callback proxies)
-      SessionContext ctx = new SessionContext(client, sharedMem);
+      SessionContext ctx = new SessionContext(client, sharedMem, sessionObjectIds);
       sessionContext.set(ctx);
 
       // --- HANDSHAKE: Send Protocol Version, Memory Size, and SHM Path to Client ---
@@ -378,7 +412,7 @@ public class GatunServer {
               }
 
               var ctorResult = MethodResolver.findConstructorWithArgs(clazz, argTypes, javaArgs);
-              instance = ctorResult.constructor.newInstance(ctorResult.args);
+              instance = ctorResult.cached.newInstance(ctorResult.args);
             }
 
             long newId = objectIdCounter.getAndIncrement();
@@ -487,9 +521,16 @@ public class GatunServer {
 
             if (target == null) throw new RuntimeException("Object " + targetId + " not found");
 
-            java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
-            field.setAccessible(true);
-            result = field.get(target);
+            // Try VarHandle for faster access
+            java.lang.invoke.VarHandle vh = getInstanceVarHandle(target.getClass(), fieldName);
+            if (vh != null) {
+              result = vh.get(target);
+            } else {
+              // Fallback to Field
+              java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+              field.setAccessible(true);
+              result = field.get(target);
+            }
 
             // Wrap returned objects in registry
             if (result != null && !MethodResolver.isAutoConvertible(result)) {
@@ -512,9 +553,16 @@ public class GatunServer {
             Object[] converted = convertArgument(arg);
             Object value = converted[0];
 
-            java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
-            field.setAccessible(true);
-            field.set(target, value);
+            // Try VarHandle for faster access
+            java.lang.invoke.VarHandle vh = getInstanceVarHandle(target.getClass(), fieldName);
+            if (vh != null) {
+              vh.set(target, value);
+            } else {
+              // Fallback to Field
+              java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+              field.setAccessible(true);
+              field.set(target, value);
+            }
             result = null;
           }
           // --- ARROW BLOCK ---
@@ -629,8 +677,16 @@ public class GatunServer {
             }
 
             Class<?> clazz = getClass(className);
-            java.lang.reflect.Field field = getStaticField(clazz, fieldName);
-            result = field.get(null); // null for static field
+
+            // Try VarHandle for faster static field access
+            ReflectionCache.CachedStaticVarHandle svh = getStaticVarHandle(clazz, fieldName);
+            if (svh != null) {
+              result = svh.handle.get();
+            } else {
+              // Fallback to Field
+              java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+              result = field.get(null);
+            }
 
             // Wrap returned objects in registry
             if (result != null && !MethodResolver.isAutoConvertible(result)) {
@@ -662,8 +718,16 @@ public class GatunServer {
             Object value = converted[0];
 
             Class<?> clazz = getClass(className);
-            java.lang.reflect.Field field = getStaticField(clazz, fieldName);
-            field.set(null, value); // null for static field
+
+            // Try VarHandle for faster static field access
+            ReflectionCache.CachedStaticVarHandle svh = getStaticVarHandle(clazz, fieldName);
+            if (svh != null) {
+              svh.handle.set(value);
+            } else {
+              // Fallback to Field
+              java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+              field.set(null, value);
+            }
             result = null;
           } else if (cmd.action() == Action.Reflect) {
             // Reflection query: target_name is the fully qualified name to check
@@ -729,6 +793,152 @@ public class GatunServer {
             } catch (Exception e) {
               result = "none";
             }
+          } else if (cmd.action() == Action.GetFields) {
+            // Vectorized field reads: get multiple fields from one object
+            long targetId = cmd.targetId();
+            Object target = objectRegistry.get(targetId);
+            if (target == null) {
+              throw new RuntimeException("Object " + targetId + " not found");
+            }
+
+            GetFieldsRequest req = cmd.getFields();
+            if (req == null) {
+              throw new IllegalArgumentException("GetFields action requires get_fields field");
+            }
+
+            int fieldCount = req.fieldNamesLength();
+            java.util.ArrayList<Object> results = new java.util.ArrayList<>(fieldCount);
+
+            for (int i = 0; i < fieldCount; i++) {
+              String fieldName = req.fieldNames(i);
+
+              // Try VarHandle for faster access
+              java.lang.invoke.VarHandle vh = getInstanceVarHandle(target.getClass(), fieldName);
+              Object fieldValue;
+              if (vh != null) {
+                fieldValue = vh.get(target);
+              } else {
+                java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+                field.setAccessible(true);
+                fieldValue = field.get(target);
+              }
+
+              // Wrap non-auto-convertible objects
+              if (fieldValue != null && !MethodResolver.isAutoConvertible(fieldValue)) {
+                long newId = objectIdCounter.getAndIncrement();
+                objectRegistry.put(newId, fieldValue);
+                sessionObjectIds.add(newId);
+                fieldValue = new ObjectRefT(newId);
+              }
+              results.add(fieldValue);
+            }
+            result = results;  // Will be packed as ListVal
+
+          } else if (cmd.action() == Action.InvokeMethods) {
+            // Vectorized method calls: invoke multiple methods on same target
+            long targetId = cmd.targetId();
+            Object target = objectRegistry.get(targetId);
+            if (target == null) {
+              throw new RuntimeException("Object " + targetId + " not found");
+            }
+
+            InvokeMethodsRequest req = cmd.invokeMethods();
+            if (req == null) {
+              throw new IllegalArgumentException("InvokeMethods action requires invoke_methods field");
+            }
+
+            int callCount = req.methodCallsLength();
+            java.util.ArrayList<Object> results = new java.util.ArrayList<>(callCount);
+
+            for (int i = 0; i < callCount; i++) {
+              MethodCall call = req.methodCalls(i);
+              String methodName = call.methodName();
+              boolean returnObjectRef = call.returnObjectRef();
+
+              // Convert arguments
+              int argCount = call.argsLength();
+              Object[] javaArgs = new Object[argCount];
+              Class<?>[] argTypes = new Class<?>[argCount];
+              for (int j = 0; j < argCount; j++) {
+                Argument arg = call.args(j);
+                Object[] converted = convertArgument(arg);
+                javaArgs[j] = converted[0];
+                argTypes[j] = (Class<?>) converted[1];
+              }
+
+              // Invoke method
+              Object methodResult;
+              if (argCount == 0) {
+                MethodHandle handle = getNoArgMethodHandle(target.getClass(), methodName);
+                if (handle != null) {
+                  methodResult = handle.invoke(target);
+                } else {
+                  var mwa = MethodResolver.findMethodWithArgs(
+                      target.getClass(), methodName, argTypes, javaArgs);
+                  methodResult = mwa.cached.invoke(target, mwa.args);
+                }
+              } else {
+                var mwa = MethodResolver.findMethodWithArgs(
+                    target.getClass(), methodName, argTypes, javaArgs);
+                methodResult = mwa.cached.invoke(target, mwa.args);
+              }
+
+              // Wrap result if needed
+              if (methodResult != null && (returnObjectRef || !MethodResolver.isAutoConvertible(methodResult))) {
+                long newId = objectIdCounter.getAndIncrement();
+                objectRegistry.put(newId, methodResult);
+                sessionObjectIds.add(newId);
+                methodResult = new ObjectRefT(newId);
+              }
+              results.add(methodResult);
+            }
+            result = results;  // Will be packed as ListVal
+
+          } else if (cmd.action() == Action.CreateObjects) {
+            // Vectorized object creation: create multiple objects
+            CreateObjectsRequest req = cmd.createObjects();
+            if (req == null) {
+              throw new IllegalArgumentException("CreateObjects action requires create_objects field");
+            }
+
+            int objCount = req.objectsLength();
+            java.util.ArrayList<Object> results = new java.util.ArrayList<>(objCount);
+
+            for (int i = 0; i < objCount; i++) {
+              ObjectSpec spec = req.objects(i);
+              String className = spec.className();
+
+              if (!isClassAllowed(className)) {
+                throw new SecurityException("Class not allowed: " + className);
+              }
+
+              Class<?> clazz = getClass(className);
+              Object instance;
+
+              int argCount = spec.argsLength();
+              if (argCount == 0) {
+                instance = getNoArgConstructor(clazz).newInstance();
+              } else {
+                Object[] javaArgs = new Object[argCount];
+                Class<?>[] argTypes = new Class<?>[argCount];
+                for (int j = 0; j < argCount; j++) {
+                  Argument arg = spec.args(j);
+                  Object[] converted = convertArgument(arg);
+                  javaArgs[j] = converted[0];
+                  argTypes[j] = (Class<?>) converted[1];
+                }
+
+                var ctorResult = MethodResolver.findConstructorWithArgs(clazz, argTypes, javaArgs);
+                instance = ctorResult.cached.newInstance(ctorResult.args);
+              }
+
+              long newId = objectIdCounter.getAndIncrement();
+              objectRegistry.put(newId, instance);
+              sessionObjectIds.add(newId);
+              results.add(new ObjectRefT(newId));
+            }
+            result = results;  // Will be packed as ListVal of ObjectRefs
+
           } else if (cmd.action() == Action.Batch) {
             // Batch command: execute multiple sub-commands in sequence
             BatchCommand batch = cmd.batch();
@@ -869,8 +1079,9 @@ public class GatunServer {
     } catch (IOException e) {
       LOG.fine("Client session " + sessionId + " ended: " + e.getMessage());
     } finally {
-      // Cleanup orphans...
+      // Cleanup orphans: remove session objects and callbacks from global registries
       for (Long id : sessionObjectIds) objectRegistry.remove(id);
+      for (Long id : sessionCallbackIds) callbackRegistry.remove(id);
       // Clear thread-locals
       cancelledRequests.get().clear();
       currentRequestId.remove();
@@ -963,7 +1174,7 @@ public class GatunServer {
         }
 
         var ctorResult = MethodResolver.findConstructorWithArgs(clazz, argTypes, javaArgs);
-        instance = ctorResult.constructor.newInstance(ctorResult.args);
+        instance = ctorResult.cached.newInstance(ctorResult.args);
       }
 
       long newId = objectIdCounter.getAndIncrement();
@@ -1069,9 +1280,15 @@ public class GatunServer {
 
       if (target == null) throw new RuntimeException("Object " + targetId + " not found");
 
-      java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
-      field.setAccessible(true);
-      result = field.get(target);
+      // Try VarHandle for faster access
+      java.lang.invoke.VarHandle vh = getInstanceVarHandle(target.getClass(), fieldName);
+      if (vh != null) {
+        result = vh.get(target);
+      } else {
+        java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        result = field.get(target);
+      }
 
       if (result != null && !MethodResolver.isAutoConvertible(result)) {
         long newId = objectIdCounter.getAndIncrement();
@@ -1094,9 +1311,15 @@ public class GatunServer {
       Object[] converted = convertArgument(arg);
       Object value = converted[0];
 
-      java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
-      field.setAccessible(true);
-      field.set(target, value);
+      // Try VarHandle for faster access
+      java.lang.invoke.VarHandle vh = getInstanceVarHandle(target.getClass(), fieldName);
+      if (vh != null) {
+        vh.set(target, value);
+      } else {
+        java.lang.reflect.Field field = getInstanceField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+      }
       result = null;
 
     } else if (cmd.action() == Action.IsInstanceOf) {
@@ -1123,8 +1346,15 @@ public class GatunServer {
       }
 
       Class<?> clazz = getClass(className);
-      java.lang.reflect.Field field = getStaticField(clazz, fieldName);
-      result = field.get(null);
+
+      // Try VarHandle for faster access
+      ReflectionCache.CachedStaticVarHandle svh = getStaticVarHandle(clazz, fieldName);
+      if (svh != null) {
+        result = svh.handle.get();
+      } else {
+        java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+        result = field.get(null);
+      }
 
       if (result != null && !MethodResolver.isAutoConvertible(result)) {
         long newId = objectIdCounter.getAndIncrement();
@@ -1155,8 +1385,15 @@ public class GatunServer {
       Object value = converted[0];
 
       Class<?> clazz = getClass(className);
-      java.lang.reflect.Field field = getStaticField(clazz, fieldName);
-      field.set(null, value);
+
+      // Try VarHandle for faster access
+      ReflectionCache.CachedStaticVarHandle svh = getStaticVarHandle(clazz, fieldName);
+      if (svh != null) {
+        svh.handle.set(value);
+      } else {
+        java.lang.reflect.Field field = getStaticField(clazz, fieldName);
+        field.set(null, value);
+      }
       result = null;
 
     } else {
@@ -1174,12 +1411,15 @@ public class GatunServer {
     Object value;
     Class<?> type;
 
+    // Check for explicit type hint - used for overload resolution
+    String typeHint = arg.typeHint();
+
     if (valType == Value.StringVal) {
-      StringVal sv = (StringVal) arg.val(new StringVal());
+      StringVal sv = (StringVal) arg.val(tempStringVal.get());
       value = sv.v();
       type = String.class; // Use String for better overload resolution
     } else if (valType == Value.IntVal) {
-      IntVal iv = (IntVal) arg.val(new IntVal());
+      IntVal iv = (IntVal) arg.val(tempIntVal.get());
       long longVal = iv.v();
       // Check if value fits in int range; if so use int for common Java APIs
       // Otherwise use long to avoid overflow (e.g., epoch milliseconds for Timestamp)
@@ -1191,22 +1431,26 @@ public class GatunServer {
         type = long.class;
       }
     } else if (valType == Value.DoubleVal) {
-      DoubleVal dv = (DoubleVal) arg.val(new DoubleVal());
+      DoubleVal dv = (DoubleVal) arg.val(tempDoubleVal.get());
       value = dv.v();
       type = double.class;
     } else if (valType == Value.BoolVal) {
-      BoolVal bv = (BoolVal) arg.val(new BoolVal());
+      BoolVal bv = (BoolVal) arg.val(tempBoolVal.get());
       value = bv.v();
       type = boolean.class;
+    } else if (valType == Value.CharVal) {
+      CharVal cv = (CharVal) arg.val(tempCharVal.get());
+      value = (char) cv.v();  // Convert ushort to char
+      type = char.class;
     } else if (valType == Value.ObjectRef) {
-      ObjectRef ref = (ObjectRef) arg.val(new ObjectRef());
+      ObjectRef ref = (ObjectRef) arg.val(tempObjectRef.get());
       value = objectRegistry.get(ref.id());
       // Use actual object type for better overload resolution
       type = (value != null) ? value.getClass() : Object.class;
     } else if (valType == Value.ListVal) {
       // Convert Python list to Java ArrayList
       // Use fast path for homogeneous lists (all elements same type)
-      ListVal lv = (ListVal) arg.val(new ListVal());
+      ListVal lv = (ListVal) arg.val(tempListVal.get());
       int len = lv.itemsLength();
       java.util.ArrayList<Object> list = new java.util.ArrayList<>(len);
 
@@ -1223,8 +1467,9 @@ public class GatunServer {
             if (lv.items(i).valType() != Value.StringVal) allStrings = false;
           }
           if (allStrings) {
+            StringVal sv = tempStringVal.get();
             for (int i = 0; i < len; i++) {
-              StringVal sv = (StringVal) lv.items(i).val(new StringVal());
+              lv.items(i).val(sv);
               list.add(sv.v());
             }
           } else {
@@ -1241,8 +1486,9 @@ public class GatunServer {
             if (lv.items(i).valType() != Value.IntVal) allInts = false;
           }
           if (allInts) {
+            IntVal iv = tempIntVal.get();
             for (int i = 0; i < len; i++) {
-              IntVal iv = (IntVal) lv.items(i).val(new IntVal());
+              lv.items(i).val(iv);
               long longVal = iv.v();
               if (longVal >= Integer.MIN_VALUE && longVal <= Integer.MAX_VALUE) {
                 list.add((int) longVal);
@@ -1263,8 +1509,9 @@ public class GatunServer {
             if (lv.items(i).valType() != Value.DoubleVal) allDoubles = false;
           }
           if (allDoubles) {
+            DoubleVal dv = tempDoubleVal.get();
             for (int i = 0; i < len; i++) {
-              DoubleVal dv = (DoubleVal) lv.items(i).val(new DoubleVal());
+              lv.items(i).val(dv);
               list.add(dv.v());
             }
           } else {
@@ -1280,8 +1527,9 @@ public class GatunServer {
             if (lv.items(i).valType() != Value.ObjectRef) allRefs = false;
           }
           if (allRefs) {
+            ObjectRef ref = tempObjectRef.get();
             for (int i = 0; i < len; i++) {
-              ObjectRef ref = (ObjectRef) lv.items(i).val(new ObjectRef());
+              lv.items(i).val(ref);
               list.add(objectRegistry.get(ref.id()));
             }
           } else {
@@ -1302,7 +1550,7 @@ public class GatunServer {
       type = java.util.ArrayList.class;
     } else if (valType == Value.MapVal) {
       // Convert Python dict to Java HashMap
-      MapVal mv = (MapVal) arg.val(new MapVal());
+      MapVal mv = (MapVal) arg.val(tempMapVal.get());
       java.util.HashMap<Object, Object> map = new java.util.HashMap<>();
       for (int i = 0; i < mv.entriesLength(); i++) {
         MapEntry entry = mv.entries(i);
@@ -1314,10 +1562,22 @@ public class GatunServer {
       type = java.util.HashMap.class;
     } else if (valType == Value.NullVal) {
       value = null;
+      // Null cannot be assigned to primitive types
+      // If type hint specifies a primitive, this is an error
+      if (typeHint != null && !typeHint.isEmpty()) {
+        Class<?> hintedType = resolveTypeHint(typeHint);
+        if (hintedType.isPrimitive()) {
+          throw new IllegalArgumentException(
+              "Cannot pass null to primitive type: " + typeHint);
+        }
+        type = hintedType;
+        // Skip the type hint resolution below since we already handled it
+        return new Object[] {value, type};
+      }
       type = Object.class;
     } else if (valType == Value.ArrayVal) {
       // Convert ArrayVal to Java array
-      ArrayVal av = (ArrayVal) arg.val(new ArrayVal());
+      ArrayVal av = (ArrayVal) arg.val(tempArrayVal.get());
       value = convertArrayVal(av);
       type = value.getClass();
     } else {
@@ -1325,7 +1585,57 @@ public class GatunServer {
       type = Object.class;
     }
 
+    // If type hint is provided, use it for overload resolution instead of inferred type
+    if (typeHint != null && !typeHint.isEmpty()) {
+      type = resolveTypeHint(typeHint);
+    }
+
     return new Object[] {value, type};
+  }
+
+  /**
+   * Resolve a type hint string to a Class object. Supports primitives, boxed types, and fully
+   * qualified class names.
+   */
+  private Class<?> resolveTypeHint(String typeHint) {
+    // Handle primitive types
+    return switch (typeHint) {
+      case "int" -> int.class;
+      case "long" -> long.class;
+      case "double" -> double.class;
+      case "float" -> float.class;
+      case "boolean" -> boolean.class;
+      case "byte" -> byte.class;
+      case "short" -> short.class;
+      case "char" -> char.class;
+      case "void" -> void.class;
+      // Handle common boxed types (shortcuts)
+      case "Integer", "java.lang.Integer" -> Integer.class;
+      case "Long", "java.lang.Long" -> Long.class;
+      case "Double", "java.lang.Double" -> Double.class;
+      case "Float", "java.lang.Float" -> Float.class;
+      case "Boolean", "java.lang.Boolean" -> Boolean.class;
+      case "Byte", "java.lang.Byte" -> Byte.class;
+      case "Short", "java.lang.Short" -> Short.class;
+      case "Character", "java.lang.Character" -> Character.class;
+      case "String", "java.lang.String" -> String.class;
+      case "Object", "java.lang.Object" -> Object.class;
+      // Handle common collection interfaces (for better overload resolution)
+      case "List", "java.util.List" -> java.util.List.class;
+      case "Map", "java.util.Map" -> java.util.Map.class;
+      case "Set", "java.util.Set" -> java.util.Set.class;
+      case "Collection", "java.util.Collection" -> java.util.Collection.class;
+      case "Iterable", "java.lang.Iterable" -> Iterable.class;
+      default -> {
+        // Try to load class by fully qualified name
+        try {
+          yield Class.forName(typeHint);
+        } catch (ClassNotFoundException e) {
+          LOG.warning("Type hint class not found: " + typeHint + ", using Object.class");
+          yield Object.class;
+        }
+      }
+    };
   }
 
   // --- HELPER: Convert ArrayVal to Java array ---
@@ -1441,6 +1751,9 @@ public class GatunServer {
     } else if (value instanceof Boolean) {
       type = Value.BoolVal;
       valueOffset = BoolVal.createBoolVal(builder, (Boolean) value);
+    } else if (value instanceof Character) {
+      type = Value.CharVal;
+      valueOffset = CharVal.createCharVal(builder, (Character) value);
     } else if (value instanceof Integer
         || value instanceof Long
         || value instanceof Short
@@ -1666,7 +1979,7 @@ public class GatunServer {
       // Build callback arguments
       int[] argOffsets = new int[args.length];
       for (int i = 0; i < args.length; i++) {
-        int[] packed = packValue(builder, args[i], null);
+        int[] packed = packValue(builder, args[i], ctx.sessionObjectIds);
         Argument.startArgument(builder);
         Argument.addValType(builder, (byte) packed[0]);
         Argument.addVal(builder, packed[1]);
