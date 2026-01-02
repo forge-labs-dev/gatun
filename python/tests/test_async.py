@@ -250,3 +250,123 @@ class TestAsyncIsInstanceOf:
         """Test is_instance_of with unrelated class."""
         arr = await async_client.create_object("java.util.ArrayList")
         assert await async_client.is_instance_of(arr, "java.util.Map") is False
+
+
+class TestAsyncVectorizedAPIs:
+    """Test async vectorized APIs (get_fields, invoke_methods, create_objects)."""
+
+    @pytest.mark.asyncio
+    async def test_get_fields_basic(self, async_client):
+        """Test get_fields reads multiple fields in one round-trip."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "hello")
+
+        result = await async_client.get_fields(sb, ["count"])
+
+        assert result == [5]  # "hello" has 5 characters
+
+    @pytest.mark.asyncio
+    async def test_get_fields_with_object_id(self, async_client):
+        """Test get_fields accepts object_id directly."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "abc")
+
+        result = await async_client.get_fields(sb.object_id, ["count"])
+
+        assert result == [3]
+
+    @pytest.mark.asyncio
+    async def test_invoke_methods_basic(self, async_client):
+        """Test invoke_methods calls multiple methods in one round-trip."""
+        arr = await async_client.create_object("java.util.ArrayList")
+
+        results = await async_client.invoke_methods(
+            arr,
+            [
+                ("add", ("a",)),
+                ("add", ("b",)),
+                ("add", ("c",)),
+                ("size", ()),
+            ],
+        )
+
+        assert results == [True, True, True, 3]
+
+    @pytest.mark.asyncio
+    async def test_invoke_methods_with_args(self, async_client):
+        """Test invoke_methods with methods that take arguments."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "hello")
+
+        results = await async_client.invoke_methods(
+            sb,
+            [
+                ("append", (" ",)),
+                ("append", ("world",)),
+                ("toString", ()),
+            ],
+        )
+
+        assert results[2] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_invoke_methods_return_object_refs(self, async_client):
+        """Test invoke_methods with return_object_ref flag."""
+        arr = await async_client.create_object("java.util.ArrayList")
+        await arr.add("x")
+        await arr.add("y")
+
+        results = await async_client.invoke_methods(
+            arr,
+            [
+                ("size", ()),
+                ("subList", (0, 1)),
+            ],
+            return_object_refs=[False, True],
+        )
+
+        assert results[0] == 2
+        # Second result should be an AsyncJavaObject
+        assert isinstance(results[1], AsyncJavaObject)
+
+    @pytest.mark.asyncio
+    async def test_create_objects_basic(self, async_client):
+        """Test create_objects creates multiple objects in one round-trip."""
+        objects = await async_client.create_objects(
+            [
+                ("java.util.ArrayList", ()),
+                ("java.util.HashMap", ()),
+                ("java.util.HashSet", ()),
+            ]
+        )
+
+        assert len(objects) == 3
+
+        for obj in objects:
+            assert isinstance(obj, AsyncJavaObject)
+
+        # Verify types
+        assert await async_client.is_instance_of(objects[0], "java.util.ArrayList")
+        assert await async_client.is_instance_of(objects[1], "java.util.HashMap")
+        assert await async_client.is_instance_of(objects[2], "java.util.HashSet")
+
+    @pytest.mark.asyncio
+    async def test_create_objects_with_args(self, async_client):
+        """Test create_objects with constructor arguments."""
+        objects = await async_client.create_objects(
+            [
+                ("java.util.ArrayList", (100,)),  # with initial capacity
+                ("java.lang.StringBuilder", ("hello",)),
+            ]
+        )
+
+        assert len(objects) == 2
+
+        # StringBuilder should have the initial content
+        result = await objects[1].toString()
+        assert result == "hello"
+
+    @pytest.mark.asyncio
+    async def test_create_objects_single(self, async_client):
+        """Test create_objects with single object."""
+        objects = await async_client.create_objects([("java.util.ArrayList", ())])
+
+        assert len(objects) == 1
+        assert await async_client.is_instance_of(objects[0], "java.util.ArrayList")

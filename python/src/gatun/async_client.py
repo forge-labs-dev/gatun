@@ -38,7 +38,15 @@ from gatun.client import (
 )
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
-from gatun.generated.org.gatun.protocol import Response, Value
+from gatun.generated.org.gatun.protocol import (
+    Response,
+    Value,
+    GetFieldsRequest,
+    InvokeMethodsRequest,
+    MethodCall,
+    CreateObjectsRequest,
+    ObjectSpec,
+)
 
 # Default thread pool for run_sync
 _default_executor: Optional[ThreadPoolExecutor] = None
@@ -681,6 +689,212 @@ class AsyncGatunClient:
         Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
         Cmd.CommandAddTargetId(builder, obj_id)
         Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return await self._send_raw(builder.Output())
+
+    async def get_fields(self, obj, field_names: list[str]) -> list:
+        """Get multiple field values from a Java object in a single round-trip.
+
+        This is more efficient than calling get_field() multiple times when
+        you need to read several fields from the same object.
+
+        Args:
+            obj: AsyncJavaObject instance or object ID
+            field_names: List of field names to read
+
+        Returns:
+            List of field values in the same order as field_names.
+
+        Example:
+            sb = await client.create_object("java.lang.StringBuilder", "hello")
+            values = await client.get_fields(sb, ["count"])  # [5]
+        """
+        if isinstance(obj, (JavaObject, AsyncJavaObject)):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        builder = flatbuffers.Builder(1024)
+
+        # Build field names vector (strings must be created before the table)
+        field_name_offsets = [builder.CreateString(name) for name in field_names]
+        GetFieldsRequest.StartFieldNamesVector(builder, len(field_name_offsets))
+        for offset in reversed(field_name_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        field_names_vec = builder.EndVector()
+
+        # Build GetFieldsRequest
+        GetFieldsRequest.Start(builder)
+        GetFieldsRequest.AddFieldNames(builder, field_names_vec)
+        get_fields_off = GetFieldsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetFields)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddGetFields(builder, get_fields_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return await self._send_raw(builder.Output())
+
+    async def invoke_methods(
+        self,
+        obj,
+        calls: list[tuple[str, tuple]],
+        return_object_refs: bool | list[bool] = False,
+    ) -> list:
+        """Invoke multiple methods on the same Java object in a single round-trip.
+
+        This is more efficient than calling invoke_method() multiple times when
+        you need to call several methods on the same object.
+
+        Args:
+            obj: AsyncJavaObject instance or object ID
+            calls: List of (method_name, args_tuple) pairs.
+                   Each tuple is (method_name, (arg1, arg2, ...))
+            return_object_refs: If True (or list of bools), return results as
+                               ObjectRefs instead of auto-converting to Python.
+
+        Returns:
+            List of results in the same order as calls.
+
+        Example:
+            arr = await client.create_object("java.util.ArrayList")
+            results = await client.invoke_methods(arr, [
+                ("add", ("a",)),
+                ("add", ("b",)),
+                ("size", ()),
+            ])
+            # results = [True, True, 2]
+        """
+        if isinstance(obj, (JavaObject, AsyncJavaObject)):
+            obj_id = obj.object_id
+        else:
+            obj_id = obj
+
+        # Normalize return_object_refs to a list
+        if isinstance(return_object_refs, bool):
+            return_object_refs = [return_object_refs] * len(calls)
+
+        builder = flatbuffers.Builder(4096)
+
+        # Build each MethodCall
+        method_call_offsets = []
+        for i, (method_name, args) in enumerate(calls):
+            # Build method name string
+            method_name_off = builder.CreateString(method_name)
+
+            # Build arguments
+            arg_offsets = []
+            for arg in args:
+                arg_offset = self._build_argument(builder, arg)
+                arg_offsets.append(arg_offset)
+
+            args_vec = None
+            if arg_offsets:
+                MethodCall.StartArgsVector(builder, len(arg_offsets))
+                for offset in reversed(arg_offsets):
+                    builder.PrependUOffsetTRelative(offset)
+                args_vec = builder.EndVector()
+
+            # Build MethodCall
+            MethodCall.Start(builder)
+            MethodCall.AddMethodName(builder, method_name_off)
+            if args_vec:
+                MethodCall.AddArgs(builder, args_vec)
+            if return_object_refs[i]:
+                MethodCall.AddReturnObjectRef(builder, True)
+            method_call_offsets.append(MethodCall.End(builder))
+
+        # Build method calls vector
+        InvokeMethodsRequest.StartMethodCallsVector(builder, len(method_call_offsets))
+        for offset in reversed(method_call_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        method_calls_vec = builder.EndVector()
+
+        # Build InvokeMethodsRequest
+        InvokeMethodsRequest.Start(builder)
+        InvokeMethodsRequest.AddMethodCalls(builder, method_calls_vec)
+        invoke_methods_off = InvokeMethodsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.InvokeMethods)
+        Cmd.CommandAddTargetId(builder, obj_id)
+        Cmd.CommandAddInvokeMethods(builder, invoke_methods_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return await self._send_raw(builder.Output())
+
+    async def create_objects(
+        self, specs: list[tuple[str, tuple]]
+    ) -> list["AsyncJavaObject"]:
+        """Create multiple Java objects in a single round-trip.
+
+        This is more efficient than calling create_object() multiple times when
+        you need to create several objects.
+
+        Args:
+            specs: List of (class_name, args_tuple) pairs.
+                   Each tuple is (fully_qualified_class_name, (arg1, arg2, ...))
+
+        Returns:
+            List of AsyncJavaObject instances in the same order as specs.
+
+        Example:
+            lists = await client.create_objects([
+                ("java.util.ArrayList", ()),
+                ("java.util.ArrayList", (100,)),
+                ("java.util.HashMap", ()),
+            ])
+        """
+        builder = flatbuffers.Builder(4096)
+
+        # Build each ObjectSpec
+        object_spec_offsets = []
+        for class_name, args in specs:
+            # Build class name string
+            class_name_off = builder.CreateString(class_name)
+
+            # Build arguments
+            arg_offsets = []
+            for arg in args:
+                arg_offset = self._build_argument(builder, arg)
+                arg_offsets.append(arg_offset)
+
+            args_vec = None
+            if arg_offsets:
+                ObjectSpec.StartArgsVector(builder, len(arg_offsets))
+                for offset in reversed(arg_offsets):
+                    builder.PrependUOffsetTRelative(offset)
+                args_vec = builder.EndVector()
+
+            # Build ObjectSpec
+            ObjectSpec.Start(builder)
+            ObjectSpec.AddClassName(builder, class_name_off)
+            if args_vec:
+                ObjectSpec.AddArgs(builder, args_vec)
+            object_spec_offsets.append(ObjectSpec.End(builder))
+
+        # Build objects vector
+        CreateObjectsRequest.StartObjectsVector(builder, len(object_spec_offsets))
+        for offset in reversed(object_spec_offsets):
+            builder.PrependUOffsetTRelative(offset)
+        objects_vec = builder.EndVector()
+
+        # Build CreateObjectsRequest
+        CreateObjectsRequest.Start(builder)
+        CreateObjectsRequest.AddObjects(builder, objects_vec)
+        create_objects_off = CreateObjectsRequest.End(builder)
+
+        # Build Command
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.CreateObjects)
+        Cmd.CommandAddCreateObjects(builder, create_objects_off)
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
