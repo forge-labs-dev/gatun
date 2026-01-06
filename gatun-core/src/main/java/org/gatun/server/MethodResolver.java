@@ -289,10 +289,17 @@ public final class MethodResolver {
 
   /**
    * Check if argTypes are compatible with varargs method/constructor params.
+   *
+   * <p>Handles two cases:
+   * <ol>
+   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly</li>
+   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args spread</li>
+   * </ol>
    */
   public static boolean isVarargsCompatible(Class<?>[] paramTypes, Class<?>[] argTypes) {
     int fixedCount = paramTypes.length - 1;
-    Class<?> varargComponentType = paramTypes[fixedCount].getComponentType();
+    Class<?> varargArrayType = paramTypes[fixedCount];
+    Class<?> varargComponentType = varargArrayType.getComponentType();
 
     // Check fixed parameters match
     for (int i = 0; i < fixedCount; i++) {
@@ -301,7 +308,16 @@ public final class MethodResolver {
       }
     }
 
-    // Check vararg parameters match
+    // Case 1: "Packed" - array passed directly to varargs parameter
+    // e.g., m(String... xs) called with m(new String[]{"a","b"})
+    if (argTypes.length == paramTypes.length) {
+      Class<?> lastArgType = argTypes[fixedCount];
+      if (isAssignable(varargArrayType, lastArgType)) {
+        return true;
+      }
+    }
+
+    // Case 2: "Spread" - individual args that need to be packed into array
     for (int i = fixedCount; i < argTypes.length; i++) {
       if (!isAssignable(varargComponentType, argTypes[i])) {
         return false;
@@ -313,12 +329,19 @@ public final class MethodResolver {
   /**
    * Try to match varargs method and repack arguments.
    *
+   * <p>Handles two cases:
+   * <ol>
+   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly</li>
+   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args need repacking</li>
+   * </ol>
+   *
    * @return repacked arguments if compatible, null otherwise
    */
   public static Object[] tryVarargsMatch(
       Class<?>[] paramTypes, Class<?>[] argTypes, Object[] args) {
     int fixedCount = paramTypes.length - 1;
-    Class<?> varargComponentType = paramTypes[fixedCount].getComponentType();
+    Class<?> varargArrayType = paramTypes[fixedCount];
+    Class<?> varargComponentType = varargArrayType.getComponentType();
 
     // Check fixed parameters match
     for (int i = 0; i < fixedCount; i++) {
@@ -327,7 +350,19 @@ public final class MethodResolver {
       }
     }
 
-    // Check vararg parameters match
+    // Case 1: "Packed" - array passed directly to varargs parameter
+    // e.g., m(String... xs) called with m(new String[]{"a","b"})
+    // In this case, pass args through without repacking
+    if (argTypes.length == paramTypes.length) {
+      Class<?> lastArgType = argTypes[fixedCount];
+      if (isAssignable(varargArrayType, lastArgType)) {
+        // Args are already in correct form, return as-is
+        return args;
+      }
+    }
+
+    // Case 2: "Spread" - individual args that need to be packed into array
+    // Check vararg parameters match component type
     for (int i = fixedCount; i < argTypes.length; i++) {
       if (!isAssignable(varargComponentType, argTypes[i])) {
         return null;

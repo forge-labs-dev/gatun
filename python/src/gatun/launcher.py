@@ -2,9 +2,11 @@ import atexit
 import logging
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import time
+import weakref
 from pathlib import Path
 
 from gatun.config import get_config
@@ -14,6 +16,44 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 MODULE_DIR = Path(__file__).parent.resolve()
 JAR_PATH = MODULE_DIR / "jars" / "gatun-server-all.jar"
+
+# Track all active sessions for cleanup on signals
+_active_sessions: weakref.WeakSet["GatunSession"] = weakref.WeakSet()
+_signal_handlers_installed = False
+
+
+def _cleanup_all_sessions():
+    """Stop all active sessions."""
+    for session in list(_active_sessions):
+        try:
+            session.stop()
+        except Exception:
+            pass
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT by cleaning up sessions."""
+    _cleanup_all_sessions()
+    # Re-raise the signal to exit
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def _install_signal_handlers():
+    """Install signal handlers for cleanup (once per process)."""
+    global _signal_handlers_installed
+    if _signal_handlers_installed:
+        return
+    _signal_handlers_installed = True
+
+    # Only install handlers if we're not already handling these signals
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            current = signal.getsignal(sig)
+            if current in (signal.SIG_DFL, signal.SIG_IGN, None):
+                signal.signal(sig, _signal_handler)
+        except (OSError, ValueError):
+            pass  # Can't set signal handler (e.g., not main thread)
 
 # JVM Flags required for Apache Arrow & Netty (Java 21+)
 # Also includes flags needed for Spark's Kryo serialization
@@ -61,6 +101,9 @@ class GatunSession:
                     os.unlink(path)
             except OSError:
                 pass  # Ignore cleanup errors
+
+        # Remove from active sessions
+        _active_sessions.discard(self)
 
 
 def launch_gateway(
@@ -221,6 +264,8 @@ def launch_gateway(
 
     # 5. Register Cleanup
     session = GatunSession(process, socket_path, mem_bytes)
+    _active_sessions.add(session)
     atexit.register(session.stop)
+    _install_signal_handlers()
 
     return session
