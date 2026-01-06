@@ -159,3 +159,36 @@ def test_varargs_spread_vs_packed(client):
     assert spread_result == ["a", "b", "c"]
     # Note: packed_result might differ based on how Java handles it
     # The key is that it doesn't error and produces a valid list
+
+
+def test_varargs_specificity_prefers_specific_types(client):
+    """Test that varargs scoring prefers more specific types.
+
+    String.format has overloads:
+    - format(String, Object...)
+    - format(Locale, String, Object...)
+
+    When called with strings, it should pick the right one based on specificity.
+    """
+    String = client.jvm.java.lang.String
+
+    # This should resolve to format(String, Object...) not format(Locale, String, Object...)
+    result = String.format("Hello %s!", "World")
+    assert result == "Hello World!"
+
+    # Multiple args should still work
+    result = String.format("%s + %s = %d", "1", "2", 3)
+    assert result == "1 + 2 = 3"
+
+
+def test_varargs_specificity_with_numbers(client):
+    """Test that varargs specificity works with numeric types."""
+    Arrays = client.jvm.java.util.Arrays
+
+    # Arrays.asList with integers - should pick Object... and box them
+    result = Arrays.asList(1, 2, 3)
+    assert result == [1, 2, 3]
+
+    # With strings - more specific match
+    result = Arrays.asList("x", "y")
+    assert result == ["x", "y"]

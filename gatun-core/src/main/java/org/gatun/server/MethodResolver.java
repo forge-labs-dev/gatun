@@ -120,9 +120,9 @@ public final class MethodResolver {
       // Check for varargs match
       if (m.isVarArgs() && argTypes.length >= paramTypes.length - 1) {
         if (isVarargsCompatible(paramTypes, argTypes)) {
-          // Score: varargs gets lower priority (100 - fixedCount)
+          // Score varargs with specificity (but lower base than non-varargs)
           int fixedCount = paramTypes.length - 1;
-          int score = 100 - fixedCount;
+          int score = getVarargsSpecificity(paramTypes, argTypes, fixedCount);
           if (bestScore < score) {
             bestMatch = m;
             bestScore = score;
@@ -245,7 +245,8 @@ public final class MethodResolver {
       // Check for varargs match
       if (c.isVarArgs() && argTypes.length >= paramTypes.length - 1) {
         if (isVarargsCompatible(paramTypes, argTypes)) {
-          int score = 100; // Varargs gets lower priority
+          int fixedCount = paramTypes.length - 1;
+          int score = getVarargsSpecificity(paramTypes, argTypes, fixedCount);
           if (bestScore < score) {
             bestMatch = c;
             bestScore = score;
@@ -324,6 +325,46 @@ public final class MethodResolver {
       }
     }
     return true;
+  }
+
+  /**
+   * Calculate specificity score for varargs method/constructor.
+   *
+   * <p>Score components:
+   * <ul>
+   *   <li>Base: 100 (lower than non-varargs base of 1000)</li>
+   *   <li>Fixed params: sum of getTypeSpecificity for each</li>
+   *   <li>Varargs: specificity of packed array or spread elements</li>
+   *   <li>Penalty: -1 per fixed param (prefer fewer fixed params on tie)</li>
+   * </ul>
+   */
+  public static int getVarargsSpecificity(Class<?>[] paramTypes, Class<?>[] argTypes, int fixedCount) {
+    int specificity = 0;
+
+    // Score fixed parameters
+    for (int i = 0; i < fixedCount; i++) {
+      specificity += getTypeSpecificity(paramTypes[i], argTypes[i]);
+    }
+
+    Class<?> varargArrayType = paramTypes[fixedCount];
+    Class<?> varargComponentType = varargArrayType.getComponentType();
+
+    // Check if "packed" case (array passed directly)
+    if (argTypes.length == paramTypes.length) {
+      Class<?> lastArgType = argTypes[fixedCount];
+      if (isAssignable(varargArrayType, lastArgType)) {
+        // Packed: score the array type match
+        specificity += getTypeSpecificity(varargArrayType, lastArgType);
+        return 100 + specificity - fixedCount;
+      }
+    }
+
+    // "Spread" case: score each vararg element
+    for (int i = fixedCount; i < argTypes.length; i++) {
+      specificity += getTypeSpecificity(varargComponentType, argTypes[i]);
+    }
+
+    return 100 + specificity - fixedCount;
   }
 
   /**
