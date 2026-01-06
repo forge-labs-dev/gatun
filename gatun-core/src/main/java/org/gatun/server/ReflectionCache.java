@@ -73,8 +73,11 @@ public final class ReflectionCache {
       new ConcurrentHashMap<>();
 
   // --- CLASS CACHE ---
-  // Caches Class.forName() results
-  private static final Map<String, Class<?>> classCache = new ConcurrentHashMap<>();
+  // Caches Class.forName() results, keyed by (ClassLoader, className) to be classloader-safe.
+  // Uses WeakHashMap for classloaders to avoid memory leaks when loaders are GC'd (e.g., Spark).
+  // Inner map is ConcurrentHashMap for thread-safety within a loader.
+  private static final Map<ClassLoader, Map<String, Class<?>>> classCache =
+      java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
   /** Lookup for converting Methods to MethodHandles. */
   public static final MethodHandles.Lookup METHOD_LOOKUP = MethodHandles.publicLookup();
@@ -247,29 +250,52 @@ public final class ReflectionCache {
   // ========== CLASS CACHE ==========
 
   /**
-   * Get a class by name, using cache.
+   * Get the effective classloader for class lookups.
+   * Prefers thread context classloader (used by Spark), falls back to system loader.
+   */
+  private static ClassLoader getEffectiveClassLoader() {
+    ClassLoader cl = Thread.currentThread().getContextClassLoader();
+    return cl != null ? cl : ClassLoader.getSystemClassLoader();
+  }
+
+  /**
+   * Get or create the class name map for a classloader.
+   */
+  private static Map<String, Class<?>> getClassMapForLoader(ClassLoader loader) {
+    return classCache.computeIfAbsent(loader, k -> new ConcurrentHashMap<>());
+  }
+
+  /**
+   * Get a class by name, using cache. Classloader-safe for Spark/dynamic loaders.
    */
   public static Class<?> getClass(String className) throws ClassNotFoundException {
-    Class<?> clazz = classCache.get(className);
+    ClassLoader loader = getEffectiveClassLoader();
+    Map<String, Class<?>> loaderCache = getClassMapForLoader(loader);
+
+    Class<?> clazz = loaderCache.get(className);
     if (clazz != null) {
       return clazz;
     }
-    clazz = Class.forName(className);
-    classCache.put(className, clazz);
+    clazz = Class.forName(className, true, loader);
+    loaderCache.put(className, clazz);
     return clazz;
   }
 
   /**
    * Try to get a class by name without throwing. Returns null if not found.
+   * Classloader-safe for Spark/dynamic loaders.
    */
   public static Class<?> tryGetClass(String className) {
-    Class<?> clazz = classCache.get(className);
+    ClassLoader loader = getEffectiveClassLoader();
+    Map<String, Class<?>> loaderCache = getClassMapForLoader(loader);
+
+    Class<?> clazz = loaderCache.get(className);
     if (clazz != null) {
       return clazz;
     }
     try {
-      clazz = Class.forName(className);
-      classCache.put(className, clazz);
+      clazz = Class.forName(className, true, loader);
+      loaderCache.put(className, clazz);
       return clazz;
     } catch (ClassNotFoundException e) {
       return null;

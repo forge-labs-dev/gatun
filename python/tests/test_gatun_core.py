@@ -861,3 +861,48 @@ def test_cache_with_different_arg_types(client):
     assert results[3] == "100"
     assert results[4] == "false"
     assert results[5] == "2.71"
+
+
+def test_class_cache_with_various_types(client):
+    """Test that class cache works correctly with various class types.
+
+    This exercises the classloader-safe class cache by loading classes
+    from different packages and verifying they work correctly.
+    """
+    # Load various classes - these should be cached per classloader
+    classes_to_test = [
+        ("java.util.ArrayList", "add", "item1"),
+        ("java.util.HashMap", "put", "key"),
+        ("java.util.HashSet", "add", "elem"),
+        ("java.lang.StringBuilder", "append", "text"),
+        ("java.util.LinkedList", "add", "node"),
+        ("java.util.TreeMap", "put", "treekey"),
+    ]
+
+    for class_name, method, arg in classes_to_test:
+        obj = client.create_object(class_name)
+        # Call a method to verify the class was loaded correctly
+        if method == "put":
+            obj.put(arg, "value")
+            assert obj.get(arg) == "value"
+        else:
+            obj.add(arg) if method == "add" else obj.append(arg)
+            assert obj.size() == 1 if method == "add" else len(obj.toString()) > 0
+
+
+def test_class_cache_repeated_loads(client):
+    """Test that repeated class loads use cache correctly."""
+    # Create many objects of the same type - should hit cache
+    for _ in range(50):
+        obj = client.create_object("java.util.ArrayList")
+        obj.add("test")
+        assert obj.size() == 1
+
+    # Create many objects of different types in interleaved pattern
+    for i in range(20):
+        if i % 2 == 0:
+            obj = client.create_object("java.util.ArrayList")
+        else:
+            obj = client.create_object("java.util.HashMap")
+        # Just verify they work
+        assert obj is not None
