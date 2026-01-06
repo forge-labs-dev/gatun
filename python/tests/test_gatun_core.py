@@ -801,3 +801,63 @@ def test_multi_client_shm_cleanup(java_gateway):
     time.sleep(0.1)
 
     assert not os.path.exists(shm_path), "SHM file should be deleted after disconnect"
+
+
+def test_method_cache_consistency_under_repeated_calls(client):
+    """Test that method resolution cache works correctly with repeated calls.
+
+    This is a regression test for cache key stability - the cache keys must
+    defensively copy argTypes arrays to avoid corruption if caller reuses arrays.
+    """
+    # Make many repeated calls with the same signature
+    # This exercises the cache hit path
+    results = []
+    for i in range(100):
+        result = client.invoke_static_method("java.lang.Integer", "parseInt", str(i))
+        results.append(result)
+
+    # Verify all results are correct
+    assert results == list(range(100))
+
+
+def test_constructor_cache_consistency(client):
+    """Test that constructor resolution cache works correctly."""
+    # Create many objects with the same constructor signature
+    objects = []
+    for i in range(50):
+        obj = client.create_object("java.util.ArrayList", i)  # ArrayList(int initialCapacity)
+        objects.append(obj)
+
+    # Verify all objects work correctly
+    for i, obj in enumerate(objects):
+        # Each should be an empty ArrayList
+        assert obj.size() == 0
+        obj.add(f"item_{i}")
+        assert obj.size() == 1
+
+
+def test_cache_with_different_arg_types(client):
+    """Test that cache distinguishes between different argument types."""
+    # These should resolve to different overloads and be cached separately
+    results = []
+
+    # String.valueOf(int)
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", 42))
+
+    # String.valueOf(boolean)
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", True))
+
+    # String.valueOf(double)
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", 3.14))
+
+    # Repeat to exercise cache hits
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", 100))
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", False))
+    results.append(client.invoke_static_method("java.lang.String", "valueOf", 2.71))
+
+    assert results[0] == "42"
+    assert results[1] == "true"
+    assert results[2] == "3.14"
+    assert results[3] == "100"
+    assert results[4] == "false"
+    assert results[5] == "2.71"

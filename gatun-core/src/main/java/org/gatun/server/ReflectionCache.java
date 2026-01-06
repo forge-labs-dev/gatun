@@ -320,10 +320,11 @@ public final class ReflectionCache {
     public MethodCacheKey(Class<?> clazz, String methodName, Class<?>[] argTypes) {
       this.clazz = clazz;
       this.methodName = methodName;
-      this.argTypes = argTypes;
+      // Defensive copy to protect against caller mutating the array
+      this.argTypes = argTypes.clone();
       // Pre-compute hash for faster lookups
       int h = clazz.hashCode() * 31 + methodName.hashCode();
-      for (Class<?> t : argTypes) {
+      for (Class<?> t : this.argTypes) {
         h = h * 31 + (t != null ? t.hashCode() : 0);
       }
       this.hashCode = h;
@@ -439,9 +440,10 @@ public final class ReflectionCache {
 
     public ConstructorCacheKey(Class<?> clazz, Class<?>[] argTypes) {
       this.clazz = clazz;
-      this.argTypes = argTypes;
+      // Defensive copy to protect against caller mutating the array
+      this.argTypes = argTypes.clone();
       int h = clazz.hashCode();
-      for (Class<?> t : argTypes) {
+      for (Class<?> t : this.argTypes) {
         h = h * 31 + (t != null ? t.hashCode() : 0);
       }
       this.hashCode = h;
