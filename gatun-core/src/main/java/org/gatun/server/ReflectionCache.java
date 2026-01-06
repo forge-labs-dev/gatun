@@ -398,14 +398,22 @@ public final class ReflectionCache {
       MethodHandle h = null;
       try {
         h = METHOD_LOOKUP.unreflect(method);
-        // For varargs methods, convert to collector so invokeWithArguments works naturally
-        if (isVarArgs && h != null) {
-          Class<?>[] paramTypes = method.getParameterTypes();
-          h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
-        }
       } catch (IllegalAccessException e) {
-        // Fall back to Method.invoke - make accessible for private inner classes (e.g. ArrayList$Itr)
-        method.setAccessible(true);
+        // Try privateLookupIn for better access (JDK 9+)
+        // This works for private inner classes (e.g. ArrayList$Itr) and unnamed modules
+        try {
+          method.setAccessible(true);
+          MethodHandles.Lookup privateLookup =
+              MethodHandles.privateLookupIn(method.getDeclaringClass(), MethodHandles.lookup());
+          h = privateLookup.unreflect(method);
+        } catch (IllegalAccessException | IllegalArgumentException ex) {
+          // Final fallback: use Method.invoke (slower but always works)
+        }
+      }
+      // For varargs methods, convert to collector so invokeWithArguments works naturally
+      if (isVarArgs && h != null) {
+        Class<?>[] paramTypes = method.getParameterTypes();
+        h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
       }
       this.handle = h;
       this.isStatic = java.lang.reflect.Modifier.isStatic(method.getModifiers());
@@ -515,13 +523,21 @@ public final class ReflectionCache {
       MethodHandle h = null;
       try {
         h = METHOD_LOOKUP.unreflectConstructor(constructor);
-        // For varargs constructors, convert to collector
-        if (isVarArgs && h != null) {
-          Class<?>[] paramTypes = constructor.getParameterTypes();
-          h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
-        }
       } catch (IllegalAccessException e) {
-        // Fall back to null - will use Constructor.newInstance
+        // Try privateLookupIn for better access (JDK 9+)
+        try {
+          constructor.setAccessible(true);
+          MethodHandles.Lookup privateLookup =
+              MethodHandles.privateLookupIn(constructor.getDeclaringClass(), MethodHandles.lookup());
+          h = privateLookup.unreflectConstructor(constructor);
+        } catch (IllegalAccessException | IllegalArgumentException ex) {
+          // Final fallback: use Constructor.newInstance (slower but always works)
+        }
+      }
+      // For varargs constructors, convert to collector
+      if (isVarArgs && h != null) {
+        Class<?>[] paramTypes = constructor.getParameterTypes();
+        h = h.asVarargsCollector(paramTypes[paramTypes.length - 1]);
       }
       this.handle = h;
     }
