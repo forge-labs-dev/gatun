@@ -4,6 +4,8 @@ import org.gatun.server.ReflectionCache.CachedConstructor;
 import org.gatun.server.ReflectionCache.CachedMethod;
 import org.gatun.server.ReflectionCache.ConstructorCacheKey;
 import org.gatun.server.ReflectionCache.MethodCacheKey;
+import org.gatun.server.observability.GatunEvents;
+import org.gatun.server.observability.StructuredLogger;
 
 /**
  * Handles method and constructor resolution with overload matching.
@@ -130,11 +132,58 @@ public final class MethodResolver {
     }
 
     if (bestMatch != null) {
+      // Emit trace logging and JFR event for method resolution
+      if (StructuredLogger.isTraceEnabled()) {
+        int candidateCount = countCandidates(clazz, name);
+        String chosenMethod = formatMethod(bestMatch);
+        StructuredLogger.logMethodResolution(
+            clazz.getName(), name, candidateCount, chosenMethod, bestScore, argTypes);
+        GatunEvents.emitMethodResolution(
+            clazz.getName(), name, candidateCount, chosenMethod, bestScore, formatArgTypes(argTypes));
+      }
       return bestMatch;
     }
 
     throw new NoSuchMethodException(
         "No matching method: " + name + " with " + argTypes.length + " args");
+  }
+
+  /** Count candidate methods with matching name (for tracing). */
+  private static int countCandidates(Class<?> clazz, String name) {
+    int count = 0;
+    for (java.lang.reflect.Method m : ReflectionCache.getCachedMethods(clazz)) {
+      if (m.getName().equals(name)) count++;
+    }
+    return count;
+  }
+
+  /** Format method signature for logging. */
+  private static String formatMethod(java.lang.reflect.Method m) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(m.getName()).append("(");
+    Class<?>[] params = m.getParameterTypes();
+    for (int i = 0; i < params.length; i++) {
+      if (i > 0) sb.append(",");
+      sb.append(params[i].getSimpleName());
+      if (m.isVarArgs() && i == params.length - 1) {
+        sb.setLength(sb.length() - 2); // Remove "[]"
+        sb.append("...");
+      }
+    }
+    sb.append(")");
+    return sb.toString();
+  }
+
+  /** Format argument types for logging. */
+  private static String formatArgTypes(Class<?>[] argTypes) {
+    if (argTypes == null || argTypes.length == 0) return "[]";
+    StringBuilder sb = new StringBuilder("[");
+    for (int i = 0; i < argTypes.length; i++) {
+      if (i > 0) sb.append(",");
+      sb.append(argTypes[i] != null ? argTypes[i].getSimpleName() : "null");
+    }
+    sb.append("]");
+    return sb.toString();
   }
 
   // ========== CONSTRUCTOR RESOLUTION ==========

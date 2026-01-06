@@ -352,3 +352,127 @@ class TestCallbackCleanup:
 
         # Callback should be removed from client's registry
         assert callback_id not in client._callbacks
+
+
+class TestReentrancyDetection:
+    """Test that nested Java calls from callbacks are detected and prevented."""
+
+    def test_nested_call_raises_reentrancy_error(self, client):
+        """Test that calling Java from within a callback raises ReentrancyError."""
+        from gatun import ReentrancyError
+
+        nested_call_attempted = [False]
+        error_caught = [None]
+
+        def reentrant_callback(a, b):
+            """Callback that tries to make a nested Java call."""
+            nested_call_attempted[0] = True
+            try:
+                # This should raise ReentrancyError
+                client.create_object("java.util.ArrayList")
+            except ReentrancyError as e:
+                error_caught[0] = e
+                raise  # Re-raise so Java sees the error
+            return 0
+
+        comparator = client.register_callback(
+            reentrant_callback, "java.util.Comparator"
+        )
+
+        arr = client.create_object("java.util.ArrayList")
+        arr.add("b")
+        arr.add("a")
+
+        # The sort will trigger the callback, which will try to make a nested call
+        with pytest.raises(JavaException) as excinfo:
+            client.invoke_static_method(
+                "java.util.Collections", "sort", arr, comparator
+            )
+
+        # Verify the callback was called and the error was caught
+        assert nested_call_attempted[0], "Callback was not invoked"
+        assert error_caught[0] is not None, "ReentrancyError was not caught in callback"
+        assert "ReentrancyError" in str(excinfo.value)
+
+    def test_nested_invoke_method_raises_reentrancy_error(self, client):
+        """Test that invoke_method from callback also raises ReentrancyError."""
+        from gatun import ReentrancyError
+
+        # Create an object before the callback
+        other_arr = client.create_object("java.util.ArrayList")
+        error_caught = [None]
+
+        def reentrant_invoke_callback(a, b):
+            try:
+                # Try to call a method on an existing object - should fail
+                client.invoke_method(other_arr.object_id, "size")
+            except ReentrancyError as e:
+                error_caught[0] = e
+                raise
+            return 0
+
+        comparator = client.register_callback(
+            reentrant_invoke_callback, "java.util.Comparator"
+        )
+
+        arr = client.create_object("java.util.ArrayList")
+        arr.add("x")
+        arr.add("y")
+
+        with pytest.raises(JavaException):
+            client.invoke_static_method(
+                "java.util.Collections", "sort", arr, comparator
+            )
+
+        assert error_caught[0] is not None
+
+    def test_callback_without_nesting_works(self, client):
+        """Test that normal callbacks without nested calls still work."""
+        call_count = [0]
+
+        def simple_callback(a, b):
+            # Just do local Python work, no Java calls
+            call_count[0] += 1
+            if a < b:
+                return -1
+            elif a > b:
+                return 1
+            return 0
+
+        comparator = client.register_callback(simple_callback, "java.util.Comparator")
+
+        arr = client.create_object("java.util.ArrayList")
+        arr.add("c")
+        arr.add("a")
+        arr.add("b")
+
+        # This should work fine
+        client.invoke_static_method("java.util.Collections", "sort", arr, comparator)
+
+        assert call_count[0] > 0
+        assert arr.get(0) == "a"
+        assert arr.get(1) == "b"
+        assert arr.get(2) == "c"
+
+    def test_in_callback_flag_reset_after_error(self, client):
+        """Test that _in_callback flag is reset even if callback raises."""
+
+        def failing_callback(a, b):
+            raise ValueError("Intentional failure")
+
+        comparator = client.register_callback(failing_callback, "java.util.Comparator")
+
+        arr = client.create_object("java.util.ArrayList")
+        arr.add("b")
+        arr.add("a")
+
+        # This will fail due to the callback error
+        with pytest.raises(JavaException):
+            client.invoke_static_method(
+                "java.util.Collections", "sort", arr, comparator
+            )
+
+        # But the client should still be usable (flag was reset)
+        assert not client._in_callback
+        new_arr = client.create_object("java.util.ArrayList")
+        assert new_arr.size() == 0

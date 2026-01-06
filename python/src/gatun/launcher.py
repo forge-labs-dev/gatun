@@ -67,6 +67,10 @@ def launch_gateway(
     memory: str | None = None,
     socket_path: str | None = None,
     classpath: list[str] | None = None,
+    trace: bool = False,
+    log_level: str | None = None,
+    debug: bool = False,
+    extra_jvm_flags: list[str] | None = None,
 ):
     """
     Launches the embedded Java server.
@@ -77,12 +81,24 @@ def launch_gateway(
                      path in the system temp directory to allow concurrent sessions.
         classpath: Additional JAR files or directories to add to the classpath.
                    This allows loading external classes (e.g., Spark JARs).
+        trace: Enable trace mode for verbose method resolution logging.
+               Useful for debugging "wrong method called" issues.
+        log_level: Java logging level. Options: "FINE", "FINER", "FINEST", "INFO",
+                   "WARNING". Default is "INFO". Use "FINE" for request/response
+                   logging, "FINER" for object registry changes.
+        debug: If True, Java server output is printed to stderr instead of captured.
+               Useful for seeing logs in real-time during development.
 
     Configuration can be set in pyproject.toml:
         [tool.gatun]
         memory = "64MB"
         socket_path = "/tmp/gatun.sock"  # Optional: fixed path for single session
         jvm_flags = ["-Xmx512m"]
+
+    Environment variables for observability:
+        GATUN_TRACE=true     - Enable trace mode
+        GATUN_LOG_LEVEL=FINE - Set log level
+        GATUN_DEBUG=true     - Pass through Java server output
     """
     config = get_config()
 
@@ -113,6 +129,18 @@ def launch_gateway(
 
     # 3. Construct Command with config JVM flags
     jvm_flags = DEFAULT_JVM_FLAGS + config.jvm_flags
+    if extra_jvm_flags:
+        jvm_flags.extend(extra_jvm_flags)
+
+    # 3a. Add observability flags
+    # Check environment variables first, then use function arguments
+    if trace or os.environ.get("GATUN_TRACE", "").lower() == "true":
+        jvm_flags.append("-Dgatun.trace=true")
+
+    effective_log_level = log_level or os.environ.get("GATUN_LOG_LEVEL")
+    if effective_log_level:
+        # Pass the log level to Java - it will configure logging programmatically
+        jvm_flags.append(f"-Dgatun.log.level={effective_log_level}")
 
     # Find Java executable - prefer JAVA_HOME, fall back to PATH
     java_home = os.environ.get("JAVA_HOME")
@@ -137,10 +165,22 @@ def launch_gateway(
         cmd = [java_cmd] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
+    logger.debug("JVM command: %s", " ".join(cmd))
 
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
+    # Check if debug mode is requested via env var or parameter
+    import sys
+    debug_mode = debug or os.environ.get("GATUN_DEBUG", "").lower() == "true"
+
+    if debug_mode:
+        # Pass through output for debugging - logs appear in real-time
+        process = subprocess.Popen(
+            cmd, stdout=sys.stderr, stderr=sys.stderr, text=True
+        )
+    else:
+        # Capture output (default) - quieter but startup errors are still reported
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
     # 4. Wait for Socket to be ready (not just file existence, but connectable)
     max_retries = int(config.startup_timeout / 0.1)
@@ -148,10 +188,14 @@ def launch_gateway(
     while retries > 0:
         if process.poll() is not None:
             # Process died
-            stdout, stderr = process.communicate()
-            raise RuntimeError(
-                f"Java Server failed to start:\nstdout: {stdout}\nstderr: {stderr}"
-            )
+            if debug_mode:
+                # Output was already printed to stderr
+                raise RuntimeError("Java Server failed to start (see output above)")
+            else:
+                stdout, stderr = process.communicate()
+                raise RuntimeError(
+                    f"Java Server failed to start:\nstdout: {stdout}\nstderr: {stderr}"
+                )
 
         # Check if socket file exists AND is connectable
         if os.path.exists(socket_path):

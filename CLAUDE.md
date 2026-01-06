@@ -225,6 +225,34 @@ async def async_compare(a, b):
 comparator = await async_client.register_callback(async_compare, "java.util.Comparator")
 ```
 
+**Important: Reentrancy Policy**
+
+Gatun does **not** support nested Java calls from within callbacks. Attempting to call Java from inside a callback raises `ReentrancyError`:
+
+```python
+from gatun import ReentrancyError
+
+def bad_callback(a, b):
+    # This will raise ReentrancyError - cannot call Java from callback
+    client.create_object("java.util.ArrayList")
+    return 0
+
+comparator = client.register_callback(bad_callback, "java.util.Comparator")
+arr = client.jvm.java.util.ArrayList()
+arr.add("b")
+arr.add("a")
+
+# This raises JavaException containing ReentrancyError
+client.jvm.java.util.Collections.sort(arr, comparator)
+```
+
+Why this restriction exists: Gatun uses a single shared memory channel per client. When Java calls back into Python, the original request is still waiting for a response. A nested Java call would try to use the same channel, causing a deadlock.
+
+Workarounds:
+- Queue work for later instead of calling Java immediately in the callback
+- Use pure Python logic in callbacks (no Java calls)
+- Pre-create any Java objects you need before the callback is invoked
+
 ### Request Cancellation
 Cancel long-running requests:
 ```python
@@ -449,6 +477,11 @@ Java exceptions are mapped to Python exceptions:
 - `java.lang.InterruptedException` -> `CancelledException`
 - Other exceptions -> `JavaRuntimeException`
 
+Python-side exceptions:
+- `ReentrancyError` - Raised when attempting nested Java calls from within a callback
+- `PayloadTooLargeError` - Raised when data exceeds shared memory capacity
+- `StaleArenaError` - Raised when using an arena after client reconnected
+
 ## Security
 
 ### Class Allowlist
@@ -468,6 +501,76 @@ Attempting to use non-allowlisted classes (e.g., `Runtime`, `ProcessBuilder`) ra
 - Objects are automatically cleaned up when session ends
 - SHM files are deleted when the client disconnects
 - Double-free attempts are silently ignored
+
+## Observability
+
+Gatun includes comprehensive observability features for debugging and monitoring.
+
+### Enabling from Python
+The easiest way to enable observability features:
+```python
+from gatun import connect
+
+# Enable trace mode for method resolution debugging
+client = connect(trace=True)
+
+# Enable verbose logging
+client = connect(log_level="FINE")
+
+# Both
+client = connect(trace=True, log_level="FINE")
+```
+
+Or via environment variables:
+```bash
+export GATUN_TRACE=true
+export GATUN_LOG_LEVEL=FINE
+python my_script.py
+```
+
+### Structured Logging
+Log format: `sessionId=N requestId=N action=X target=Y latency_us=Z status=OK|ERROR`
+
+Log levels:
+- `INFO` - Server start/stop only (default)
+- `FINE` - Request/response logging with timing
+- `FINER` - Object registry add/remove events
+- `FINEST` - All internal details
+
+### Trace Mode
+When enabled (`trace=True` or `GATUN_TRACE=true`), logs detailed method resolution:
+- Class and method name
+- Number of overload candidates
+- Chosen method signature
+- Specificity score
+- Actual argument types
+
+Useful for debugging "wrong method called" or overload resolution issues.
+
+### Metrics
+Access server metrics programmatically via `GatunServer.getMetrics()`:
+- Request counts and rates per action type
+- Latency percentiles (p50, p99) per action
+- Object registry counts (current and peak)
+- Arrow transfer metrics (rows, bytes)
+- Callback invocation counts
+
+### JFR Events
+Gatun emits JFR (Java Flight Recorder) events for profiling:
+```bash
+java -XX:StartFlightRecording=filename=gatun.jfr,settings=profile -jar gatun-server.jar
+```
+
+Events:
+- `org.gatun.Request` - Request start/end with timing
+- `org.gatun.MethodResolution` - Method overload resolution decisions
+- `org.gatun.ObjectRegistry` - Object add/remove events
+- `org.gatun.Callback` - Python callback round-trips
+- `org.gatun.ArrowTransfer` - Arrow data transfers
+- `org.gatun.Session` - Session lifecycle
+
+### Request Ring Buffer
+Each session maintains a ring buffer of the last 64 requests. On errors, recent request history is logged to help diagnose failures.
 
 ## Configuration
 

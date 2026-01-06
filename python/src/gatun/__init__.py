@@ -20,6 +20,7 @@ from gatun.client import (
     JavaNumberFormatException,
     JavaRuntimeException,
     CancelledException,
+    ReentrancyError,
     StaleArenaError,
     ArrowTableView,
     BatchContext,
@@ -73,6 +74,7 @@ __all__ = [
     "JavaNumberFormatException",
     "JavaRuntimeException",
     "CancelledException",
+    "ReentrancyError",
     # Config
     "GatunConfig",
     "get_config",
@@ -86,12 +88,23 @@ __all__ = [
 ]
 
 
-def connect(memory: Optional[str] = None, socket_path: Optional[str] = None):
+def connect(
+    memory: Optional[str] = None,
+    socket_path: Optional[str] = None,
+    trace: bool = False,
+    log_level: Optional[str] = None,
+    debug: bool = False,
+    extra_jvm_flags: Optional[list[str]] = None,
+):
     """Convenience: Launches server and returns connected client.
 
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
         socket_path: Path to Unix socket. Defaults to config value or ~/gatun.sock.
+        trace: Enable trace mode for verbose method resolution logging.
+        log_level: Java logging level ("FINE", "FINER", "INFO", etc.).
+        debug: If True, Java server logs are printed to stderr in real-time.
+        extra_jvm_flags: Additional JVM flags to pass to the server (e.g., for resource limits).
 
     Configuration can be set in pyproject.toml:
         [tool.gatun]
@@ -101,8 +114,18 @@ def connect(memory: Optional[str] = None, socket_path: Optional[str] = None):
     Or via environment variables:
         GATUN_MEMORY=64MB
         GATUN_SOCKET_PATH=/tmp/gatun.sock
+        GATUN_TRACE=true
+        GATUN_LOG_LEVEL=FINE
+        GATUN_DEBUG=true
     """
-    session = launch_gateway(memory=memory, socket_path=socket_path)
+    session = launch_gateway(
+        memory=memory,
+        socket_path=socket_path,
+        trace=trace,
+        log_level=log_level,
+        debug=debug,
+        extra_jvm_flags=extra_jvm_flags,
+    )
 
     client = GatunClient(session.socket_path)
     if not client.connect():
@@ -115,13 +138,20 @@ def connect(memory: Optional[str] = None, socket_path: Optional[str] = None):
 
 
 async def aconnect(
-    memory: Optional[str] = None, socket_path: Optional[str] = None
+    memory: Optional[str] = None,
+    socket_path: Optional[str] = None,
+    trace: bool = False,
+    log_level: Optional[str] = None,
+    debug: bool = False,
 ) -> AsyncGatunClient:
     """Async convenience: Launches server and returns connected async client.
 
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
         socket_path: Path to Unix socket. Defaults to config value or ~/gatun.sock.
+        trace: Enable trace mode for verbose method resolution logging.
+        log_level: Java logging level ("FINE", "FINER", "INFO", etc.).
+        debug: If True, Java server logs are printed to stderr in real-time.
 
     Example:
         async with await aconnect() as client:
@@ -136,8 +166,17 @@ async def aconnect(
     Or via environment variables:
         GATUN_MEMORY=64MB
         GATUN_SOCKET_PATH=/tmp/gatun.sock
+        GATUN_TRACE=true
+        GATUN_LOG_LEVEL=FINE
+        GATUN_DEBUG=true
     """
-    session = launch_gateway(memory=memory, socket_path=socket_path)
+    session = launch_gateway(
+        memory=memory,
+        socket_path=socket_path,
+        trace=trace,
+        log_level=log_level,
+        debug=debug,
+    )
 
     client = AsyncGatunClient(session.socket_path)
     if not await client.connect():

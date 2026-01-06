@@ -228,6 +228,10 @@ class AsyncGatunClient:
         self._jvm: Optional[AsyncJVMView] = None
         self._callbacks: dict[int, callable] = {}
 
+        # Reentrancy detection - tracks if we're inside a callback
+        # Nested Java calls from callbacks would deadlock
+        self._in_callback: bool = False
+
     @property
     def jvm(self) -> AsyncJVMView:
         """Access Java classes via package navigation."""
@@ -270,8 +274,19 @@ class AsyncGatunClient:
         except Exception:
             return False
 
-    async def _send_raw(self, data: bytes, wait_for_response: bool = True):
+    async def _send_raw(self, data: bytes, wait_for_response: bool = True, expects_response: bool = True):
         """Write command to SHM and signal Java asynchronously."""
+        # Check for reentrancy - nested calls from callbacks would deadlock
+        # Exception: CallbackResponse is sent during callback handling
+        if self._in_callback and expects_response:
+            from gatun.client import ReentrancyError
+
+            raise ReentrancyError(
+                "Cannot call Java from within a callback. "
+                "Nested calls would deadlock because the original request is still waiting. "
+                "Queue work for later or restructure code to avoid nested calls."
+            )
+
         async with self._lock:
             max_command_size = self.payload_offset
             if len(data) > max_command_size:
@@ -322,7 +337,14 @@ class AsyncGatunClient:
             return self._unpack_value(resp.ReturnValType(), resp.ReturnVal())
 
     async def _handle_callback(self, resp):
-        """Handle a callback invocation request from Java."""
+        """Handle a callback invocation request from Java.
+
+        Sets _in_callback flag to detect and prevent reentrant calls, which would
+        deadlock. The flag is always cleared in finally to ensure cleanup even if
+        the callback raises an exception.
+        """
+        from gatun.client import ReentrancyError
+
         callback_id = resp.CallbackId()
 
         # Unpack callback arguments
@@ -339,15 +361,26 @@ class AsyncGatunClient:
             )
             return
 
-        # Execute the callback (could be sync or async)
+        # Execute the callback with reentrancy guard
+        self._in_callback = True
         try:
             if asyncio.iscoroutinefunction(callback_fn):
                 result = await callback_fn(*args)
             else:
                 result = callback_fn(*args)
             await self._send_callback_response(callback_id, result, False, None)
+        except ReentrancyError:
+            # Propagate reentrancy error with clear message
+            await self._send_callback_response(
+                callback_id,
+                None,
+                True,
+                "ReentrancyError: Cannot call Java from within a callback",
+            )
         except Exception as e:
             await self._send_callback_response(callback_id, None, True, str(e))
+        finally:
+            self._in_callback = False
 
     async def _send_callback_response(
         self, callback_id: int, result, is_error: bool, error_msg: Optional[str]

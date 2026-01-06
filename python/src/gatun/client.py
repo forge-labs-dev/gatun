@@ -154,6 +154,24 @@ class CancelledException(Exception):
         super().__init__(f"Request {request_id} was cancelled")
 
 
+class ReentrancyError(Exception):
+    """Raised when a nested Java call is attempted from within a callback.
+
+    Gatun does not support reentrant calls - you cannot call Java from Python
+    while inside a callback that Java invoked. This would deadlock because:
+    1. The original request is waiting for a response
+    2. The callback tries to send a new request on the same socket
+    3. Both sides would wait forever for the other
+
+    To work around this:
+    - Queue work for later instead of calling Java immediately
+    - Use the async client with proper concurrency patterns
+    - Restructure code to avoid nested calls
+    """
+
+    pass
+
+
 class TypeHint:
     """Wrapper to provide an explicit Java type hint for overload resolution.
 
@@ -836,6 +854,14 @@ class _LRUCache[V]:
     def __contains__(self, key: str) -> bool:
         return key in self._cache
 
+    def __getitem__(self, key: str) -> V:
+        """Get a value from the cache (without moving it to the end)."""
+        return self._cache[key]
+
+    def pop(self, key: str, default: V | None = None) -> V | None:
+        """Remove and return a value from the cache."""
+        return self._cache.pop(key, default)
+
     def __len__(self) -> int:
         return len(self._cache)
 
@@ -995,6 +1021,10 @@ class GatunClient:
         # These responses must be drained before the next synchronous command
         self._pending_responses: int = 0
 
+        # Reentrancy detection - tracks if we're inside a callback
+        # Nested Java calls from callbacks would deadlock
+        self._in_callback: bool = False
+
     def _create_string(self, builder: flatbuffers.Builder, s: str) -> int:
         """Create a FlatBuffers string with caching of encoded bytes.
 
@@ -1112,6 +1142,15 @@ class GatunClient:
         If wait_for_response is False, returns immediately (Fire-and-Forget).
         If expects_response is False, Java won't send a response (used for CallbackResponse).
         """
+        # 0. Check for reentrancy - nested calls from callbacks would deadlock
+        # Exception: CallbackResponse is sent during callback handling
+        if self._in_callback and expects_response:
+            raise ReentrancyError(
+                "Cannot call Java from within a callback. "
+                "Nested calls would deadlock because the original request is still waiting. "
+                "Queue work for later or restructure code to avoid nested calls."
+            )
+
         # 1. Validate command size
         max_command_size = self.payload_offset  # Command zone ends where payload starts
         if len(data) > max_command_size:
@@ -1307,7 +1346,12 @@ class GatunClient:
         _raise_java_exception_impl(error_type, error_msg)
 
     def _handle_callback(self, resp):
-        """Handle a callback invocation request from Java."""
+        """Handle a callback invocation request from Java.
+
+        Sets _in_callback flag to detect and prevent reentrant calls, which would
+        deadlock. The flag is always cleared in finally to ensure cleanup even if
+        the callback raises an exception.
+        """
         callback_id = resp.CallbackId()
 
         # Unpack callback arguments
@@ -1325,12 +1369,23 @@ class GatunClient:
             )
             return
 
-        # Execute the callback
+        # Execute the callback with reentrancy guard
+        self._in_callback = True
         try:
             result = callback_fn(*args)
             self._send_callback_response(callback_id, result, False, None)
+        except ReentrancyError:
+            # Propagate reentrancy error with clear message
+            self._send_callback_response(
+                callback_id,
+                None,
+                True,
+                "ReentrancyError: Cannot call Java from within a callback",
+            )
         except Exception as e:
             self._send_callback_response(callback_id, None, True, str(e))
+        finally:
+            self._in_callback = False
 
     def _unpack_arrow_batch(self, arrow_batch) -> ArrowTableView:
         """Unpack an ArrowBatchDescriptor from Java into an ArrowTableView.
