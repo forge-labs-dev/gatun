@@ -230,6 +230,7 @@ public class Metrics {
       case Action.InvokeMethods -> "InvokeMethods";
       case Action.CreateObjects -> "CreateObjects";
       case Action.Batch -> "Batch";
+      case Action.GetMetrics -> "GetMetrics";
       default -> "Unknown(" + action + ")";
     };
   }

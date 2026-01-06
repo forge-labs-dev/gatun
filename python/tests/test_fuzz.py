@@ -7,14 +7,10 @@ These tests verify that:
 4. Zone boundary violations are caught
 """
 
-import os
 import struct
-import random
-import pytest
 from hypothesis import given, strategies as st, settings, assume, HealthCheck
 
 import flatbuffers
-from gatun.client import GatunClient, JavaObject, PayloadTooLargeError
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
 
@@ -84,13 +80,15 @@ class TestMalformedCommandHandling:
             # Wait for response - should be an error
             resp_len_bytes = client.sock.recv(4)
             if resp_len_bytes:
-                resp_len = struct.unpack("<I", resp_len_bytes)[0]
+                _ = struct.unpack("<I", resp_len_bytes)[0]
                 # Should get some response (error)
         except (BrokenPipeError, ConnectionResetError):
             pass  # Server may close connection on malformed data
 
     @given(
-        action_byte=st.integers(min_value=24, max_value=127),  # int8 range for FlatBuffers
+        action_byte=st.integers(
+            min_value=24, max_value=127
+        ),  # int8 range for FlatBuffers
     )
     @settings(max_examples=20, deadline=5000, **FIXTURE_SETTINGS)
     def test_invalid_action_values(self, client, action_byte):
@@ -111,7 +109,7 @@ class TestMalformedCommandHandling:
             resp_len_bytes = client.sock.recv(4)
             if resp_len_bytes:
                 # Should get an error response
-                resp_len = struct.unpack("<I", resp_len_bytes)[0]
+                _ = struct.unpack("<I", resp_len_bytes)[0]
                 client.shm.seek(client.response_offset)
                 # Server should have written an error
         except (BrokenPipeError, ConnectionResetError):
@@ -132,7 +130,7 @@ class TestMalformedCommandHandling:
         try:
             client.sock.sendall(struct.pack("<I", len(garbage)))
             # Try to read response
-            resp_len_bytes = client.sock.recv(4)
+            _ = client.sock.recv(4)
             # Any response is fine - server didn't crash
         except (BrokenPipeError, ConnectionResetError):
             pass  # Server may close on garbage
@@ -169,7 +167,7 @@ class TestMalformedCommandHandling:
 
         try:
             client.sock.sendall(struct.pack("<I", len(data)))
-            resp_len_bytes = client.sock.recv(4)
+            _ = client.sock.recv(4)
             # Any response is acceptable
         except (BrokenPipeError, ConnectionResetError):
             pass

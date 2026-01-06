@@ -1076,6 +1076,10 @@ public class GatunServer {
             }
             currentRequestId.remove();
             continue;  // Skip the normal response logic below
+
+          } else if (cmd.action() == Action.GetMetrics) {
+            // Return server metrics as a string report
+            result = Metrics.getInstance().report();
           }
 
           // 3. Pack Success

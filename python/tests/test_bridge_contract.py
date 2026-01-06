@@ -50,7 +50,9 @@ class BridgeContractTests:
             bridge.new("com.nonexistent.FakeClass")
         # Could be ClassNotFoundException or SecurityException (if allowlisted)
         exc_str = str(exc_info.value).lower()
-        assert "class" in exc_str and ("not found" in exc_str or "not allowed" in exc_str)
+        assert "class" in exc_str and (
+            "not found" in exc_str or "not allowed" in exc_str
+        )
 
     def test_create_object_returns_jvm_ref(self, bridge: BridgeAdapter):
         """Created object has object_id attribute."""
@@ -138,9 +140,7 @@ class BridgeContractTests:
 
     def test_call_static_string_format(self, bridge: BridgeAdapter):
         """Call String.format static method."""
-        result = bridge.call_static(
-            "java.lang.String", "format", "Hello %s!", "World"
-        )
+        result = bridge.call_static("java.lang.String", "format", "Hello %s!", "World")
         assert result == "Hello World!"
 
     # ==========================================================================

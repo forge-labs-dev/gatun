@@ -15,6 +15,7 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **Pythonic JavaObjects**: Iteration, indexing, and len() support on Java collections
 - **Batch API**: Execute multiple commands in a single round-trip (6x speedup for bulk ops)
 - **Vectorized APIs**: invoke_methods, create_objects, get_fields for 2-5x additional speedup
+- **Observability**: Server metrics, structured logging, and JFR events for debugging and monitoring
 
 ## Installation
 
@@ -366,6 +367,42 @@ client.set_field(obj, "fieldName", value)
 client.get_fields(obj, ["field1", "field2"])
 client.invoke_methods(obj, [("method1", (arg,)), ("method2", ())])
 client.create_objects([("class1", ()), ("class2", (arg,))])
+```
+
+### Observability
+
+Get server metrics for debugging and monitoring:
+
+```python
+# Get server metrics report
+metrics = client.get_metrics()
+print(metrics)
+# === Gatun Server Metrics ===
+# Global:
+#   total_requests: 150
+#   total_errors: 0
+#   requests_per_sec: 45.23
+#   current_sessions: 1
+#   current_objects: 12
+#   peak_objects: 25
+# ...
+```
+
+Enable trace mode for method resolution debugging:
+
+```python
+# Enable trace mode
+client = connect(trace=True)
+
+# Enable verbose logging
+client = connect(log_level="FINE")
+```
+
+Or via environment variables:
+
+```bash
+export GATUN_TRACE=true
+export GATUN_LOG_LEVEL=FINE
 ```
 
 ## PySpark Integration

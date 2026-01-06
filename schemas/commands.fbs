@@ -29,7 +29,8 @@ enum Action : byte {
   // Vectorized operations - single round-trip for multiple operations on same target
   GetFields = 21,          // Get multiple fields from one object: target_id + field_names
   InvokeMethods = 22,      // Invoke multiple methods on same target: target_id + method_calls
-  CreateObjects = 23       // Create multiple objects: class_names + args per object
+  CreateObjects = 23,      // Create multiple objects: class_names + args per object
+  GetMetrics = 24          // Get server metrics (request counts, latencies, object counts, etc.)
 }
 
 // Element types for arrays

@@ -301,7 +301,9 @@ def test_return_object_ref_array(client):
     from gatun.client import JavaObject
 
     # Get Class object for String
-    class_obj = client.invoke_static_method("java.lang.Class", "forName", "java.lang.String")
+    class_obj = client.invoke_static_method(
+        "java.lang.Class", "forName", "java.lang.String"
+    )
 
     # Without return_object_ref, arrays are auto-converted to JavaArray
     arr_auto = client.invoke_static_method(
@@ -348,9 +350,7 @@ def test_return_object_ref_string(client):
     from gatun.client import JavaObject
 
     # Without return_object_ref, strings are auto-converted
-    str_auto = client.invoke_static_method(
-        "java.lang.String", "valueOf", 42
-    )
+    str_auto = client.invoke_static_method("java.lang.String", "valueOf", 42)
     assert isinstance(str_auto, str)
     assert str_auto == "42"
 
@@ -367,7 +367,9 @@ def test_return_object_ref_allows_mutation(client):
     from gatun.client import JavaObject
 
     # Create array with return_object_ref=True
-    class_obj = client.invoke_static_method("java.lang.Class", "forName", "java.lang.String")
+    class_obj = client.invoke_static_method(
+        "java.lang.Class", "forName", "java.lang.String"
+    )
     arr = client.invoke_static_method(
         "java.lang.reflect.Array", "newInstance", class_obj, 3, return_object_ref=True
     )
@@ -378,8 +380,12 @@ def test_return_object_ref_allows_mutation(client):
     client.invoke_static_method("java.lang.reflect.Array", "set", arr, 1, "world")
 
     # Get elements using Array.get
-    assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 0) == "hello"
-    assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 1) == "world"
+    assert (
+        client.invoke_static_method("java.lang.reflect.Array", "get", arr, 0) == "hello"
+    )
+    assert (
+        client.invoke_static_method("java.lang.reflect.Array", "get", arr, 1) == "world"
+    )
     assert client.invoke_static_method("java.lang.reflect.Array", "get", arr, 2) is None
 
     # Verify length
@@ -461,8 +467,8 @@ def test_batch_mixed_operations(client):
 
     # Use the created object in another batch
     with client.batch() as b:
-        r1 = b.call(arr, "add", "first")
-        r2 = b.call(arr, "add", "second")
+        b.call(arr, "add", "first")
+        b.call(arr, "add", "second")
         r3 = b.call(arr, "size")
 
     assert r3.get() == 2
@@ -515,7 +521,7 @@ def test_batch_error_handling_stop(client):
 
 def test_batch_empty(client):
     """Test empty batch."""
-    with client.batch() as b:
+    with client.batch():
         pass  # No operations
 
     # Should not raise

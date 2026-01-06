@@ -32,9 +32,12 @@ import pyarrow as pa
 
 class BufferInfo(NamedTuple):
     """Information about an allocated buffer."""
-    offset: int      # Offset from start of arena
-    length: int      # Buffer size in bytes
-    buffer: pa.Buffer | None  # PyArrow buffer backed by shared memory (None for zero-length)
+
+    offset: int  # Offset from start of arena
+    length: int  # Buffer size in bytes
+    buffer: (
+        pa.Buffer | None
+    )  # PyArrow buffer backed by shared memory (None for zero-length)
 
 
 class PayloadArena:
@@ -69,9 +72,7 @@ class PayloadArena:
 
         # Get the base address for foreign_buffer
         # We need to use ctypes to get the actual memory address
-        self._base_address = ctypes.addressof(
-            ctypes.c_char.from_buffer(self._mmap)
-        )
+        self._base_address = ctypes.addressof(ctypes.c_char.from_buffer(self._mmap))
 
     @classmethod
     def create(cls, path: Path | str, size: int) -> PayloadArena:
@@ -93,7 +94,9 @@ class PayloadArena:
         return cls(path, size)
 
     @classmethod
-    def from_mmap(cls, mmap_obj: mmap.mmap, base_offset: int, size: int) -> "PayloadArena":
+    def from_mmap(
+        cls, mmap_obj: mmap.mmap, base_offset: int, size: int
+    ) -> "PayloadArena":
         """Create a PayloadArena from an existing mmap.
 
         This is used to create an arena view into a slice of an existing
@@ -539,10 +542,10 @@ def compute_schema_hash(schema: pa.Schema) -> int:
 
     # Use a simple hash (Python's hash is not stable across runs,
     # so we use a simple FNV-1a style hash)
-    h = 0xcbf29ce484222325  # FNV offset basis
+    h = 0xCBF29CE484222325  # FNV offset basis
     for b in schema_bytes:
         h ^= b
-        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF  # FNV prime, 64-bit
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF  # FNV prime, 64-bit
     return h
 
 

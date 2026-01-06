@@ -39,7 +39,6 @@ from gatun.generated.org.gatun.protocol import (
     BufferDescriptor,
     FieldNode,
     BatchCommand,
-    BatchResponse,
     GetFieldsRequest,
     InvokeMethodsRequest,
     MethodCall,
@@ -533,10 +532,12 @@ def _reconstruct_array_recursive(
         # Map is internally list<struct<key, value>>
         # We need to reconstruct the struct child which contains key and value
         # The struct type is struct<key: key_type, value: item_type>
-        struct_type = pa.struct([
-            pa.field("key", arrow_type.key_type, nullable=False),
-            pa.field("value", arrow_type.item_type),
-        ])
+        struct_type = pa.struct(
+            [
+                pa.field("key", arrow_type.key_type, nullable=False),
+                pa.field("value", arrow_type.item_type),
+            ]
+        )
         struct_array, buffer_idx, node_idx = _reconstruct_array_recursive(
             struct_type, buffers, field_nodes, buffer_idx, node_idx
         )
@@ -905,7 +906,9 @@ class _JVMNode:
         new_path = f"{self._path}.{name}"
 
         # Get the last segment of the current path to check if it looks like a class
-        last_segment = self._path.rsplit(".", 1)[-1] if "." in self._path else self._path
+        last_segment = (
+            self._path.rsplit(".", 1)[-1] if "." in self._path else self._path
+        )
         # If current segment starts with uppercase, it likely is a class
         parent_looks_like_class = last_segment and last_segment[0].isupper()
 
@@ -933,7 +936,7 @@ class _JVMNode:
             if last_dot == -1:
                 raise ValueError(f"Invalid method path: {self._path}")
             class_name = self._path[:last_dot]
-            method_name = self._path[last_dot + 1:]
+            method_name = self._path[last_dot + 1 :]
             return self._client.invoke_static_method(class_name, method_name, *args)
         elif node_type == "field":
             # This is a static field access (being called as function - error)
@@ -947,14 +950,18 @@ class _JVMNode:
             last_dot = self._path.rfind(".")
             if last_dot != -1:
                 parent_path = self._path[:last_dot]
-                method_name = self._path[last_dot + 1:]
+                method_name = self._path[last_dot + 1 :]
                 parent_last_segment = parent_path.rsplit(".", 1)[-1]
 
                 # If parent looks like a class (starts with uppercase) and
                 # method name looks like a method (starts with lowercase),
                 # try as static method first
-                if (parent_last_segment and parent_last_segment[0].isupper() and
-                    method_name and method_name[0].islower()):
+                if (
+                    parent_last_segment
+                    and parent_last_segment[0].isupper()
+                    and method_name
+                    and method_name[0].islower()
+                ):
                     return self._client.invoke_static_method(
                         parent_path, method_name, *args
                     )
@@ -1508,7 +1515,9 @@ class GatunClient:
 
         # Send it (don't wait for response - Java is waiting for this)
         # Java doesn't send a response for CallbackResponse, so expects_response=False
-        self._send_raw(builder.Output(), wait_for_response=False, expects_response=False)
+        self._send_raw(
+            builder.Output(), wait_for_response=False, expects_response=False
+        )
 
     def create_object(self, class_name, *args):
         builder = self._get_builder(large=True)
@@ -1782,6 +1791,33 @@ class GatunClient:
         Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
         Cmd.CommandAddTargetId(builder, obj_id)
         Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return self._send_raw(builder.Output())
+
+    def get_metrics(self) -> str:
+        """Get server metrics report.
+
+        Returns a human-readable report of server performance metrics including:
+        - Total request counts and error rates
+        - Requests per second
+        - Current and peak object counts
+        - Arrow data transfer statistics
+        - Callback statistics
+        - Per-action latency percentiles (p50, p99)
+
+        Returns:
+            String containing the metrics report.
+
+        Example:
+            metrics = client.get_metrics()
+            print(metrics)
+        """
+        builder = self._get_builder()
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetMetrics)
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
@@ -2926,9 +2962,7 @@ class BatchContext:
             BatchResult that will contain the JavaObject after execute().
         """
         idx = len(self._command_data)
-        self._command_data.append(
-            (Act.Action.CreateObject, 0, class_name, args)
-        )
+        self._command_data.append((Act.Action.CreateObject, 0, class_name, args))
         return BatchResult(self, idx)
 
     def call(self, obj: "JavaObject", method_name: str, *args) -> BatchResult:
@@ -2948,9 +2982,7 @@ class BatchContext:
         )
         return BatchResult(self, idx)
 
-    def call_static(
-        self, class_name: str, method_name: str, *args
-    ) -> BatchResult:
+    def call_static(self, class_name: str, method_name: str, *args) -> BatchResult:
         """Queue a static method call.
 
         Args:
@@ -2963,9 +2995,7 @@ class BatchContext:
         """
         idx = len(self._command_data)
         full_name = f"{class_name}.{method_name}"
-        self._command_data.append(
-            (Act.Action.InvokeStaticMethod, 0, full_name, args)
-        )
+        self._command_data.append((Act.Action.InvokeStaticMethod, 0, full_name, args))
         return BatchResult(self, idx)
 
     def get_field(self, obj: "JavaObject", field_name: str) -> BatchResult:
@@ -2979,9 +3009,7 @@ class BatchContext:
             BatchResult that will contain the field value after execute().
         """
         idx = len(self._command_data)
-        self._command_data.append(
-            (Act.Action.GetField, obj.object_id, field_name, ())
-        )
+        self._command_data.append((Act.Action.GetField, obj.object_id, field_name, ()))
         return BatchResult(self, idx)
 
     def set_field(self, obj: "JavaObject", field_name: str, value) -> BatchResult:
@@ -3116,7 +3144,7 @@ class BatchContext:
         if batch_resp is None:
             raise RuntimeError("Expected BatchResponse but got None")
 
-        error_index = batch_resp.ErrorIndex()
+        _ = batch_resp.ErrorIndex()  # Available for debugging
         response_count = batch_resp.ResponsesLength()
 
         # Unpack each sub-response

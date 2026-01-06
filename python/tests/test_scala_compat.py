@@ -12,7 +12,6 @@ The reflection support enables proper handling of:
 """
 
 import numpy as np
-import pytest
 
 from gatun import JavaArray
 from gatun.client import _reflect_cache
@@ -295,9 +294,6 @@ class TestJavaArraySerialization:
         """Test that JavaArray and list are handled differently."""
         # JavaArray should be passed as array
         java_array = JavaArray(["x"], element_type="Object")
-
-        # Regular list should be passed as ArrayList
-        regular_list = ["x"]
 
         # Both should work but may behave differently in overloaded methods
         result1 = client.jvm.java.util.Arrays.toString(java_array)

@@ -362,6 +362,7 @@ client.invoke_static_method("java.lang.Math", "max", 10, 20)
 client.get_field(obj, "fieldName")                    # Get field value
 client.set_field(obj, "fieldName", value)             # Set field value
 client.is_instance_of(obj, "java.util.List")          # Check instance type
+client.get_metrics()                                  # Get server metrics report
 
 # Vectorized operations (single round-trip for multiple operations)
 client.get_fields(obj, ["field1", "field2"])          # Multiple field reads
@@ -548,12 +549,21 @@ When enabled (`trace=True` or `GATUN_TRACE=true`), logs detailed method resoluti
 Useful for debugging "wrong method called" or overload resolution issues.
 
 ### Metrics
-Access server metrics programmatically via `GatunServer.getMetrics()`:
+Access server metrics programmatically from Python:
+```python
+# Get server metrics report
+metrics = client.get_metrics()
+print(metrics)
+```
+
+The report includes:
 - Request counts and rates per action type
 - Latency percentiles (p50, p99) per action
 - Object registry counts (current and peak)
 - Arrow transfer metrics (rows, bytes)
 - Callback invocation counts
+
+Async clients also support `await client.get_metrics()`.
 
 ### JFR Events
 Gatun emits JFR (Java Flight Recorder) events for profiling:

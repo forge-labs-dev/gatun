@@ -9,11 +9,8 @@ These tests verify that:
 6. Cleanup is idempotent
 """
 
-import struct
 import pytest
-from hypothesis import given, strategies as st, settings, assume, Phase, HealthCheck
-
-from gatun.client import GatunClient, JavaObject
+from hypothesis import given, strategies as st, settings, assume, HealthCheck
 
 
 # Common settings for property tests that use fixtures
@@ -26,29 +23,33 @@ FIXTURE_SETTINGS = dict(
 # --- Strategy Definitions ---
 
 # Valid Java class names for testing
-VALID_CLASSES = st.sampled_from([
-    "java.util.ArrayList",
-    "java.util.HashMap",
-    "java.util.HashSet",
-    "java.util.LinkedList",
-    "java.util.TreeMap",
-    "java.util.TreeSet",
-    "java.lang.StringBuilder",
-    "java.lang.StringBuffer",
-])
+VALID_CLASSES = st.sampled_from(
+    [
+        "java.util.ArrayList",
+        "java.util.HashMap",
+        "java.util.HashSet",
+        "java.util.LinkedList",
+        "java.util.TreeMap",
+        "java.util.TreeSet",
+        "java.lang.StringBuilder",
+        "java.lang.StringBuffer",
+    ]
+)
 
 # Invalid/non-allowlisted class names
-INVALID_CLASSES = st.sampled_from([
-    "java.lang.Runtime",
-    "java.lang.ProcessBuilder",
-    "java.io.File",
-    "java.net.Socket",
-    "com.evil.Malware",
-    "",
-    ".",
-    "..",
-    "java..util.ArrayList",
-])
+INVALID_CLASSES = st.sampled_from(
+    [
+        "java.lang.Runtime",
+        "java.lang.ProcessBuilder",
+        "java.io.File",
+        "java.net.Socket",
+        "com.evil.Malware",
+        "",
+        ".",
+        "..",
+        "java..util.ArrayList",
+    ]
+)
 
 # Primitive values that can be passed as arguments
 PRIMITIVE_VALUES = st.one_of(
@@ -63,15 +64,17 @@ PRIMITIVE_VALUES = st.one_of(
 LIST_VALUES = st.lists(PRIMITIVE_VALUES, max_size=10)
 
 # Method names for ArrayList
-ARRAYLIST_METHODS = st.sampled_from([
-    "add",
-    "get",
-    "size",
-    "clear",
-    "isEmpty",
-    "remove",
-    "contains",
-])
+ARRAYLIST_METHODS = st.sampled_from(
+    [
+        "add",
+        "get",
+        "size",
+        "clear",
+        "isEmpty",
+        "remove",
+        "contains",
+    ]
+)
 
 
 class TestObjectLifecycleInvariants:
@@ -176,7 +179,9 @@ class TestMethodInvocationInvariants:
             assert actual == expected, f"Mismatch at index {i}"
 
     @given(
-        items=st.lists(st.integers(min_value=-1000, max_value=1000), min_size=0, max_size=20),
+        items=st.lists(
+            st.integers(min_value=-1000, max_value=1000), min_size=0, max_size=20
+        ),
     )
     @settings(max_examples=30, deadline=5000, **FIXTURE_SETTINGS)
     def test_hashset_contains_consistency(self, client, items):
@@ -299,7 +304,9 @@ class TestIterationInvariants:
     """Test that iteration support maintains invariants."""
 
     @given(
-        items=st.lists(st.integers(min_value=-100, max_value=100), min_size=1, max_size=30),
+        items=st.lists(
+            st.integers(min_value=-100, max_value=100), min_size=1, max_size=30
+        ),
     )
     @settings(max_examples=30, deadline=10000, **FIXTURE_SETTINGS)
     def test_indexing_returns_all_items(self, client, items):
@@ -316,7 +323,9 @@ class TestIterationInvariants:
         assert collected == items
 
     @given(
-        items=st.lists(st.integers(min_value=-100, max_value=100), min_size=0, max_size=20),
+        items=st.lists(
+            st.integers(min_value=-100, max_value=100), min_size=0, max_size=20
+        ),
     )
     @settings(max_examples=30, deadline=5000, **FIXTURE_SETTINGS)
     def test_len_matches_size(self, client, items):
@@ -345,6 +354,7 @@ class TestErrorRecovery:
 
         # Trigger an error
         from gatun.client import JavaIndexOutOfBoundsException
+
         with pytest.raises(JavaIndexOutOfBoundsException):
             arr.get(1000)  # Out of bounds
 
@@ -370,7 +380,9 @@ class TestErrorRecovery:
             for i in range(batch_size):
                 if i == error_index:
                     # This will error - parseInt on non-numeric
-                    results.append(b.call_static("java.lang.Integer", "parseInt", "not_a_number"))
+                    results.append(
+                        b.call_static("java.lang.Integer", "parseInt", "not_a_number")
+                    )
                 else:
                     results.append(b.call(arr, "add", i))
 
@@ -395,9 +407,13 @@ class TestConcurrencyInvariants:
         ops_per_object=st.integers(min_value=1, max_value=10),
     )
     @settings(max_examples=20, deadline=15000, **FIXTURE_SETTINGS)
-    def test_interleaved_operations_isolation(self, client, num_objects, ops_per_object):
+    def test_interleaved_operations_isolation(
+        self, client, num_objects, ops_per_object
+    ):
         """Interleaved operations on different objects should be isolated."""
-        objects = [client.create_object("java.util.ArrayList") for _ in range(num_objects)]
+        objects = [
+            client.create_object("java.util.ArrayList") for _ in range(num_objects)
+        ]
 
         # Interleave operations
         for op_num in range(ops_per_object):

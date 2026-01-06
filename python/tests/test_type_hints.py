@@ -1,7 +1,5 @@
 """Tests for TypeHint functionality for overload resolution."""
 
-import pytest
-
 from gatun import TypeHint
 
 

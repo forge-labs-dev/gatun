@@ -274,7 +274,9 @@ class AsyncGatunClient:
         except Exception:
             return False
 
-    async def _send_raw(self, data: bytes, wait_for_response: bool = True, expects_response: bool = True):
+    async def _send_raw(
+        self, data: bytes, wait_for_response: bool = True, expects_response: bool = True
+    ):
         """Write command to SHM and signal Java asynchronously."""
         # Check for reentrancy - nested calls from callbacks would deadlock
         # Exception: CallbackResponse is sent during callback handling
@@ -722,6 +724,33 @@ class AsyncGatunClient:
         Cmd.CommandAddAction(builder, Act.Action.IsInstanceOf)
         Cmd.CommandAddTargetId(builder, obj_id)
         Cmd.CommandAddTargetName(builder, name_off)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return await self._send_raw(builder.Output())
+
+    async def get_metrics(self) -> str:
+        """Get server metrics report asynchronously.
+
+        Returns a human-readable report of server performance metrics including:
+        - Total request counts and error rates
+        - Requests per second
+        - Current and peak object counts
+        - Arrow data transfer statistics
+        - Callback statistics
+        - Per-action latency percentiles (p50, p99)
+
+        Returns:
+            String containing the metrics report.
+
+        Example:
+            metrics = await client.get_metrics()
+            print(metrics)
+        """
+        builder = flatbuffers.Builder(256)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.GetMetrics)
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 

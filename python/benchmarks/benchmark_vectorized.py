@@ -86,7 +86,9 @@ def main():
         client.invoke_methods(arr, [("add", (i,)) for i in range(10)])
         arr.clear()
 
-    t_individual_10 = benchmark("10 individual invoke_method calls", individual_invoke_10)
+    t_individual_10 = benchmark(
+        "10 individual invoke_method calls", individual_invoke_10
+    )
     t_vectorized_10 = benchmark("10 vectorized invoke_methods", vectorized_invoke_10)
     print(f"  Speedup: {t_individual_10 / t_vectorized_10:.2f}x")
     print()
@@ -125,7 +127,9 @@ def main():
         """10 object creations in one round-trip."""
         client.create_objects([("java.util.ArrayList", ()) for _ in range(10)])
 
-    t_individual_c10 = benchmark("10 individual create_object calls", individual_create_10)
+    t_individual_c10 = benchmark(
+        "10 individual create_object calls", individual_create_10
+    )
     t_vectorized_c10 = benchmark("10 vectorized create_objects", vectorized_create_10)
     print(f"  Speedup: {t_individual_c10 / t_vectorized_c10:.2f}x")
     print()
@@ -170,10 +174,18 @@ def main():
     print("=" * 60)
     print()
     print("Vectorized APIs provide significant speedups by reducing round-trips:")
-    print(f"  - invoke_methods (3 calls):  {t_individual_3 / t_vectorized_3:.1f}x faster")
-    print(f"  - invoke_methods (10 calls): {t_individual_10 / t_vectorized_10:.1f}x faster")
-    print(f"  - create_objects (3 calls):  {t_individual_c3 / t_vectorized_c3:.1f}x faster")
-    print(f"  - create_objects (10 calls): {t_individual_c10 / t_vectorized_c10:.1f}x faster")
+    print(
+        f"  - invoke_methods (3 calls):  {t_individual_3 / t_vectorized_3:.1f}x faster"
+    )
+    print(
+        f"  - invoke_methods (10 calls): {t_individual_10 / t_vectorized_10:.1f}x faster"
+    )
+    print(
+        f"  - create_objects (3 calls):  {t_individual_c3 / t_vectorized_c3:.1f}x faster"
+    )
+    print(
+        f"  - create_objects (10 calls): {t_individual_c10 / t_vectorized_c10:.1f}x faster"
+    )
     print()
     print("Use vectorized APIs when:")
     print("  - Calling multiple methods on the same object")

@@ -70,25 +70,29 @@ def test_send_arrow_buffers_various_types(client):
     """Test zero-copy transfer with various Arrow types."""
 
     # Create table with multiple Arrow types
-    table = pa.table({
-        # Integer types
-        "int8_col": pa.array([1, 2, 3], type=pa.int8()),
-        "int16_col": pa.array([100, 200, 300], type=pa.int16()),
-        "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
-        "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
-        # Float types
-        "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
-        "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
-        # String type
-        "string_col": pa.array(["hello", "world", "test"]),
-        # Boolean type
-        "bool_col": pa.array([True, False, True]),
-    })
+    table = pa.table(
+        {
+            # Integer types
+            "int8_col": pa.array([1, 2, 3], type=pa.int8()),
+            "int16_col": pa.array([100, 200, 300], type=pa.int16()),
+            "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
+            "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
+            # Float types
+            "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
+            "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
+            # String type
+            "string_col": pa.array(["hello", "world", "test"]),
+            # Boolean type
+            "bool_col": pa.array([True, False, True]),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending Arrow buffers with various types: {table.num_rows} rows, {table.num_columns} columns")
+    print(
+        f"\nSending Arrow buffers with various types: {table.num_rows} rows, {table.num_columns} columns"
+    )
 
     response = client.send_arrow_buffers(table, arena, schema_cache)
     print(f"Java Response: {response}")
@@ -101,11 +105,13 @@ def test_send_arrow_buffers_with_nulls(client):
     """Test zero-copy transfer with null values."""
 
     # Create table with null values
-    table = pa.table({
-        "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
-        "nullable_string": pa.array(["a", None, "c", "d", None]),
-        "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
-    })
+    table = pa.table(
+        {
+            "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
+            "nullable_string": pa.array(["a", None, "c", "d", None]),
+            "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -160,11 +166,13 @@ def test_get_arrow_data_roundtrip(client):
     """Test Java -> Python Arrow transfer via get_arrow_data."""
 
     # 1. Create Arrow data and send to Java
-    original_table = pa.table({
-        "id": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
-        "name": pa.array(["Alice", "Bob", "Charlie", "David", "Eve"]),
-        "score": pa.array([95.5, 87.3, 92.1, 78.9, 99.0], type=pa.float64()),
-    })
+    original_table = pa.table(
+        {
+            "id": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
+            "name": pa.array(["Alice", "Bob", "Charlie", "David", "Eve"]),
+            "score": pa.array([95.5, 87.3, 92.1, 78.9, 99.0], type=pa.float64()),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -177,7 +185,9 @@ def test_get_arrow_data_roundtrip(client):
     received_table = client.get_arrow_data()
 
     # 3. Verify the data matches
-    print(f"Received table: {received_table.num_rows} rows, {received_table.num_columns} columns")
+    print(
+        f"Received table: {received_table.num_rows} rows, {received_table.num_columns} columns"
+    )
 
     assert received_table.num_rows == original_table.num_rows
     assert received_table.num_columns == original_table.num_columns
@@ -195,16 +205,18 @@ def test_get_arrow_data_roundtrip(client):
 def test_get_arrow_data_various_types(client):
     """Test Java -> Python Arrow transfer with various data types."""
 
-    original_table = pa.table({
-        "int8_col": pa.array([1, 2, 3], type=pa.int8()),
-        "int16_col": pa.array([100, 200, 300], type=pa.int16()),
-        "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
-        "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
-        "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
-        "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
-        "string_col": pa.array(["hello", "world", "test"]),
-        "bool_col": pa.array([True, False, True]),
-    })
+    original_table = pa.table(
+        {
+            "int8_col": pa.array([1, 2, 3], type=pa.int8()),
+            "int16_col": pa.array([100, 200, 300], type=pa.int16()),
+            "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
+            "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
+            "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
+            "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
+            "string_col": pa.array(["hello", "world", "test"]),
+            "bool_col": pa.array([True, False, True]),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -231,11 +243,13 @@ def test_get_arrow_data_various_types(client):
 def test_get_arrow_data_with_nulls(client):
     """Test Java -> Python Arrow transfer with null values."""
 
-    original_table = pa.table({
-        "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
-        "nullable_string": pa.array(["a", None, "c", "d", None]),
-        "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
-    })
+    original_table = pa.table(
+        {
+            "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
+            "nullable_string": pa.array(["a", None, "c", "d", None]),
+            "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -267,18 +281,24 @@ def test_send_arrow_buffers_chunked_table(client):
     """
 
     # Create a chunked table by concatenating multiple tables
-    table1 = pa.table({
-        "id": pa.array([1, 2, 3], type=pa.int64()),
-        "name": pa.array(["Alice", "Bob", "Charlie"]),
-    })
-    table2 = pa.table({
-        "id": pa.array([4, 5], type=pa.int64()),
-        "name": pa.array(["David", "Eve"]),
-    })
-    table3 = pa.table({
-        "id": pa.array([6], type=pa.int64()),
-        "name": pa.array(["Frank"]),
-    })
+    table1 = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "name": pa.array(["Alice", "Bob", "Charlie"]),
+        }
+    )
+    table2 = pa.table(
+        {
+            "id": pa.array([4, 5], type=pa.int64()),
+            "name": pa.array(["David", "Eve"]),
+        }
+    )
+    table3 = pa.table(
+        {
+            "id": pa.array([6], type=pa.int64()),
+            "name": pa.array(["Frank"]),
+        }
+    )
 
     # Concatenate creates a table with multiple chunks per column
     chunked_table = pa.concat_tables([table1, table2, table3])
@@ -290,8 +310,10 @@ def test_send_arrow_buffers_chunked_table(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending chunked Arrow table: {chunked_table.num_rows} rows, "
-          f"{chunked_table.column('id').num_chunks} chunks per column")
+    print(
+        f"\nSending chunked Arrow table: {chunked_table.num_rows} rows, "
+        f"{chunked_table.column('id').num_chunks} chunks per column"
+    )
 
     response = client.send_arrow_buffers(chunked_table, arena, schema_cache)
     print(f"Java Response: {response}")
@@ -304,14 +326,18 @@ def test_get_arrow_data_chunked_roundtrip(client):
     """Test roundtrip of chunked table (Python -> Java -> Python)."""
 
     # Create a chunked table
-    table1 = pa.table({
-        "x": pa.array([1.0, 2.0], type=pa.float64()),
-        "y": pa.array(["a", "b"]),
-    })
-    table2 = pa.table({
-        "x": pa.array([3.0, 4.0, 5.0], type=pa.float64()),
-        "y": pa.array(["c", "d", "e"]),
-    })
+    table1 = pa.table(
+        {
+            "x": pa.array([1.0, 2.0], type=pa.float64()),
+            "y": pa.array(["a", "b"]),
+        }
+    )
+    table2 = pa.table(
+        {
+            "x": pa.array([3.0, 4.0, 5.0], type=pa.float64()),
+            "y": pa.array(["c", "d", "e"]),
+        }
+    )
     chunked_table = pa.concat_tables([table1, table2])
 
     # Verify it's chunked
@@ -342,10 +368,12 @@ def test_get_arrow_data_chunked_roundtrip(client):
 
 def test_list_type_roundtrip(client):
     """Test that list<int32> type is transferred correctly."""
-    table = pa.table({
-        "id": pa.array([1, 2, 3], type=pa.int64()),
-        "values": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32())),
-    })
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "values": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32())),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -369,10 +397,12 @@ def test_list_type_roundtrip(client):
 def test_struct_type_roundtrip(client):
     """Test that struct type is transferred correctly."""
     struct_type = pa.struct([("x", pa.int32()), ("y", pa.int32())])
-    table = pa.table({
-        "id": pa.array([1, 2], type=pa.int64()),
-        "point": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}], type=struct_type),
-    })
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "point": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}], type=struct_type),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -388,17 +418,24 @@ def test_struct_type_roundtrip(client):
 
     # Verify data
     assert received_table.column("id").to_pylist() == [1, 2]
-    assert received_table.column("point").to_pylist() == [{"x": 1, "y": 2}, {"x": 3, "y": 4}]
+    assert received_table.column("point").to_pylist() == [
+        {"x": 1, "y": 2},
+        {"x": 3, "y": 4},
+    ]
 
     arena.close()
 
 
 def test_map_type_roundtrip(client):
     """Test that map type is transferred correctly."""
-    table = pa.table({
-        "id": pa.array([1, 2], type=pa.int64()),
-        "attrs": pa.array([{"a": 1, "b": 2}, {"c": 3}], type=pa.map_(pa.string(), pa.int32())),
-    })
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "attrs": pa.array(
+                [{"a": 1, "b": 2}, {"c": 3}], type=pa.map_(pa.string(), pa.int32())
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -424,13 +461,15 @@ def test_map_type_roundtrip(client):
 def test_nested_list_of_structs_roundtrip(client):
     """Test deeply nested type: list<struct<x:int32, y:string>>."""
     inner_struct = pa.struct([("x", pa.int32()), ("y", pa.string())])
-    table = pa.table({
-        "id": pa.array([1, 2], type=pa.int64()),
-        "items": pa.array(
-            [[{"x": 1, "y": "a"}, {"x": 2, "y": "b"}], [{"x": 3, "y": "c"}]],
-            type=pa.list_(inner_struct),
-        ),
-    })
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "items": pa.array(
+                [[{"x": 1, "y": "a"}, {"x": 2, "y": "b"}], [{"x": 3, "y": "c"}]],
+                type=pa.list_(inner_struct),
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -457,10 +496,12 @@ def test_nested_list_of_structs_roundtrip(client):
 def test_dictionary_type_rejected(client):
     """Test that dictionary type is rejected (not yet supported)."""
     # Dictionary encoding requires special handling
-    table = pa.table({
-        "id": pa.array([1, 2, 3], type=pa.int64()),
-        "category": pa.array(["a", "b", "a"]).dictionary_encode(),
-    })
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "category": pa.array(["a", "b", "a"]).dictionary_encode(),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -477,10 +518,12 @@ def test_stale_arena_error(client):
     """Test that StaleArenaError is raised when accessing data after arena reset."""
 
     # 1. Send data and get it back
-    original_table = pa.table({
-        "id": pa.array([1, 2, 3], type=pa.int64()),
-        "value": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
-    })
+    original_table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "value": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -520,9 +563,11 @@ def test_stale_arena_error(client):
 def test_arrow_table_view_repr(client):
     """Test ArrowTableView repr shows epoch status."""
 
-    original_table = pa.table({
-        "x": pa.array([1, 2], type=pa.int64()),
-    })
+    original_table = pa.table(
+        {
+            "x": pa.array([1, 2], type=pa.int64()),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -553,11 +598,15 @@ def test_sliced_table_roundtrip(client):
     would be misaligned and reconstruction would fail.
     """
     # Create a table and slice it to create arrays with non-zero offsets
-    full_table = pa.table({
-        "id": pa.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], type=pa.int64()),
-        "name": pa.array(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]),
-        "value": pa.array([0.0, 1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9], type=pa.float64()),
-    })
+    full_table = pa.table(
+        {
+            "id": pa.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], type=pa.int64()),
+            "name": pa.array(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]),
+            "value": pa.array(
+                [0.0, 1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9], type=pa.float64()
+            ),
+        }
+    )
 
     # Slice to get rows 3-6 (4 rows) - this creates arrays with offset=3
     sliced_table = full_table.slice(3, 4)
@@ -592,10 +641,12 @@ def test_sliced_table_roundtrip(client):
 def test_sliced_table_with_nulls_roundtrip(client):
     """Test sliced arrays with null values are handled correctly."""
     # Create a table with nulls and slice it
-    full_table = pa.table({
-        "id": pa.array([0, 1, None, 3, 4, None, 6, 7, 8, None], type=pa.int64()),
-        "name": pa.array(["a", None, "c", "d", None, "f", "g", None, "i", "j"]),
-    })
+    full_table = pa.table(
+        {
+            "id": pa.array([0, 1, None, 3, 4, None, 6, 7, 8, None], type=pa.int64()),
+            "name": pa.array(["a", None, "c", "d", None, "f", "g", None, "i", "j"]),
+        }
+    )
 
     # Slice rows 2-7 (6 rows) - includes various null positions
     sliced_table = full_table.slice(2, 6)
@@ -625,35 +676,41 @@ def test_date_time_types_roundtrip(client):
     """Test Arrow date and time types are transferred correctly."""
     from datetime import date, datetime
 
-    table = pa.table({
-        "date32_col": pa.array(
-            [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
-            type=pa.date32(),
-        ),
-        "date64_col": pa.array(
-            [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
-            type=pa.date64(),
-        ),
-        "timestamp_us": pa.array(
-            [
-                datetime(2024, 1, 15, 10, 30, 0),
-                datetime(2024, 6, 30, 23, 59, 59),
-                datetime(2025, 12, 31, 0, 0, 0),
-            ],
-            type=pa.timestamp("us"),
-        ),
-        "timestamp_ns": pa.array(
-            [
-                datetime(2024, 1, 15, 10, 30, 0),
-                datetime(2024, 6, 30, 23, 59, 59),
-                datetime(2025, 12, 31, 0, 0, 0),
-            ],
-            type=pa.timestamp("ns"),
-        ),
-        "time32_s": pa.array([3600, 7200, 86399], type=pa.time32("s")),
-        "time64_us": pa.array([3600000000, 7200000000, 86399000000], type=pa.time64("us")),
-        "duration_us": pa.array([1000000, 2000000, 3000000], type=pa.duration("us")),
-    })
+    table = pa.table(
+        {
+            "date32_col": pa.array(
+                [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
+                type=pa.date32(),
+            ),
+            "date64_col": pa.array(
+                [date(2024, 1, 15), date(2024, 6, 30), date(2025, 12, 31)],
+                type=pa.date64(),
+            ),
+            "timestamp_us": pa.array(
+                [
+                    datetime(2024, 1, 15, 10, 30, 0),
+                    datetime(2024, 6, 30, 23, 59, 59),
+                    datetime(2025, 12, 31, 0, 0, 0),
+                ],
+                type=pa.timestamp("us"),
+            ),
+            "timestamp_ns": pa.array(
+                [
+                    datetime(2024, 1, 15, 10, 30, 0),
+                    datetime(2024, 6, 30, 23, 59, 59),
+                    datetime(2025, 12, 31, 0, 0, 0),
+                ],
+                type=pa.timestamp("ns"),
+            ),
+            "time32_s": pa.array([3600, 7200, 86399], type=pa.time32("s")),
+            "time64_us": pa.array(
+                [3600000000, 7200000000, 86399000000], type=pa.time64("us")
+            ),
+            "duration_us": pa.array(
+                [1000000, 2000000, 3000000], type=pa.duration("us")
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -680,24 +737,26 @@ def test_timestamp_with_timezone_roundtrip(client):
     """Test timezone-aware timestamps are transferred correctly."""
     from datetime import datetime
 
-    table = pa.table({
-        "ts_utc": pa.array(
-            [
-                datetime(2024, 1, 15, 10, 0),
-                datetime(2024, 6, 30, 12, 0),
-                datetime(2025, 12, 31, 23, 59),
-            ],
-            type=pa.timestamp("us", tz="UTC"),
-        ),
-        "ts_us_eastern": pa.array(
-            [
-                datetime(2024, 1, 15, 10, 0),
-                datetime(2024, 6, 30, 12, 0),
-                datetime(2025, 12, 31, 23, 59),
-            ],
-            type=pa.timestamp("us", tz="America/New_York"),
-        ),
-    })
+    table = pa.table(
+        {
+            "ts_utc": pa.array(
+                [
+                    datetime(2024, 1, 15, 10, 0),
+                    datetime(2024, 6, 30, 12, 0),
+                    datetime(2025, 12, 31, 23, 59),
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "ts_us_eastern": pa.array(
+                [
+                    datetime(2024, 1, 15, 10, 0),
+                    datetime(2024, 6, 30, 12, 0),
+                    datetime(2025, 12, 31, 23, 59),
+                ],
+                type=pa.timestamp("us", tz="America/New_York"),
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -723,20 +782,22 @@ def test_date_time_with_nulls_roundtrip(client):
     """Test date/time types with null values."""
     from datetime import date, datetime
 
-    table = pa.table({
-        "date_nullable": pa.array(
-            [date(2024, 1, 15), None, date(2025, 12, 31)],
-            type=pa.date32(),
-        ),
-        "ts_nullable": pa.array(
-            [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
-            type=pa.timestamp("us"),
-        ),
-        "ts_tz_nullable": pa.array(
-            [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
-            type=pa.timestamp("us", tz="UTC"),
-        ),
-    })
+    table = pa.table(
+        {
+            "date_nullable": pa.array(
+                [date(2024, 1, 15), None, date(2025, 12, 31)],
+                type=pa.date32(),
+            ),
+            "ts_nullable": pa.array(
+                [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
+                type=pa.timestamp("us"),
+            ),
+            "ts_tz_nullable": pa.array(
+                [datetime(2024, 1, 15, 10, 0), None, datetime(2025, 12, 31, 23, 59)],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -772,12 +833,14 @@ def test_schema_serialization_consistency(client):
     from gatun.arena import compute_schema_hash
 
     # Create a table with various types to test schema handling
-    table = pa.table({
-        "int_col": pa.array([1, 2, 3], type=pa.int64()),
-        "float_col": pa.array([1.1, 2.2, 3.3], type=pa.float64()),
-        "str_col": pa.array(["a", "b", "c"], type=pa.string()),
-        "bool_col": pa.array([True, False, True], type=pa.bool_()),
-    })
+    table = pa.table(
+        {
+            "int_col": pa.array([1, 2, 3], type=pa.int64()),
+            "float_col": pa.array([1.1, 2.2, 3.3], type=pa.float64()),
+            "str_col": pa.array(["a", "b", "c"], type=pa.string()),
+            "bool_col": pa.array([True, False, True], type=pa.bool_()),
+        }
+    )
 
     arena = client.get_payload_arena()
 
@@ -801,7 +864,9 @@ def test_schema_serialization_consistency(client):
     # Verify all field types match
     for i, field in enumerate(table.schema):
         received_field = received.schema.field(i)
-        assert received_field.type == field.type, f"Type mismatch for field {field.name}"
+        assert received_field.type == field.type, (
+            f"Type mismatch for field {field.name}"
+        )
 
     # Second send with same schema - should use cached schema (no schema bytes sent)
     arena.reset()
@@ -831,13 +896,15 @@ def test_schema_hash_consistency_nested_types(client):
     after being sent to Java and received back.
     """
     # Create table with nested types
-    table = pa.table({
-        "list_col": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int64())),
-        "struct_col": pa.array(
-            [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}, {"x": 3, "y": "c"}],
-            type=pa.struct([("x", pa.int64()), ("y", pa.string())]),
-        ),
-    })
+    table = pa.table(
+        {
+            "list_col": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int64())),
+            "struct_col": pa.array(
+                [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}, {"x": 3, "y": "c"}],
+                type=pa.struct([("x", pa.int64()), ("y", pa.string())]),
+            ),
+        }
+    )
 
     arena = client.get_payload_arena()
     schema_cache = {}
@@ -852,7 +919,12 @@ def test_schema_hash_consistency_nested_types(client):
     assert received.schema == table.schema, "Nested type schema mismatch"
 
     # Verify data roundtrip
-    assert received.column("list_col").to_pylist() == table.column("list_col").to_pylist()
-    assert received.column("struct_col").to_pylist() == table.column("struct_col").to_pylist()
+    assert (
+        received.column("list_col").to_pylist() == table.column("list_col").to_pylist()
+    )
+    assert (
+        received.column("struct_col").to_pylist()
+        == table.column("struct_col").to_pylist()
+    )
 
     arena.close()

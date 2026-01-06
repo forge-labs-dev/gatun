@@ -162,20 +162,23 @@ def launch_gateway(
     else:
         # Use -jar for simplicity when no extra classpath needed
         # java [FLAGS] -jar [JAR] [MEM_SIZE] [SOCKET_PATH]
-        cmd = [java_cmd] + jvm_flags + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
+        cmd = (
+            [java_cmd]
+            + jvm_flags
+            + ["-jar", str(JAR_PATH), str(mem_bytes), socket_path]
+        )
 
     logger.info("Launching Java server: %s @ %s", memory, socket_path)
     logger.debug("JVM command: %s", " ".join(cmd))
 
     # Check if debug mode is requested via env var or parameter
     import sys
+
     debug_mode = debug or os.environ.get("GATUN_DEBUG", "").lower() == "true"
 
     if debug_mode:
         # Pass through output for debugging - logs appear in real-time
-        process = subprocess.Popen(
-            cmd, stdout=sys.stderr, stderr=sys.stderr, text=True
-        )
+        process = subprocess.Popen(cmd, stdout=sys.stderr, stderr=sys.stderr, text=True)
     else:
         # Capture output (default) - quieter but startup errors are still reported
         process = subprocess.Popen(

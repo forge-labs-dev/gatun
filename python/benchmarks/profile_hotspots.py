@@ -27,7 +27,7 @@ def profile_instance_method_calls(client, iterations=5000):
     pr.disable()
 
     s = StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
     ps.print_stats(30)
     print("=== Instance Method Calls (arr.size()) ===")
     print(s.getvalue())
@@ -56,7 +56,7 @@ def profile_static_method_calls(client, iterations=5000):
     pr.disable()
 
     s = StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
     ps.print_stats(30)
     print("=== Static Method Calls (System.currentTimeMillis()) ===")
     print(s.getvalue())
@@ -85,7 +85,7 @@ def profile_object_creation(client, iterations=5000):
     pr.disable()
 
     s = StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
     ps.print_stats(30)
     print("=== Object Creation (new ArrayList()) ===")
     print(s.getvalue())
@@ -116,7 +116,7 @@ def profile_string_return(client, iterations=5000):
     pr.disable()
 
     s = StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
     ps.print_stats(30)
     print("=== String Return (sb.toString()) ===")
     print(s.getvalue())
@@ -131,7 +131,6 @@ def profile_string_return(client, iterations=5000):
 
 def profile_breakdown():
     """Profile individual components to identify bottlenecks."""
-    import flatbuffers
     from gatun.generated.org.gatun.protocol import Command as Cmd
     from gatun.generated.org.gatun.protocol import Action as Act
     from gatun.generated.org.gatun.protocol import Response
