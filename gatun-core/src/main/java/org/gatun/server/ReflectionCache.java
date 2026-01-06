@@ -15,9 +15,14 @@ import java.util.logging.Logger;
  *   <li>Method lookups (with MethodHandle for fast invocation)</li>
  *   <li>Constructor lookups</li>
  *   <li>Field lookups (static and instance)</li>
- *   <li>Class lookups by name</li>
+ *   <li>Class lookups by name (keyed by classloader for Spark compatibility)</li>
  *   <li>No-arg methods as MethodHandles for the common case</li>
  * </ul>
+ *
+ * <p><b>Security boundary:</b> Only PUBLIC methods and constructors are cached and callable.
+ * This uses {@code getMethods()} and {@code getConstructors()} which return only public members.
+ * The {@code setAccessible(true)} calls are solely for creating MethodHandles on public methods
+ * of private inner classes (e.g., {@code ArrayList$Itr}), not for accessing private methods.
  *
  * <p>All caches are thread-safe using ConcurrentHashMap.
  */
