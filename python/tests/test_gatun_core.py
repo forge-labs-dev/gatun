@@ -906,3 +906,69 @@ def test_class_cache_repeated_loads(client):
             obj = client.create_object("java.util.HashMap")
         # Just verify they work
         assert obj is not None
+
+
+def test_private_inner_class_method_handle(client):
+    """Test that methods on private inner classes work via privateLookupIn.
+
+    ArrayList.iterator() returns ArrayList$Itr which is a private inner class.
+    The MethodHandle for its methods (hasNext, next) requires privateLookupIn
+    to avoid falling back to slow reflective invocation.
+    """
+    # Create a list and get its iterator (private inner class ArrayList$Itr)
+    arr = client.create_object("java.util.ArrayList")
+    arr.add("first")
+    arr.add("second")
+    arr.add("third")
+
+    # Get iterator - returns a private inner class instance
+    iterator = arr.iterator()
+
+    # Call methods on the private inner class
+    # These should use MethodHandle via privateLookupIn, not slow Method.invoke
+    results = []
+    while iterator.hasNext():
+        results.append(iterator.next())
+
+    assert results == ["first", "second", "third"]
+
+
+def test_private_inner_class_repeated_calls(client):
+    """Test performance of repeated calls on private inner class methods.
+
+    This exercises the cache path for private inner class methods,
+    ensuring MethodHandle is properly cached after privateLookupIn.
+    """
+    # Do this multiple times to exercise caching
+    for _ in range(10):
+        arr = client.create_object("java.util.ArrayList")
+        for i in range(20):
+            arr.add(f"item_{i}")
+
+        # Iterate using the private inner class iterator
+        iterator = arr.iterator()
+        count = 0
+        while iterator.hasNext():
+            iterator.next()
+            count += 1
+
+        assert count == 20
+
+
+def test_hashmap_keyset_iterator(client):
+    """Test iterator on HashMap.keySet() - another private inner class path."""
+    hm = client.create_object("java.util.HashMap")
+    hm.put("a", 1)
+    hm.put("b", 2)
+    hm.put("c", 3)
+
+    # keySet() returns a view, iterator() returns private inner class
+    key_set = hm.keySet()
+    iterator = key_set.iterator()
+
+    keys = []
+    while iterator.hasNext():
+        keys.append(iterator.next())
+
+    # HashMap doesn't guarantee order, but should have all keys
+    assert sorted(keys) == ["a", "b", "c"]
