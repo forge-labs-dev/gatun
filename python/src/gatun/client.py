@@ -1286,11 +1286,14 @@ class GatunClient:
         # 4. Signal Java (Send Length)
         # Verify socket is open
         if self.sock.fileno() == -1:
-            if wait_for_response:
-                raise RuntimeError("Socket closed")
-            return
+            self._mark_dead()
+            raise DeadConnectionError("Socket already closed")
 
-        self.sock.sendall(struct.pack("<I", len(data)))
+        try:
+            self.sock.sendall(struct.pack("<I", len(data)))
+        except (OSError, BrokenPipeError, ConnectionResetError) as e:
+            self._mark_dead()
+            raise ProtocolDesyncError(f"Socket error sending command: {e}")
 
         # 5. Handle Response
         if wait_for_response:
@@ -1425,6 +1428,13 @@ class GatunClient:
                 self._mark_dead()
                 raise ProtocolDesyncError(
                     f"Timeout draining pending responses (drained {drained})"
+                )
+            except (RuntimeError, OSError, BrokenPipeError, ConnectionResetError) as e:
+                # Socket error during drain (e.g., from _handle_callback sending response,
+                # or "Socket closed unexpectedly" from _recv_exactly)
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"Socket error during drain: {e}"
                 )
 
         if self._pending_responses > 0:
@@ -1570,6 +1580,10 @@ class GatunClient:
                 # Timeout during read means connection is in unknown state
                 self._mark_dead()
                 raise
+            except (RuntimeError, OSError, BrokenPipeError, ConnectionResetError) as e:
+                # Socket closed or error - mark dead and convert to ProtocolDesyncError
+                self._mark_dead()
+                raise ProtocolDesyncError(f"Socket error reading response: {e}")
             sz = struct.unpack("<I", sz_data)[0]
 
             # 2. Validate response size before reading from SHM
@@ -1611,7 +1625,12 @@ class GatunClient:
 
             # Check if this is a callback request from Java
             if resp.IsCallback():
-                self._handle_callback(resp)
+                try:
+                    self._handle_callback(resp)
+                except (OSError, BrokenPipeError, ConnectionResetError) as e:
+                    # Socket error while sending callback response
+                    self._mark_dead()
+                    raise ProtocolDesyncError(f"Socket error during callback: {e}")
                 # After handling callback, continue reading for the actual response
                 continue
 
