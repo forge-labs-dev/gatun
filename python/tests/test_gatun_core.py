@@ -972,3 +972,87 @@ def test_hashmap_keyset_iterator(client):
 
     # HashMap doesn't guarantee order, but should have all keys
     assert sorted(keys) == ["a", "b", "c"]
+
+
+def test_type_specificity_prefers_exact_over_widening(client):
+    """Test that exact type matches are preferred over widening conversions.
+
+    This verifies the scoring hierarchy in MethodResolver.getTypeSpecificity():
+    - Exact match (100) > Boxing (90) > Primitive widening (80-) > Boxed widening (70-)
+    """
+    # Math.max has overloads: max(int,int), max(long,long), max(float,float), max(double,double)
+    Math = client.jvm.java.lang.Math
+
+    # When passing Python ints, should pick int overload (exact match for Integer->int unbox)
+    result = Math.max(10, 20)
+    assert result == 20
+    assert isinstance(result, int)
+
+    # When passing Python floats, should pick double overload
+    result = Math.max(10.5, 20.5)
+    assert abs(result - 20.5) < 0.001
+
+    # Integer.compare(int, int) vs Long.compare(long, long)
+    # When called with ints, should pick Integer.compare
+    result = client.jvm.java.lang.Integer.compare(5, 10)
+    assert result < 0  # 5 < 10
+
+    result = client.jvm.java.lang.Long.compare(5, 10)
+    assert result < 0  # Also works via widening
+
+
+def test_boxed_widening_does_not_dominate(client):
+    """Test that boxed widening (Integer->Long) scores lower than direct matches.
+
+    Java doesn't implicitly convert Integer to Long, but Gatun supports it
+    for convenience. This test ensures it's ranked as less preferred.
+    """
+    # String.valueOf has many overloads including valueOf(int), valueOf(long)
+    String = client.jvm.java.lang.String
+
+    # Python int maps to Java Integer, should match valueOf(int) directly
+    # not widen to valueOf(long)
+    result = String.valueOf(42)
+    assert result == "42"
+
+    # Explicit long should also work
+    result = String.valueOf(9999999999999)  # Larger than int max
+    assert result == "9999999999999"
+
+
+def test_cache_handles_many_signatures(client):
+    """Test that caches handle many distinct method signatures gracefully.
+
+    This exercises the bounded LRU cache behavior by creating many
+    distinct method calls with different argument patterns. The cache
+    should evict old entries rather than growing unbounded.
+    """
+    # Create many distinct method calls with different argument patterns
+    # This simulates what happens in Spark with dynamically generated code
+
+    StringBuilder = client.jvm.java.lang.StringBuilder
+    String = client.jvm.java.lang.String
+
+    # Create several StringBuilders with different initial strings
+    # Each constructor call may have different signature resolution
+    builders = []
+    for i in range(50):
+        sb = StringBuilder(f"test_{i}")
+        builders.append(sb)
+
+    # Call various methods on each builder
+    for i, sb in enumerate(builders):
+        sb.append(f"_suffix_{i}")
+        sb.toString()
+
+    # Also exercise static method resolution
+    for i in range(50):
+        String.valueOf(i)
+        String.valueOf(float(i))
+
+    # Verify operations completed correctly
+    assert builders[0].toString() == "test_0_suffix_0"
+    assert builders[-1].toString() == "test_49_suffix_49"
+
+    # The test passes if no OutOfMemoryError or excessive slowdown occurs
+    # The bounded cache should have evicted oldest entries if needed

@@ -24,58 +24,81 @@ import java.util.logging.Logger;
  * The {@code setAccessible(true)} calls are solely for creating MethodHandles on public methods
  * of private inner classes (e.g., {@code ArrayList$Itr}), not for accessing private methods.
  *
- * <p>All caches are thread-safe using ConcurrentHashMap.
+ * <p><b>Cache sizing:</b> Signature-based caches (method, constructor, field) use bounded LRU
+ * with configurable maximum size to prevent memory growth in long-running sessions (e.g., Spark).
+ * Class-keyed caches use WeakHashMap to allow GC when classes are unloaded.
+ *
+ * <p>All caches are thread-safe.
  */
 public final class ReflectionCache {
   private static final Logger LOG = Logger.getLogger(ReflectionCache.class.getName());
 
+  // --- CACHE SIZE CONFIGURATION ---
+  // Default max entries for signature-based caches (method, constructor)
+  // Configurable via system property for tuning in large Spark jobs
+  private static final int DEFAULT_MAX_SIGNATURE_CACHE_SIZE = 10_000;
+  private static final int MAX_SIGNATURE_CACHE_SIZE = Integer.getInteger(
+      "gatun.cache.maxSignatureEntries", DEFAULT_MAX_SIGNATURE_CACHE_SIZE);
+
+  // Default max entries for field caches (typically smaller)
+  private static final int DEFAULT_MAX_FIELD_CACHE_SIZE = 2_000;
+  private static final int MAX_FIELD_CACHE_SIZE = Integer.getInteger(
+      "gatun.cache.maxFieldEntries", DEFAULT_MAX_FIELD_CACHE_SIZE);
+
   // --- METHOD CACHE ---
   // Key: (class, methodName, argTypes) -> CachedMethod (method + MethodHandle + varargs info)
-  private static final Map<MethodCacheKey, CachedMethod> methodCache = new ConcurrentHashMap<>();
+  // Bounded LRU to prevent memory growth with dynamic signatures
+  private static final BoundedCache<MethodCacheKey, CachedMethod> methodCache =
+      new BoundedCache<>(MAX_SIGNATURE_CACHE_SIZE);
 
   // --- CONSTRUCTOR CACHE ---
   // Key: (class, argTypes) -> CachedConstructor (constructor + varargs info)
-  private static final Map<ConstructorCacheKey, CachedConstructor> constructorCache =
-      new ConcurrentHashMap<>();
+  private static final BoundedCache<ConstructorCacheKey, CachedConstructor> constructorCache =
+      new BoundedCache<>(MAX_SIGNATURE_CACHE_SIZE);
 
   // --- NO-ARG CONSTRUCTOR CACHE ---
   // Key: class -> no-arg Constructor
+  // Uses WeakHashMap to allow GC when classes are unloaded
   private static final Map<Class<?>, java.lang.reflect.Constructor<?>> noArgConstructorCache =
-      new ConcurrentHashMap<>();
+      java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
   // --- NO-ARG METHOD HANDLE CACHE ---
   // Uses a simple two-level map: Class -> methodName -> MethodHandle
+  // Outer map uses WeakHashMap to allow GC when classes are unloaded
   private static final Map<Class<?>, Map<String, MethodHandle>> noArgMethodHandleCache =
-      new ConcurrentHashMap<>();
+      java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
   // --- STATIC FIELD CACHE ---
   // Key: "className.fieldName" -> Field object
-  private static final Map<String, java.lang.reflect.Field> staticFieldCache =
-      new ConcurrentHashMap<>();
+  private static final BoundedCache<String, java.lang.reflect.Field> staticFieldCache =
+      new BoundedCache<>(MAX_FIELD_CACHE_SIZE);
 
   // --- INSTANCE FIELD CACHE ---
   // Key: "className.fieldName" -> Field object
-  private static final Map<String, java.lang.reflect.Field> instanceFieldCache =
-      new ConcurrentHashMap<>();
+  private static final BoundedCache<String, java.lang.reflect.Field> instanceFieldCache =
+      new BoundedCache<>(MAX_FIELD_CACHE_SIZE);
 
   // --- VAR HANDLE CACHE ---
   // Key: "className.fieldName" -> VarHandle for faster field access
-  private static final Map<String, VarHandle> varHandleCache = new ConcurrentHashMap<>();
+  private static final BoundedCache<String, VarHandle> varHandleCache =
+      new BoundedCache<>(MAX_FIELD_CACHE_SIZE);
 
   // --- STATIC VAR HANDLE CACHE ---
   // Key: "className.fieldName" -> CachedStaticVarHandle with VarHandle + declaring class
-  private static final Map<String, CachedStaticVarHandle> staticVarHandleCache =
-      new ConcurrentHashMap<>();
+  private static final BoundedCache<String, CachedStaticVarHandle> staticVarHandleCache =
+      new BoundedCache<>(MAX_FIELD_CACHE_SIZE);
 
   // --- METHODS CACHE ---
   // Caches getMethods() results per class
+  // Uses WeakHashMap to allow GC when classes are unloaded
   private static final Map<Class<?>, java.lang.reflect.Method[]> methodsCache =
-      new ConcurrentHashMap<>();
+      java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
   // --- CONSTRUCTORS CACHE ---
   // Caches getConstructors() results per class
+  // Uses WeakHashMap to allow GC when classes are unloaded
   private static final Map<Class<?>, java.lang.reflect.Constructor<?>[]> constructorsCache =
-      new ConcurrentHashMap<>();
+      java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
   // --- CLASS CACHE ---
   // Caches Class.forName() results, keyed by (ClassLoader, className) to be classloader-safe.
@@ -191,9 +214,11 @@ public final class ReflectionCache {
     if (field != null) {
       return field;
     }
+    // Not in cache - look up and cache
     field = clazz.getField(fieldName);
-    staticFieldCache.put(key, field);
-    return field;
+    final java.lang.reflect.Field foundField = field;
+    staticFieldCache.put(key, foundField);
+    return foundField;
   }
 
   // ========== INSTANCE FIELD ==========
@@ -213,8 +238,9 @@ public final class ReflectionCache {
     while (current != null) {
       try {
         field = current.getDeclaredField(fieldName);
-        instanceFieldCache.put(key, field);
-        return field;
+        final java.lang.reflect.Field foundField = field;
+        instanceFieldCache.put(key, foundField);
+        return foundField;
       } catch (NoSuchFieldException e) {
         current = current.getSuperclass();
       }
@@ -637,5 +663,71 @@ public final class ReflectionCache {
     } catch (NoSuchFieldException | IllegalAccessException e) {
       return null;
     }
+  }
+
+  // ========== CACHE STATISTICS ==========
+
+  /**
+   * Get cache statistics for monitoring and debugging.
+   *
+   * @return formatted string with stats for all caches
+   */
+  public static String getCacheStats() {
+    StringBuilder sb = new StringBuilder();
+    sb.append("ReflectionCache Statistics:\n");
+    sb.append("  methodCache: ").append(methodCache.getStats()).append("\n");
+    sb.append("  constructorCache: ").append(constructorCache.getStats()).append("\n");
+    sb.append("  staticFieldCache: ").append(staticFieldCache.getStats()).append("\n");
+    sb.append("  instanceFieldCache: ").append(instanceFieldCache.getStats()).append("\n");
+    sb.append("  varHandleCache: ").append(varHandleCache.getStats()).append("\n");
+    sb.append("  staticVarHandleCache: ").append(staticVarHandleCache.getStats()).append("\n");
+    sb.append("  methodsCache: size=").append(methodsCache.size()).append(" (WeakHashMap)\n");
+    sb.append("  constructorsCache: size=").append(constructorsCache.size()).append(" (WeakHashMap)\n");
+    sb.append("  noArgConstructorCache: size=").append(noArgConstructorCache.size()).append(" (WeakHashMap)\n");
+    sb.append("  noArgMethodHandleCache: size=").append(noArgMethodHandleCache.size()).append(" (WeakHashMap)\n");
+    // Count class cache entries across all loaders
+    int classCount = 0;
+    synchronized (classCache) {
+      for (Map<String, Class<?>> loaderCache : classCache.values()) {
+        classCount += loaderCache.size();
+      }
+    }
+    sb.append("  classCache: size=").append(classCount).append(" across ")
+        .append(classCache.size()).append(" loaders (WeakHashMap)\n");
+    return sb.toString();
+  }
+
+  /**
+   * Get method cache statistics.
+   */
+  public static BoundedCache<MethodCacheKey, CachedMethod> getMethodCache() {
+    return methodCache;
+  }
+
+  /**
+   * Get constructor cache statistics.
+   */
+  public static BoundedCache<ConstructorCacheKey, CachedConstructor> getConstructorCache() {
+    return constructorCache;
+  }
+
+  /**
+   * Clear all caches. Useful for testing or when classloaders change.
+   */
+  public static void clearAllCaches() {
+    methodCache.clear();
+    constructorCache.clear();
+    staticFieldCache.clear();
+    instanceFieldCache.clear();
+    varHandleCache.clear();
+    staticVarHandleCache.clear();
+    methodsCache.clear();
+    constructorsCache.clear();
+    noArgConstructorCache.clear();
+    noArgMethodHandleCache.clear();
+    synchronized (classCache) {
+      classCache.clear();
+    }
+    LOG.info("All reflection caches cleared");
   }
 }
