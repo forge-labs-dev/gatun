@@ -1282,6 +1282,10 @@ class GatunClient:
         # 3. Write to Shared Memory
         self.shm.seek(self.command_offset)
         self.shm.write(data)
+        # Flush to ensure writes are visible to Java before signaling.
+        # On most platforms mmap writes are immediately visible, but flush
+        # provides a memory barrier that guarantees ordering.
+        self.shm.flush()
 
         # 4. Signal Java (Send Length)
         # Verify socket is open (check None first to avoid AttributeError)
