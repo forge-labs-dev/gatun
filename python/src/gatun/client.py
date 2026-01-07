@@ -1537,13 +1537,19 @@ class GatunClient:
                     Default is 30 seconds to prevent indefinite hangs.
 
         Raises:
-            SocketTimeoutError: If the socket read times out
+            SocketTimeoutError: If the socket read times out.
+                               Connection is closed before raising.
             ProtocolDesyncError: If the response size is invalid.
                                 Connection is closed before raising.
         """
         while True:
             # 1. Read Length with timeout
-            sz_data = _recv_exactly(self.sock, 4, timeout=timeout)
+            try:
+                sz_data = _recv_exactly(self.sock, 4, timeout=timeout)
+            except SocketTimeoutError:
+                # Timeout during read means connection is in unknown state
+                self._mark_dead()
+                raise
             sz = struct.unpack("<I", sz_data)[0]
 
             # 2. Validate response size before reading from SHM
