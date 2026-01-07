@@ -368,15 +368,23 @@ class StaleArenaError(RuntimeError):
     """Raised when accessing Arrow data from a stale arena epoch.
 
     This error occurs when trying to use a table returned from get_arrow_data()
-    after reset_payload_arena() has been called. The underlying shared memory
-    buffers may have been overwritten.
+    after reset_payload_arena() has been called or the client has been closed.
+    The underlying shared memory buffers may have been overwritten or unmapped.
     """
 
     def __init__(self, table_epoch: int, current_epoch: int):
-        super().__init__(
-            f"Arrow table from epoch {table_epoch} is stale (current epoch: {current_epoch}). "
-            f"Tables become invalid after reset_payload_arena() is called."
-        )
+        if current_epoch == -1:
+            # Client was closed - shm is unmapped
+            msg = (
+                f"Arrow table from epoch {table_epoch} is invalid: client was closed. "
+                f"The shared memory buffer has been unmapped."
+            )
+        else:
+            msg = (
+                f"Arrow table from epoch {table_epoch} is stale (current epoch: {current_epoch}). "
+                f"Tables become invalid after reset_payload_arena() is called."
+            )
+        super().__init__(msg)
         self.table_epoch = table_epoch
         self.current_epoch = current_epoch
 
@@ -399,7 +407,13 @@ class ArrowTableView:
         self._client = client
 
     def _check_epoch(self):
-        """Raise StaleArenaError if epoch has changed."""
+        """Raise StaleArenaError if epoch changed or client closed."""
+        # Check if client's shm was closed - buffer pointers would be invalid
+        if self._client.shm is None:
+            raise StaleArenaError(
+                self._epoch,
+                -1,  # Sentinel indicating client closed
+            )
         current = self._client._arena_epoch
         if self._epoch != current:
             raise StaleArenaError(self._epoch, current)
