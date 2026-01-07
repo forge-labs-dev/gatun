@@ -188,6 +188,16 @@ class ProtocolDesyncError(Exception):
         super().__init__(message)
 
 
+class DeadConnectionError(Exception):
+    """Raised when attempting to use a dead connection.
+
+    After a ProtocolDesyncError or SocketTimeoutError, the client is marked
+    as dead and cannot be used. Create a new client to continue.
+    """
+
+    pass
+
+
 class TypeHint:
     """Wrapper to provide an explicit Java type hint for overload resolution.
 
@@ -1103,6 +1113,10 @@ class GatunClient:
         # Nested Java calls from callbacks would deadlock
         self._in_callback: bool = False
 
+        # Dead connection flag - set after protocol desync or timeout
+        # Once dead, all operations will fail fast with DeadConnectionError
+        self._dead: bool = False
+
     def _create_string(self, builder: flatbuffers.Builder, s: str) -> int:
         """Create a FlatBuffers string with caching of encoded bytes.
 
@@ -1220,7 +1234,13 @@ class GatunClient:
         If wait_for_response is False, returns immediately (Fire-and-Forget).
         If expects_response is False, Java won't send a response (used for CallbackResponse).
         """
-        # 0. Check for reentrancy - nested calls from callbacks would deadlock
+        # 0a. Check if connection is dead - fail fast
+        if self._dead:
+            raise DeadConnectionError(
+                "Connection is dead after protocol error. Create a new client."
+            )
+
+        # 0b. Check for reentrancy - nested calls from callbacks would deadlock
         # Exception: CallbackResponse is sent during callback handling
         if self._in_callback and expects_response:
             raise ReentrancyError(
@@ -1268,10 +1288,25 @@ class GatunClient:
         We must close the socket to prevent cascading failures from reading garbage.
         The SHM mapping is left intact so any existing JavaObject references don't
         crash, but the socket is closed so subsequent operations will fail cleanly.
+
+        Once marked dead:
+        - All future operations will immediately raise DeadConnectionError
+        - The socket is closed (shutdown + close)
+        - The client cannot be reused - create a new one
         """
+        if self._dead:
+            return  # Already dead
+
+        self._dead = True
         self._pending_responses = 0
+
+        # Shutdown socket to unblock any pending reads, then close
         try:
             if self.sock:
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass  # May fail if already disconnected
                 self.sock.close()
                 self.sock = None
         except Exception:

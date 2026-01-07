@@ -23,6 +23,7 @@ from gatun.client import (
     ReentrancyError,
     ProtocolDesyncError,
     SocketTimeoutError,
+    DeadConnectionError,
     StaleArenaError,
     ArrowTableView,
     BatchContext,
@@ -79,6 +80,7 @@ __all__ = [
     "ReentrancyError",
     "ProtocolDesyncError",
     "SocketTimeoutError",
+    "DeadConnectionError",
     # Config
     "GatunConfig",
     "get_config",
