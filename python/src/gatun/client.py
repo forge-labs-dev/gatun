@@ -1284,8 +1284,8 @@ class GatunClient:
         self.shm.write(data)
 
         # 4. Signal Java (Send Length)
-        # Verify socket is open
-        if self.sock.fileno() == -1:
+        # Verify socket is open (check None first to avoid AttributeError)
+        if not self.sock or self.sock.fileno() == -1:
             self._mark_dead()
             raise DeadConnectionError("Socket already closed")
 
