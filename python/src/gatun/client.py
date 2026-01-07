@@ -1113,8 +1113,10 @@ class GatunClient:
         # These responses must be drained before the next synchronous command
         self._pending_responses: int = 0
 
-        # Reentrancy detection - tracks if we're inside a callback
-        # Nested Java calls from callbacks would deadlock
+        # Reentrancy detection - tracks if we're inside a callback.
+        # Nested Java calls from callbacks would deadlock the single-stream protocol.
+        # Note: Java serializes callbacks per session via synchronized(ctx.callbackLock),
+        # so we're guaranteed only one callback is in-flight at a time per connection.
         self._in_callback: bool = False
 
         # Dead connection flag - set after protocol desync or timeout
