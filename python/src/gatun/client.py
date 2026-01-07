@@ -57,6 +57,10 @@ PROTOCOL_VERSION = 2
 COMMAND_ZONE_SIZE = 65536  # 64KB for commands
 RESPONSE_ZONE_SIZE = 65536  # 64KB for responses
 
+# Maximum size for callback error messages to prevent exceeding command zone.
+# Leave headroom for FlatBuffers overhead and other command fields.
+MAX_CALLBACK_ERROR_SIZE = COMMAND_ZONE_SIZE // 16  # 4KB
+
 
 class PayloadTooLargeError(Exception):
     """Raised when a payload exceeds the available shared memory space."""
@@ -1765,8 +1769,14 @@ class GatunClient:
         args_vec = builder.EndVector()
 
         # Build target_name (error message if error)
+        # Truncate large error messages to prevent exceeding command zone size.
+        # During fuzzing, callback exceptions can have huge repr() or stack traces.
+        # If we don't truncate, _send_raw will raise PayloadTooLargeError and
+        # Java will be stuck waiting for a CallbackResponse that never arrives.
         target_name_off = None
         if error_msg:
+            if len(error_msg) > MAX_CALLBACK_ERROR_SIZE:
+                error_msg = error_msg[:MAX_CALLBACK_ERROR_SIZE] + "...<truncated>"
             target_name_off = self._create_string(builder, error_msg)
 
         Cmd.CommandStart(builder)
