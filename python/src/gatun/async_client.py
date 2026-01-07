@@ -33,7 +33,9 @@ import pyarrow as pa
 from gatun.client import (
     JavaObject,
     PayloadTooLargeError,
+    ProtocolDesyncError,
     PROTOCOL_VERSION,
+    RESPONSE_ZONE_SIZE,
     _raise_java_exception_impl,
 )
 from gatun.generated.org.gatun.protocol import Command as Cmd
@@ -306,11 +308,35 @@ class AsyncGatunClient:
                 return await self._read_response()
 
     async def _read_response(self):
-        """Read and parse response from the server."""
+        """Read and parse response from the server.
+
+        Raises:
+            asyncio.IncompleteReadError: If socket closes unexpectedly
+            ProtocolDesyncError: If the response size is invalid
+        """
         while True:
             # Read response length
             length_data = await self._reader.readexactly(4)
             response_len = struct.unpack("<I", length_data)[0]
+
+            # Validate response size before reading from SHM
+            # This catches protocol desync (garbage data) early
+            max_response_size = self.memory_size - self.response_offset
+            if response_len == 0:
+                raise ProtocolDesyncError(
+                    "Invalid response size: 0 bytes (empty response)",
+                    response_size=response_len,
+                )
+            if response_len > RESPONSE_ZONE_SIZE:
+                raise ProtocolDesyncError(
+                    f"Response size {response_len} exceeds RESPONSE_ZONE_SIZE ({RESPONSE_ZONE_SIZE})",
+                    response_size=response_len,
+                )
+            if response_len > max_response_size:
+                raise ProtocolDesyncError(
+                    f"Response size {response_len} exceeds available SHM space ({max_response_size})",
+                    response_size=response_len,
+                )
 
             # Read response from shared memory
             self.shm.seek(self.response_offset)

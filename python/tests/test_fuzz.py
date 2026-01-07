@@ -5,6 +5,10 @@ These tests verify that:
 2. Invalid command sizes are rejected
 3. Corrupted bytes don't cause undefined behavior
 4. Zone boundary violations are caught
+
+IMPORTANT: Tests that send raw malformed data use make_client (factory pattern)
+to get a fresh connection per Hypothesis example. This prevents protocol state
+corruption from one example affecting subsequent examples.
 """
 
 import struct
@@ -15,28 +19,34 @@ from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
 
 
-# Common settings for fuzz tests that use fixtures
-FIXTURE_SETTINGS = dict(
-    suppress_health_check=[HealthCheck.function_scoped_fixture],
-)
+# Tests using high-level APIs can safely suppress this check since they don't
+# corrupt protocol state. Tests that send raw malformed data use make_client
+# to create a fresh client per example (which also triggers this check but
+# is safe because each example creates its own client).
+SUPPRESS_FIXTURE_CHECK = [HealthCheck.function_scoped_fixture]
 
 
 class TestMalformedCommandHandling:
-    """Test server resilience to malformed commands."""
+    """Test server resilience to malformed commands.
 
-    def test_zero_length_command(self, client):
+    These tests send raw malformed data that corrupts protocol state,
+    so they use make_client to get a fresh connection per test/example.
+    """
+
+    def test_zero_length_command(self, make_client):
         """Zero-length command should be rejected."""
+        client = make_client()
         # Send zero length
         client.sock.sendall(struct.pack("<I", 0))
 
         # Server should either:
         # 1. Send an error response
         # 2. Close the connection
-        # Either way, the session is now broken, so we check we can't proceed
-        # (The fixture will handle reconnection for next test)
+        # Either way, the session is now broken
 
-    def test_negative_length_command(self, client):
+    def test_negative_length_command(self, make_client):
         """Negative command length (as unsigned) should be handled."""
+        client = make_client()
         # -1 as unsigned int is 0xFFFFFFFF = 4294967295
         # This would be way larger than any zone
         try:
@@ -45,8 +55,9 @@ class TestMalformedCommandHandling:
         except (BrokenPipeError, ConnectionResetError):
             pass  # Expected - server rejected
 
-    def test_oversized_command(self, client):
+    def test_oversized_command(self, make_client):
         """Command larger than command zone should be rejected."""
+        client = make_client()
         # Command zone is 64KB (65536 bytes)
         oversized = 100000  # 100KB
 
@@ -56,8 +67,9 @@ class TestMalformedCommandHandling:
         except (BrokenPipeError, ConnectionResetError):
             pass  # Expected
 
-    def test_truncated_flatbuffer(self, client):
+    def test_truncated_flatbuffer(self, make_client):
         """Truncated FlatBuffer should be handled gracefully."""
+        client = make_client()
         # Build a valid command
         builder = flatbuffers.Builder(256)
         name_off = builder.CreateString("java.util.ArrayList")
@@ -90,9 +102,10 @@ class TestMalformedCommandHandling:
             min_value=24, max_value=127
         ),  # int8 range for FlatBuffers
     )
-    @settings(max_examples=20, deadline=5000, **FIXTURE_SETTINGS)
-    def test_invalid_action_values(self, client, action_byte):
+    @settings(max_examples=20, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_invalid_action_values(self, make_client, action_byte):
         """Invalid action enum values should be handled."""
+        client = make_client()
         # Build a command with invalid action
         builder = flatbuffers.Builder(256)
         Cmd.CommandStart(builder)
@@ -118,12 +131,13 @@ class TestMalformedCommandHandling:
     @given(
         garbage=st.binary(min_size=1, max_size=1000),
     )
-    @settings(max_examples=30, deadline=5000, **FIXTURE_SETTINGS)
-    def test_random_bytes_as_command(self, client, garbage):
+    @settings(max_examples=30, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_random_bytes_as_command(self, make_client, garbage):
         """Random bytes should not crash the server."""
         # Don't send all zeros (might be interpreted as valid empty command)
         assume(garbage != b"\x00" * len(garbage))
 
+        client = make_client()
         client.shm.seek(0)
         client.shm.write(garbage)
 
@@ -142,9 +156,10 @@ class TestMalformedCommandHandling:
             max_size=10,
         ),
     )
-    @settings(max_examples=30, deadline=5000, **FIXTURE_SETTINGS)
-    def test_bit_flipped_command(self, client, flip_positions):
+    @settings(max_examples=30, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_bit_flipped_command(self, make_client, flip_positions):
         """Bit-flipped valid command should not crash server."""
+        client = make_client()
         # Build a valid command
         builder = flatbuffers.Builder(256)
         name_off = builder.CreateString("java.util.ArrayList")
@@ -179,12 +194,13 @@ class TestObjectIdFuzzing:
     @given(
         object_id=st.integers(min_value=-(2**63), max_value=2**63 - 1),
     )
-    @settings(max_examples=50, deadline=5000, **FIXTURE_SETTINGS)
-    def test_arbitrary_object_ids(self, client, object_id):
+    @settings(max_examples=50, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_object_ids(self, make_client, object_id):
         """Arbitrary object IDs should not crash server."""
         # Skip ID 0 which might be special
         assume(object_id != 0)
 
+        client = make_client()
         # Try to invoke method on arbitrary ID
         from gatun.client import JavaException
 
@@ -200,9 +216,10 @@ class TestObjectIdFuzzing:
     @given(
         num_frees=st.integers(min_value=1, max_value=20),
     )
-    @settings(max_examples=20, deadline=5000, **FIXTURE_SETTINGS)
-    def test_repeated_free_on_same_id(self, client, num_frees):
+    @settings(max_examples=20, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_repeated_free_on_same_id(self, make_client, num_frees):
         """Repeated free on same ID should be idempotent."""
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
         obj_id = arr.object_id
 
@@ -221,11 +238,12 @@ class TestStringFuzzing:
     @given(
         class_name=st.text(min_size=0, max_size=1000),
     )
-    @settings(max_examples=50, deadline=5000, **FIXTURE_SETTINGS)
-    def test_arbitrary_class_names(self, client, class_name):
+    @settings(max_examples=50, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_class_names(self, make_client, class_name):
         """Arbitrary class names should not crash server."""
         from gatun.client import JavaException
 
+        client = make_client()
         try:
             client.create_object(class_name)
         except JavaException:
@@ -238,11 +256,12 @@ class TestStringFuzzing:
     @given(
         method_name=st.text(min_size=0, max_size=500),
     )
-    @settings(max_examples=50, deadline=5000, **FIXTURE_SETTINGS)
-    def test_arbitrary_method_names(self, client, method_name):
+    @settings(max_examples=50, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_method_names(self, make_client, method_name):
         """Arbitrary method names should not crash server."""
         from gatun.client import JavaException
 
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         try:
@@ -256,11 +275,12 @@ class TestStringFuzzing:
     @given(
         field_name=st.text(min_size=0, max_size=500),
     )
-    @settings(max_examples=50, deadline=5000, **FIXTURE_SETTINGS)
-    def test_arbitrary_field_names(self, client, field_name):
+    @settings(max_examples=50, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_field_names(self, make_client, field_name):
         """Arbitrary field names should not crash server."""
         from gatun.client import JavaException
 
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         try:
@@ -280,11 +300,12 @@ class TestStringFuzzing:
             max_size=200,
         ),
     )
-    @settings(max_examples=50, deadline=5000, **FIXTURE_SETTINGS)
-    def test_special_characters_in_names(self, client, evil_string):
+    @settings(max_examples=50, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_special_characters_in_names(self, make_client, evil_string):
         """Special characters in names should not cause issues."""
         from gatun.client import JavaException
 
+        client = make_client()
         # Try as class name
         try:
             client.create_object(evil_string)
@@ -320,9 +341,10 @@ class TestArgumentFuzzing:
             max_size=20,
         ),
     )
-    @settings(max_examples=50, deadline=10000, **FIXTURE_SETTINGS)
-    def test_arbitrary_arguments(self, client, args):
+    @settings(max_examples=50, deadline=10000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_arguments(self, make_client, args):
         """Arbitrary arguments should not crash server."""
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         try:
@@ -337,9 +359,10 @@ class TestArgumentFuzzing:
     @given(
         depth=st.integers(min_value=1, max_value=10),
     )
-    @settings(max_examples=20, deadline=5000, **FIXTURE_SETTINGS)
-    def test_deeply_nested_structures(self, client, depth):
+    @settings(max_examples=20, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_deeply_nested_structures(self, make_client, depth):
         """Deeply nested structures should not stack overflow."""
+        client = make_client()
         # Build nested list
         nested = [1]
         for _ in range(depth):
@@ -362,9 +385,10 @@ class TestBatchFuzzing:
     @given(
         num_commands=st.integers(min_value=0, max_value=100),
     )
-    @settings(max_examples=30, deadline=15000, **FIXTURE_SETTINGS)
-    def test_large_batch(self, client, num_commands):
+    @settings(max_examples=30, deadline=15000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_large_batch(self, make_client, num_commands):
         """Large batches should not crash or hang."""
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         with client.batch() as b:
@@ -380,9 +404,10 @@ class TestBatchFuzzing:
             max_size=5,
         ),
     )
-    @settings(max_examples=30, deadline=10000, **FIXTURE_SETTINGS)
-    def test_batch_with_multiple_errors(self, client, error_positions):
+    @settings(max_examples=30, deadline=10000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_batch_with_multiple_errors(self, make_client, error_positions):
         """Batches with multiple errors should handle all correctly."""
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         with client.batch() as b:
@@ -414,9 +439,10 @@ class TestVectorizedFuzzing:
     @given(
         num_calls=st.integers(min_value=0, max_value=50),
     )
-    @settings(max_examples=30, deadline=10000, **FIXTURE_SETTINGS)
-    def test_invoke_methods_size_range(self, client, num_calls):
+    @settings(max_examples=30, deadline=10000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_invoke_methods_size_range(self, make_client, num_calls):
         """invoke_methods should handle various sizes."""
+        client = make_client()
         arr = client.create_object("java.util.ArrayList")
 
         calls = [("add", (i,)) for i in range(num_calls)]
@@ -429,9 +455,10 @@ class TestVectorizedFuzzing:
     @given(
         num_objects=st.integers(min_value=0, max_value=50),
     )
-    @settings(max_examples=30, deadline=10000, **FIXTURE_SETTINGS)
-    def test_create_objects_size_range(self, client, num_objects):
+    @settings(max_examples=30, deadline=10000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_create_objects_size_range(self, make_client, num_objects):
         """create_objects should handle various sizes."""
+        client = make_client()
         specs = [("java.util.ArrayList", ()) for _ in range(num_objects)]
 
         objects = client.create_objects(specs)
@@ -446,8 +473,9 @@ class TestVectorizedFuzzing:
 class TestZoneBoundaryFuzzing:
     """Test command/response zone boundary handling."""
 
-    def test_command_at_zone_limit(self, client):
+    def test_command_at_zone_limit(self, make_client):
         """Command exactly at zone limit should work."""
+        client = make_client()
         # Zone limit is 64KB = 65536 bytes
         # Build a command that's close to the limit
         builder = flatbuffers.Builder(60000)
@@ -495,10 +523,12 @@ class TestCallbackFuzzing:
     @given(
         interface_name=st.text(min_size=0, max_size=200),
     )
-    @settings(max_examples=30, deadline=5000, **FIXTURE_SETTINGS)
-    def test_arbitrary_interface_names(self, client, interface_name):
+    @settings(max_examples=30, deadline=5000, suppress_health_check=SUPPRESS_FIXTURE_CHECK)
+    def test_arbitrary_interface_names(self, make_client, interface_name):
         """Arbitrary interface names should not crash server."""
         from gatun.client import JavaException
+
+        client = make_client()
 
         def dummy_callback(*args):
             return 0

@@ -8,6 +8,7 @@ import mmap
 import os
 import socket
 import struct
+import time
 from typing import TYPE_CHECKING
 import weakref
 
@@ -171,6 +172,22 @@ class ReentrancyError(Exception):
     pass
 
 
+class ProtocolDesyncError(Exception):
+    """Raised when the client and server are out of sync.
+
+    This typically indicates:
+    - Corrupted data on the socket
+    - Server crashed mid-response
+    - Response size exceeds valid bounds
+
+    The connection should be closed and re-established.
+    """
+
+    def __init__(self, message: str, response_size: int | None = None):
+        self.response_size = response_size
+        super().__init__(message)
+
+
 class TypeHint:
     """Wrapper to provide an explicit Java type hint for overload resolution.
 
@@ -268,15 +285,69 @@ def _raise_java_exception_impl(error_type: str, error_msg: str) -> None:
     raise exc_class(error_type, message, error_msg)
 
 
-def _recv_exactly(sock, n):
-    """Receive exactly n bytes from socket, handling partial reads."""
-    data = bytearray()
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise RuntimeError("Socket closed unexpectedly")
-        data.extend(chunk)
-    return bytes(data)
+class SocketTimeoutError(Exception):
+    """Raised when a socket read times out."""
+
+    pass
+
+
+def _recv_exactly(sock, n, timeout: float | None = None):
+    """Receive exactly n bytes from socket, handling partial reads.
+
+    Args:
+        sock: The socket to read from
+        n: Number of bytes to receive
+        timeout: Optional timeout in seconds. If None, uses the socket's
+                 current timeout setting without modification.
+
+    Raises:
+        SocketTimeoutError: If the timeout expires before receiving all bytes
+        RuntimeError: If the socket closes unexpectedly
+    """
+    # Fast path: no timeout specified, use socket's existing timeout
+    # This avoids gettimeout/settimeout overhead in the common case
+    if timeout is None:
+        data = bytearray()
+        while len(data) < n:
+            try:
+                chunk = sock.recv(n - len(data))
+                if not chunk:
+                    raise RuntimeError("Socket closed unexpectedly")
+                data.extend(chunk)
+            except socket.timeout:
+                raise SocketTimeoutError(
+                    f"Timeout after receiving {len(data)}/{n} bytes"
+                )
+        return bytes(data)
+
+    # Slow path: caller specified explicit timeout
+    # Use deadline-based approach to handle partial reads correctly
+    deadline = time.monotonic() + timeout
+    original_timeout = sock.gettimeout()
+
+    try:
+        data = bytearray()
+        while len(data) < n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SocketTimeoutError(
+                    f"Timeout after receiving {len(data)}/{n} bytes"
+                )
+            # Set timeout for this recv to remaining time
+            sock.settimeout(remaining)
+            try:
+                chunk = sock.recv(n - len(data))
+                if not chunk:
+                    raise RuntimeError("Socket closed unexpectedly")
+                data.extend(chunk)
+            except socket.timeout:
+                raise SocketTimeoutError(
+                    f"Timeout after receiving {len(data)}/{n} bytes"
+                )
+        return bytes(data)
+    finally:
+        # Restore original timeout
+        sock.settimeout(original_timeout)
 
 
 class StaleArenaError(RuntimeError):
@@ -1190,21 +1261,133 @@ class GatunClient:
             self._pending_responses += 1
         # If not wait_for_response and not expects_response: truly one-way (CallbackResponse)
 
-    def _drain_pending_responses(self):
+    def _mark_dead(self):
+        """Mark client as dead after protocol desync.
+
+        After a timeout or invalid response, the connection is in an unknown state.
+        We must close the socket to prevent cascading failures from reading garbage.
+        The SHM mapping is left intact so any existing JavaObject references don't
+        crash, but the socket is closed so subsequent operations will fail cleanly.
+        """
+        self._pending_responses = 0
+        try:
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+        except Exception:
+            pass
+
+    def _drain_pending_responses(self, timeout: float = 5.0, max_drain: int = 100):
         """Drain any pending responses from fire-and-forget commands.
 
         Fire-and-forget commands (like FreeObject) still get responses from Java.
         We must read and discard these responses before the next synchronous
         command to keep the response stream in sync.
+
+        IMPORTANT: This must handle callback requests that may arrive during drain.
+        If Java sends a callback request, we must handle it (execute the callback
+        and send CallbackResponse) before continuing to drain. Otherwise Java will
+        block waiting for our callback response and we'll deadlock.
+
+        Args:
+            timeout: Timeout in seconds for each individual response read.
+                    If a single drain times out, we treat it as a desync.
+            max_drain: Maximum number of responses to drain in one call.
+                      Prevents infinite loops if _pending_responses is wrong.
+
+        Raises:
+            ProtocolDesyncError: If drain times out or response size is invalid.
+                                Connection is closed before raising.
         """
-        while self._pending_responses > 0:
-            # Read response length
-            sz_data = _recv_exactly(self.sock, 4)
-            sz = struct.unpack("<I", sz_data)[0]
-            # Read and discard the response data (it's in SHM, we just need to sync)
-            self.shm.seek(self.response_offset)
-            self.shm.read(sz)
-            self._pending_responses -= 1
+        drained = 0
+        errors_discarded = 0
+        # Track total reads to prevent infinite callback loops
+        total_reads = 0
+        max_total_reads = max_drain * 10  # Allow callbacks but not infinite
+
+        while self._pending_responses > 0 and drained < max_drain:
+            if total_reads >= max_total_reads:
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"Too many reads during drain ({total_reads}), possible callback loop"
+                )
+            total_reads += 1
+
+            try:
+                # Read response length with timeout
+                sz_data = _recv_exactly(self.sock, 4, timeout=timeout)
+                sz = struct.unpack("<I", sz_data)[0]
+
+                # Validate response size (same checks as _read_response)
+                max_response_size = self.memory_size - self.response_offset
+                if sz == 0 or sz > RESPONSE_ZONE_SIZE or sz > max_response_size:
+                    self._mark_dead()
+                    raise ProtocolDesyncError(
+                        f"Invalid response size during drain: {sz}", response_size=sz
+                    )
+
+                # Read response data from SHM
+                self.shm.seek(self.response_offset)
+                resp_buf = self.shm.read(sz)
+
+                # Validate we got all the bytes (mmap.read can return fewer)
+                if len(resp_buf) != sz:
+                    self._mark_dead()
+                    raise ProtocolDesyncError(
+                        f"SHM read returned {len(resp_buf)} bytes, expected {sz}",
+                        response_size=sz,
+                    )
+
+                # Parse the response to check if it's a callback
+                resp = Response.Response.GetRootAsResponse(resp_buf, 0)
+
+                if resp.IsCallback():
+                    # Must handle callback - Java is blocked waiting for our response
+                    # This does NOT count as draining a pending response
+                    self._handle_callback(resp)
+                    continue
+
+                # It's a real response - drain complete for this one
+                # Log discarded errors for diagnosability (fire-and-forget commands
+                # that failed may indicate issues even if we don't raise here)
+                if resp.IsError():
+                    errors_discarded += 1
+                    error_msg = resp.ErrorMsg()
+                    if error_msg:
+                        error_text = error_msg.decode("utf-8", errors="replace")
+                        # Truncate long error messages for logging
+                        if len(error_text) > 200:
+                            error_text = error_text[:200] + "..."
+                        logger.debug(
+                            "Discarded error during drain: %s", error_text
+                        )
+
+                self._pending_responses -= 1
+                drained += 1
+
+            except SocketTimeoutError:
+                # Timeout during drain means protocol desync - close connection
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"Timeout draining pending responses (drained {drained})"
+                )
+
+        if self._pending_responses > 0:
+            # Hit max_drain limit - likely a bug or desync
+            remaining = self._pending_responses
+            self._mark_dead()
+            raise ProtocolDesyncError(
+                f"Too many pending responses to drain: {remaining + drained} "
+                f"(max_drain={max_drain})"
+            )
+
+        # Log summary if we discarded any errors
+        if errors_discarded > 0:
+            logger.debug(
+                "Drain completed: %d responses drained, %d errors discarded",
+                drained,
+                errors_discarded,
+            )
 
     def _unpack_value(self, val_type, val_table):
         """Unpack a FlatBuffer Value union to a Python object."""
@@ -1311,17 +1494,58 @@ class GatunClient:
                 result.append(self._unpack_value(item.ValType(), item.Val()))
             return result
 
-    def _read_response(self):
+    def _read_response(self, timeout: float | None = 30.0):
+        """Read and parse a response from the server.
+
+        Args:
+            timeout: Socket read timeout in seconds. None for no timeout.
+                    Default is 30 seconds to prevent indefinite hangs.
+
+        Raises:
+            SocketTimeoutError: If the socket read times out
+            ProtocolDesyncError: If the response size is invalid.
+                                Connection is closed before raising.
+        """
         while True:
-            # 1. Read Length
-            sz_data = _recv_exactly(self.sock, 4)
+            # 1. Read Length with timeout
+            sz_data = _recv_exactly(self.sock, 4, timeout=timeout)
             sz = struct.unpack("<I", sz_data)[0]
 
-            # 2. Read Data from SHM
+            # 2. Validate response size before reading from SHM
+            # This catches protocol desync (garbage data) early
+            # On invalid size, close the connection to prevent cascading failures
+            max_response_size = self.memory_size - self.response_offset
+            if sz == 0:
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    "Invalid response size: 0 bytes (empty response)", response_size=sz
+                )
+            if sz > RESPONSE_ZONE_SIZE:
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"Response size {sz} exceeds RESPONSE_ZONE_SIZE ({RESPONSE_ZONE_SIZE})",
+                    response_size=sz,
+                )
+            if sz > max_response_size:
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"Response size {sz} exceeds available SHM space ({max_response_size})",
+                    response_size=sz,
+                )
+
+            # 3. Read Data from SHM
             self.shm.seek(self.response_offset)
             resp_buf = self.shm.read(sz)
 
-            # 3. Parse FlatBuffer
+            # Validate we got all the bytes (mmap.read can return fewer)
+            if len(resp_buf) != sz:
+                self._mark_dead()
+                raise ProtocolDesyncError(
+                    f"SHM read returned {len(resp_buf)} bytes, expected {sz}",
+                    response_size=sz,
+                )
+
+            # 4. Parse FlatBuffer
             resp = Response.Response.GetRootAsResponse(resp_buf, 0)
 
             # Check if this is a callback request from Java

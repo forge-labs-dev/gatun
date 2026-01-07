@@ -21,6 +21,8 @@ from gatun.client import (
     JavaRuntimeException,
     CancelledException,
     ReentrancyError,
+    ProtocolDesyncError,
+    SocketTimeoutError,
     StaleArenaError,
     ArrowTableView,
     BatchContext,
@@ -75,6 +77,8 @@ __all__ = [
     "JavaRuntimeException",
     "CancelledException",
     "ReentrancyError",
+    "ProtocolDesyncError",
+    "SocketTimeoutError",
     # Config
     "GatunConfig",
     "get_config",
