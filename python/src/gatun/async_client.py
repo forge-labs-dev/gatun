@@ -31,11 +31,16 @@ import flatbuffers
 import pyarrow as pa
 
 from gatun.client import (
+    CallbackTimeoutError,
+    DEFAULT_CALLBACK_TIMEOUT,
+    DEFAULT_SOCKET_TIMEOUT,
+    HANDSHAKE_TIMEOUT,
     JavaObject,
     PayloadTooLargeError,
     ProtocolDesyncError,
     PROTOCOL_VERSION,
     RESPONSE_ZONE_SIZE,
+    SocketTimeoutError,
     _raise_java_exception_impl,
 )
 from gatun.generated.org.gatun.protocol import Command as Cmd
@@ -208,12 +213,45 @@ class AsyncGatunClient:
             result = await Integer.parseInt("42")
     """
 
-    def __init__(self, socket_path: Optional[str] = None):
+    def __init__(
+        self,
+        socket_path: Optional[str] = None,
+        callback_timeout: float | None = None,
+        socket_timeout: float | None = None,
+        handshake_timeout: float | None = None,
+    ):
+        """Initialize an async Gatun client.
+
+        Args:
+            socket_path: Path to the Unix domain socket for communication.
+                        Defaults to ~/gatun.sock.
+            callback_timeout: Timeout in seconds for callback execution.
+                             Prevents hung callbacks from deadlocking the protocol.
+                             Defaults to DEFAULT_CALLBACK_TIMEOUT (30s).
+                             Set to None to disable timeout (not recommended).
+            socket_timeout: Timeout in seconds for socket read operations.
+                           Used for response reads to prevent indefinite hangs.
+                           Defaults to DEFAULT_SOCKET_TIMEOUT (30s).
+                           Set to None to disable timeout (not recommended).
+            handshake_timeout: Timeout in seconds for the initial handshake.
+                              Shorter than socket_timeout since handshake should be fast.
+                              Defaults to HANDSHAKE_TIMEOUT (10s).
+                              Set to None to disable timeout (not recommended).
+        """
         if socket_path is None:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
         self.memory_path = None  # Set during connect() from server handshake
+        self.callback_timeout = (
+            callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
+        )
+        self.socket_timeout = (
+            socket_timeout if socket_timeout is not None else DEFAULT_SOCKET_TIMEOUT
+        )
+        self.handshake_timeout = (
+            handshake_timeout if handshake_timeout is not None else HANDSHAKE_TIMEOUT
+        )
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -241,6 +279,27 @@ class AsyncGatunClient:
             self._jvm = AsyncJVMView(self)
         return self._jvm
 
+    async def _read_with_timeout(self, n: int, timeout: float | None) -> bytes:
+        """Read exactly n bytes with optional timeout.
+
+        Args:
+            n: Number of bytes to read
+            timeout: Timeout in seconds, or None for no timeout
+
+        Returns:
+            The bytes read
+
+        Raises:
+            SocketTimeoutError: If the read times out
+            asyncio.IncompleteReadError: If connection closes before n bytes
+        """
+        if timeout is None:
+            return await self._reader.readexactly(n)
+        try:
+            return await asyncio.wait_for(self._reader.readexactly(n), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise SocketTimeoutError(f"Socket read timed out after {timeout}s")
+
     async def connect(self) -> bool:
         """Connect to the Gatun server asynchronously."""
         try:
@@ -248,10 +307,10 @@ class AsyncGatunClient:
                 self.socket_path
             )
 
-            # Read handshake header
+            # Read handshake header with timeout
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
             #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
-            handshake_header = await self._reader.readexactly(18)
+            handshake_header = await self._read_with_timeout(18, self.handshake_timeout)
             server_version, _, self.memory_size, shm_path_len = struct.unpack(
                 "<IIQH", handshake_header
             )
@@ -262,8 +321,10 @@ class AsyncGatunClient:
                     f"server={server_version}"
                 )
 
-            # Read SHM path
-            shm_path_bytes = await self._reader.readexactly(shm_path_len)
+            # Read SHM path with timeout
+            shm_path_bytes = await self._read_with_timeout(
+                shm_path_len, self.handshake_timeout
+            )
             self.memory_path = shm_path_bytes.decode("utf-8")
 
             self.response_offset = self.memory_size - 65536  # 64KB response zone
@@ -311,12 +372,13 @@ class AsyncGatunClient:
         """Read and parse response from the server.
 
         Raises:
+            SocketTimeoutError: If the socket read times out
             asyncio.IncompleteReadError: If socket closes unexpectedly
             ProtocolDesyncError: If the response size is invalid
         """
         while True:
-            # Read response length
-            length_data = await self._reader.readexactly(4)
+            # Read response length with timeout
+            length_data = await self._read_with_timeout(4, self.socket_timeout)
             response_len = struct.unpack("<I", length_data)[0]
 
             # Validate response size before reading from SHM
@@ -389,13 +451,37 @@ class AsyncGatunClient:
             )
             return
 
-        # Execute the callback with reentrancy guard
+        # Execute the callback with reentrancy guard and timeout
         self._in_callback = True
         try:
             if asyncio.iscoroutinefunction(callback_fn):
-                result = await callback_fn(*args)
+                # Async callback - use wait_for for timeout
+                if self.callback_timeout is not None:
+                    try:
+                        result = await asyncio.wait_for(
+                            callback_fn(*args), timeout=self.callback_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        raise CallbackTimeoutError(
+                            f"Callback execution timed out after {self.callback_timeout}s"
+                        )
+                else:
+                    result = await callback_fn(*args)
             else:
-                result = callback_fn(*args)
+                # Sync callback - run in executor with timeout
+                loop = asyncio.get_running_loop()
+                if self.callback_timeout is not None:
+                    try:
+                        result = await asyncio.wait_for(
+                            loop.run_in_executor(None, callback_fn, *args),
+                            timeout=self.callback_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        raise CallbackTimeoutError(
+                            f"Callback execution timed out after {self.callback_timeout}s"
+                        )
+                else:
+                    result = await loop.run_in_executor(None, callback_fn, *args)
             await self._send_callback_response(callback_id, result, False, None)
         except ReentrancyError:
             # Propagate reentrancy error with clear message
@@ -405,6 +491,9 @@ class AsyncGatunClient:
                 True,
                 "ReentrancyError: Cannot call Java from within a callback",
             )
+        except CallbackTimeoutError as e:
+            # Propagate timeout error
+            await self._send_callback_response(callback_id, None, True, str(e))
         except Exception as e:
             await self._send_callback_response(callback_id, None, True, str(e))
         finally:
