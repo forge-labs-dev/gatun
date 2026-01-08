@@ -66,6 +66,14 @@ MAX_CALLBACK_ERROR_SIZE = COMMAND_ZONE_SIZE // 16  # 4KB
 # Can be overridden per-client via callback_timeout parameter.
 DEFAULT_CALLBACK_TIMEOUT = 30.0
 
+# Default timeout for socket read operations in seconds.
+# Used for handshake, response reads, etc. to prevent indefinite hangs.
+# None means no timeout (blocking) - only used when explicitly needed.
+DEFAULT_SOCKET_TIMEOUT = 30.0
+
+# Handshake timeout - shorter since handshake should be fast
+HANDSHAKE_TIMEOUT = 10.0
+
 
 class PayloadTooLargeError(Exception):
     """Raised when a payload exceeds the available shared memory space."""
@@ -1202,14 +1210,12 @@ class GatunClient:
         logger.debug("Connecting to %s", self.socket_path)
         try:
             self.sock.connect(self.socket_path)
-            # Long timeout for Spark jobs which can take minutes
-            # None = no timeout (blocking mode)
-            self.sock.settimeout(None)
 
             # 1. Handshake - read version, epoch, memory size, and SHM path
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
             #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
-            handshake_header = _recv_exactly(self.sock, 18)
+            # Use timeout to prevent indefinite hang if server doesn't respond
+            handshake_header = _recv_exactly(self.sock, 18, timeout=HANDSHAKE_TIMEOUT)
             server_version, arena_epoch, self.memory_size, shm_path_len = struct.unpack(
                 "<IIQH", handshake_header
             )
@@ -1222,7 +1228,7 @@ class GatunClient:
                 )
 
             # Read SHM path
-            shm_path_bytes = _recv_exactly(self.sock, shm_path_len)
+            shm_path_bytes = _recv_exactly(self.sock, shm_path_len, timeout=HANDSHAKE_TIMEOUT)
             self.memory_path = shm_path_bytes.decode("utf-8")
 
             # Synchronize arena epoch with server
@@ -3480,6 +3486,12 @@ class BatchContext:
         # We need to handle the batch response specially
         data = builder.Output()
 
+        # Check if connection is dead - fail fast
+        if self._client._dead:
+            raise DeadConnectionError(
+                "Connection is dead after protocol error. Create a new client."
+            )
+
         # Validate command size
         max_command_size = self._client.payload_offset
         if len(data) > max_command_size:
@@ -3491,13 +3503,39 @@ class BatchContext:
         # Write to shared memory
         self._client.shm.seek(self._client.command_offset)
         self._client.shm.write(data)
+        self._client.shm.flush()
 
         # Signal Java
-        self._client.sock.sendall(struct.pack("<I", len(data)))
+        if not self._client.sock or self._client.sock.fileno() == -1:
+            self._client._mark_dead()
+            raise DeadConnectionError("Socket already closed")
 
-        # Read response
-        sz_data = _recv_exactly(self._client.sock, 4)
+        try:
+            self._client.sock.sendall(struct.pack("<I", len(data)))
+        except (OSError, BrokenPipeError, ConnectionResetError) as e:
+            self._client._mark_dead()
+            raise ProtocolDesyncError(f"Socket error sending batch command: {e}")
+
+        # Read response with timeout to prevent indefinite hang
+        try:
+            sz_data = _recv_exactly(self._client.sock, 4, timeout=DEFAULT_SOCKET_TIMEOUT)
+        except SocketTimeoutError:
+            self._client._mark_dead()
+            raise
+        except (RuntimeError, OSError, BrokenPipeError, ConnectionResetError) as e:
+            self._client._mark_dead()
+            raise ProtocolDesyncError(f"Socket error reading batch response: {e}")
+
         sz = struct.unpack("<I", sz_data)[0]
+
+        # Validate response size
+        max_response_size = self._client.memory_size - self._client.response_offset
+        if sz == 0 or sz > RESPONSE_ZONE_SIZE or sz > max_response_size:
+            self._client._mark_dead()
+            raise ProtocolDesyncError(
+                f"Invalid batch response size: {sz}", response_size=sz
+            )
+
         self._client.shm.seek(self._client.response_offset)
         resp_buf = self._client.shm.read(sz)
 
