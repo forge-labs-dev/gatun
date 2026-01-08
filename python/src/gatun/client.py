@@ -61,6 +61,11 @@ RESPONSE_ZONE_SIZE = 65536  # 64KB for responses
 # Leave headroom for FlatBuffers overhead and other command fields.
 MAX_CALLBACK_ERROR_SIZE = COMMAND_ZONE_SIZE // 16  # 4KB
 
+# Default timeout for callback execution in seconds.
+# Prevents hung callbacks from deadlocking the protocol.
+# Can be overridden per-client via callback_timeout parameter.
+DEFAULT_CALLBACK_TIMEOUT = 30.0
+
 
 class PayloadTooLargeError(Exception):
     """Raised when a payload exceeds the available shared memory space."""
@@ -171,6 +176,17 @@ class ReentrancyError(Exception):
     - Queue work for later instead of calling Java immediately
     - Use the async client with proper concurrency patterns
     - Restructure code to avoid nested calls
+    """
+
+    pass
+
+
+class CallbackTimeoutError(Exception):
+    """Raised when a callback execution exceeds the timeout.
+
+    This prevents hung callbacks from deadlocking the protocol. When a callback
+    times out, an error response is sent to Java so the original request can
+    complete (with an error) rather than hanging indefinitely.
     """
 
     pass
@@ -1074,18 +1090,25 @@ class _JVMNode:
 
 
 class GatunClient:
-    def __init__(self, socket_path=None):
+    def __init__(self, socket_path=None, callback_timeout: float | None = None):
         """Initialize a Gatun client.
 
         Args:
             socket_path: Path to the Unix domain socket for communication.
                         Defaults to ~/gatun.sock.
+            callback_timeout: Timeout in seconds for callback execution.
+                             Prevents hung callbacks from deadlocking the protocol.
+                             Defaults to DEFAULT_CALLBACK_TIMEOUT (30s).
+                             Set to None to disable timeout (not recommended).
         """
         if socket_path is None:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
         self.memory_path = None  # Set during connect() from server handshake
+        self.callback_timeout = (
+            callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
+        )
 
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.shm_file = None
@@ -1666,7 +1689,12 @@ class GatunClient:
         Sets _in_callback flag to detect and prevent reentrant calls, which would
         deadlock. The flag is always cleared in finally to ensure cleanup even if
         the callback raises an exception.
+
+        If callback_timeout is set, the callback is executed in a separate thread
+        with a timeout to prevent hung callbacks from deadlocking the protocol.
         """
+        import threading
+
         callback_id = resp.CallbackId()
 
         # Unpack callback arguments
@@ -1687,8 +1715,42 @@ class GatunClient:
         # Execute the callback with reentrancy guard
         self._in_callback = True
         try:
-            result = callback_fn(*args)
-            self._send_callback_response(callback_id, result, False, None)
+            if self.callback_timeout is None or self.callback_timeout <= 0:
+                # No timeout - execute directly (not recommended but supported)
+                result = callback_fn(*args)
+                self._send_callback_response(callback_id, result, False, None)
+            else:
+                # Execute with timeout using a thread
+                result_holder = {"result": None, "error": None, "done": False}
+
+                def run_callback():
+                    try:
+                        result_holder["result"] = callback_fn(*args)
+                    except Exception as e:
+                        result_holder["error"] = e
+                    finally:
+                        result_holder["done"] = True
+
+                thread = threading.Thread(target=run_callback, daemon=True)
+                thread.start()
+                thread.join(timeout=self.callback_timeout)
+
+                if not result_holder["done"]:
+                    # Timeout - callback is still running (possibly hung)
+                    # We can't kill the thread, but we must respond to Java
+                    self._send_callback_response(
+                        callback_id,
+                        None,
+                        True,
+                        f"CallbackTimeoutError: Callback execution exceeded {self.callback_timeout}s timeout",
+                    )
+                    return
+                elif result_holder["error"] is not None:
+                    raise result_holder["error"]
+                else:
+                    self._send_callback_response(
+                        callback_id, result_holder["result"], False, None
+                    )
         except ReentrancyError:
             # Propagate reentrancy error with clear message
             self._send_callback_response(
