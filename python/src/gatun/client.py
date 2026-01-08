@@ -1098,7 +1098,13 @@ class _JVMNode:
 
 
 class GatunClient:
-    def __init__(self, socket_path=None, callback_timeout: float | None = None):
+    def __init__(
+        self,
+        socket_path=None,
+        callback_timeout: float | None = None,
+        socket_timeout: float | None = None,
+        handshake_timeout: float | None = None,
+    ):
         """Initialize a Gatun client.
 
         Args:
@@ -1108,6 +1114,14 @@ class GatunClient:
                              Prevents hung callbacks from deadlocking the protocol.
                              Defaults to DEFAULT_CALLBACK_TIMEOUT (30s).
                              Set to None to disable timeout (not recommended).
+            socket_timeout: Timeout in seconds for socket read operations.
+                           Used for response reads to prevent indefinite hangs.
+                           Defaults to DEFAULT_SOCKET_TIMEOUT (30s).
+                           Set to None to disable timeout (not recommended).
+            handshake_timeout: Timeout in seconds for the initial handshake.
+                              Shorter than socket_timeout since handshake should be fast.
+                              Defaults to HANDSHAKE_TIMEOUT (10s).
+                              Set to None to disable timeout (not recommended).
         """
         if socket_path is None:
             socket_path = os.path.expanduser("~/gatun.sock")
@@ -1116,6 +1130,12 @@ class GatunClient:
         self.memory_path = None  # Set during connect() from server handshake
         self.callback_timeout = (
             callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
+        )
+        self.socket_timeout = (
+            socket_timeout if socket_timeout is not None else DEFAULT_SOCKET_TIMEOUT
+        )
+        self.handshake_timeout = (
+            handshake_timeout if handshake_timeout is not None else HANDSHAKE_TIMEOUT
         )
 
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1215,7 +1235,7 @@ class GatunClient:
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
             #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
             # Use timeout to prevent indefinite hang if server doesn't respond
-            handshake_header = _recv_exactly(self.sock, 18, timeout=HANDSHAKE_TIMEOUT)
+            handshake_header = _recv_exactly(self.sock, 18, timeout=self.handshake_timeout)
             server_version, arena_epoch, self.memory_size, shm_path_len = struct.unpack(
                 "<IIQH", handshake_header
             )
@@ -1228,7 +1248,7 @@ class GatunClient:
                 )
 
             # Read SHM path
-            shm_path_bytes = _recv_exactly(self.sock, shm_path_len, timeout=HANDSHAKE_TIMEOUT)
+            shm_path_bytes = _recv_exactly(self.sock, shm_path_len, timeout=self.handshake_timeout)
             self.memory_path = shm_path_bytes.decode("utf-8")
 
             # Synchronize arena epoch with server
@@ -1592,12 +1612,12 @@ class GatunClient:
                 result.append(self._unpack_value(item.ValType(), item.Val()))
             return result
 
-    def _read_response(self, timeout: float | None = 30.0):
+    def _read_response(self, timeout: float | None = ...):
         """Read and parse a response from the server.
 
         Args:
             timeout: Socket read timeout in seconds. None for no timeout.
-                    Default is 30 seconds to prevent indefinite hangs.
+                    Default uses self.socket_timeout (30 seconds by default).
 
         Raises:
             SocketTimeoutError: If the socket read times out.
@@ -1605,6 +1625,10 @@ class GatunClient:
             ProtocolDesyncError: If the response size is invalid.
                                 Connection is closed before raising.
         """
+        # Resolve sentinel to instance default
+        if timeout is ...:
+            timeout = self.socket_timeout
+
         while True:
             # 1. Read Length with timeout
             try:
@@ -3518,7 +3542,7 @@ class BatchContext:
 
         # Read response with timeout to prevent indefinite hang
         try:
-            sz_data = _recv_exactly(self._client.sock, 4, timeout=DEFAULT_SOCKET_TIMEOUT)
+            sz_data = _recv_exactly(self._client.sock, 4, timeout=self._client.socket_timeout)
         except SocketTimeoutError:
             self._client._mark_dead()
             raise
