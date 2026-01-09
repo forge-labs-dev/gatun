@@ -305,28 +305,48 @@ values = client.get_fields(sb, ["count"])  # [5]
 | `get_fields` | Reading multiple fields from one object |
 | `batch` | Mixed operations on **different objects** |
 
-### JavaArray for Array Round-Tripping
+### JavaArray for Primitive Arrays
 
-When Java returns arrays, they're wrapped as `JavaArray` to preserve type when passed back:
+Primitive arrays (`int[]`, `long[]`, `double[]`, etc.) are returned as `JavaArray`:
 
 ```python
 from gatun import JavaArray
+import pyarrow as pa
 
-# Arrays from Java are JavaArray instances
+# Primitive arrays from Java are JavaArray instances
+original = pa.array([1, 2, 3], type=pa.int32())
+int_array = client.jvm.java.util.Arrays.copyOf(original, 3)
+print(isinstance(int_array, JavaArray))  # True
+print(int_array.element_type)  # "Int"
+print(list(int_array))  # [1, 2, 3]
+
+# Create typed arrays manually for passing to Java
+int_array = JavaArray([1, 2, 3], element_type="Int")
+str_array = JavaArray(["a", "b"], element_type="String")
+result = client.jvm.java.util.Arrays.toString(int_array)  # "[1, 2, 3]"
+```
+
+### Object Arrays as JavaObject
+
+Object arrays (`Object[]`, `String[]`) are returned as `JavaObject` references:
+
+```python
+# Object arrays from toArray() are JavaObject (not JavaArray)
 arr = client.jvm.java.util.ArrayList()
 arr.add("x")
 arr.add("y")
-java_array = arr.toArray()  # Returns JavaArray
+java_array = arr.toArray()  # Returns JavaObject
 
-# JavaArray acts like a list
-print(list(java_array))  # ["x", "y"]
+# Use len() and iteration (not .size() or .length)
+print(len(java_array))    # 2
+print(java_array[0])      # "x"
+print(list(java_array))   # ["x", "y"]
 
-# But preserves array type for Java methods
+# Can still pass back to Java methods
 result = client.jvm.java.util.Arrays.toString(java_array)  # "[x, y]"
-
-# Create typed arrays manually
-int_array = JavaArray([1, 2, 3], element_type="Int")
 ```
+
+This distinction exists because Object arrays are kept as references on the Java side, allowing `Array.set()` and `Array.get()` to modify them directly.
 
 ### Arrow Data Transfer
 
@@ -467,10 +487,10 @@ export GATUN_SOCKET_PATH=/tmp/gatun.sock
 | `list` | `List` (ArrayList) |
 | `dict` | `Map` (HashMap) |
 | `bytes` | `byte[]` |
-| `JavaArray` | Arrays (`int[]`, `String[]`, etc.) |
-| `numpy.ndarray` | Typed arrays |
+| `JavaArray` | Primitive arrays (`int[]`, `double[]`, etc.) |
+| `pyarrow.Array` | Typed arrays |
 | `None` | `null` |
-| `JavaObject` | Object reference |
+| `JavaObject` | Object reference (including Object arrays) |
 
 ## Exception Handling
 

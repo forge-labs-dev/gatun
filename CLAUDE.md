@@ -429,28 +429,46 @@ hashset.add(2)
 print(list(hashset))  # [1, 2]
 ```
 
-### JavaArray for Array Round-Tripping
-When Java methods return arrays, they're wrapped as `JavaArray` to preserve array semantics:
+### JavaArray for Primitive Arrays
+Primitive arrays (`int[]`, `long[]`, `double[]`, etc.) are returned as `JavaArray`:
 ```python
 from gatun import JavaArray
+import pyarrow as pa
 
-# Arrays from Java are JavaArray instances
-arr = client.jvm.java.util.ArrayList()
-arr.add("x")
-arr.add("y")
-java_array = arr.toArray()  # Returns JavaArray, not list
-
-# JavaArray acts like a Python list
-print(len(java_array))  # 2
-print(java_array[0])    # "x"
-print(list(java_array)) # ["x", "y"]
-
-# But preserves array type when passed back to Java
-result = client.jvm.java.util.Arrays.toString(java_array)  # "[x, y]"
+# Primitive arrays from Java are JavaArray instances
+original = pa.array([1, 2, 3], type=pa.int32())
+int_array = client.jvm.java.util.Arrays.copyOf(original, 3)
+print(isinstance(int_array, JavaArray))  # True
+print(int_array.element_type)  # "Int"
+print(list(int_array))  # [1, 2, 3]
 
 # Create JavaArray manually for specific element types
 int_array = JavaArray([1, 2, 3], element_type="Int")
 str_array = JavaArray(["a", "b"], element_type="String")
+result = client.jvm.java.util.Arrays.toString(int_array)  # "[1, 2, 3]"
+```
+
+### Object Arrays as JavaObject
+Object arrays (`Object[]`, `String[]`) are returned as `JavaObject` references to allow `Array.set/get`:
+```python
+# Object arrays from toArray() are JavaObject (not JavaArray)
+arr = client.jvm.java.util.ArrayList()
+arr.add("x")
+arr.add("y")
+java_array = arr.toArray()  # Returns JavaObject
+
+# Use len() and iteration (not .size() or .length)
+print(len(java_array))    # 2
+print(java_array[0])      # "x"
+print(list(java_array))   # ["x", "y"]
+
+# Can still pass back to Java methods
+result = client.jvm.java.util.Arrays.toString(java_array)  # "[x, y]"
+
+# Array.set/get work on Object arrays
+Array = client.jvm.java.lang.reflect.Array
+Array.set(java_array, 0, "modified")
+print(Array.get(java_array, 0))  # "modified"
 ```
 
 ### Supported Argument/Return Types
@@ -459,11 +477,13 @@ str_array = JavaArray(["a", "b"], element_type="String")
 - `list` -> Java `List` (ArrayList)
 - `dict` -> Java `Map` (HashMap)
 - `bytes` -> Java `byte[]`
-- `JavaArray` -> Java arrays (preserves array type)
+- `JavaArray` -> Java primitive arrays (`int[]`, `double[]`, etc.)
 - `pyarrow.Array` -> Java arrays (int32->int[], int64->long[], float64->double[], bool->boolean[], string->String[])
 - `array.array` -> Java arrays (typecode 'i'->int[], 'q'->long[], 'd'->double[])
-- Object references (returned as `JavaObject` wrappers)
+- Object references (returned as `JavaObject` wrappers, including Object arrays)
 - `null`/`None`
+
+**Note:** Object arrays (`Object[]`, `String[]`) return as `JavaObject`, not `JavaArray`. Use `len()` instead of `.size()` or `.length`.
 
 ## Exception Handling
 
