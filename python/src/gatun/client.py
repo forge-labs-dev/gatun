@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 import weakref
 
 import flatbuffers
-import numpy as np
 import pyarrow as pa
 
 if TYPE_CHECKING:
@@ -48,6 +47,37 @@ from gatun.generated.org.gatun.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _create_typed_vector(builder, data: bytes, itemsize: int, num_elements: int):
+    """Create a typed FlatBuffers vector from raw bytes.
+
+    This mimics flatbuffers.Builder.CreateNumpyVector but without numpy.
+    It creates a properly-typed vector that can be read with typed accessors
+    like IntValues(i), DoubleValues(i), etc.
+
+    Args:
+        builder: FlatBuffers Builder instance
+        data: Raw bytes in little-endian format
+        itemsize: Size of each element in bytes (4 for int32, 8 for int64/double, etc.)
+        num_elements: Number of elements in the vector
+
+    Returns:
+        Vector offset for use with FlatBuffers Add*Values methods
+    """
+    from flatbuffers.builder import UOffsetTFlags
+
+    builder.StartVector(itemsize, num_elements, itemsize)  # alignment = itemsize
+
+    # Calculate total length
+    length = UOffsetTFlags.py_type(itemsize * num_elements)
+    builder.head = UOffsetTFlags.py_type(builder.Head() - length)
+
+    # Copy bytes directly into buffer
+    builder.Bytes[builder.Head() : builder.Head() + length] = data
+
+    builder.vectorNumElems = num_elements
+    return builder.EndVector()
 
 # Protocol version - must match the server version
 # Version 2: Per-client shared memory (handshake includes SHM path)
@@ -2605,9 +2635,11 @@ class GatunClient:
             MapVal.Start(builder)
             MapVal.AddEntries(builder, entries_vec)
             return Value.Value.MapVal, MapVal.End(builder)
-        elif isinstance(value, np.ndarray):
-            # Convert numpy array to ArrayVal
-            return self._build_array(builder, value)
+        elif isinstance(value, (pa.Array, pa.ChunkedArray)):
+            # Convert PyArrow array to ArrayVal
+            if isinstance(value, pa.ChunkedArray):
+                value = value.combine_chunks()
+            return self._build_arrow_array(builder, value)
         elif isinstance(value, (bytes, bytearray)):
             # Convert bytes to byte array
             return self._build_byte_array(builder, value)
@@ -2676,81 +2708,94 @@ class GatunClient:
             else:
                 raise TypeError(f"Unsupported argument type: {type(value)}")
 
-    def _build_array(self, builder, arr):
-        """Build an ArrayVal from a numpy array."""
-        dtype = arr.dtype
+    def _build_arrow_array(self, builder, arr: pa.Array):
+        """Build an ArrayVal from a PyArrow Array.
 
-        # Mapping of numpy dtypes to (element_type, add_values_fn, optional_cast)
+        Uses Arrow's buffer directly for efficient serialization of primitive types.
+        """
+        # Mapping of Arrow types to (element_type, add_values_fn, itemsize, target_arrow_type)
+        # itemsize is needed for creating properly-typed FlatBuffers vectors
+        # target_arrow_type is used for casting when needed (e.g., float32 -> float64)
         primitive_types = {
-            np.dtype(np.int32): (
-                ElementType.ElementType.Int,
-                ArrayVal.AddIntValues,
-                None,
-            ),
-            np.dtype(np.int64): (
-                ElementType.ElementType.Long,
-                ArrayVal.AddLongValues,
-                None,
-            ),
-            np.dtype(np.float64): (
+            pa.int32(): (ElementType.ElementType.Int, ArrayVal.AddIntValues, 4, None),
+            pa.int64(): (ElementType.ElementType.Long, ArrayVal.AddLongValues, 8, None),
+            pa.float64(): (
                 ElementType.ElementType.Double,
                 ArrayVal.AddDoubleValues,
+                8,
                 None,
             ),
-            np.dtype(np.float32): (
+            pa.float32(): (
                 ElementType.ElementType.Float,
                 ArrayVal.AddDoubleValues,
-                np.float64,  # Widen float32 to float64 for transmission
+                8,  # After widening to float64
+                pa.float64(),  # Widen float32 to float64 for transmission
             ),
-            np.dtype(np.bool_): (
-                ElementType.ElementType.Bool,
-                ArrayVal.AddBoolValues,
-                np.uint8,
-            ),
-            np.dtype(np.int8): (
+            # Note: bool handled specially below due to Arrow's bit-packing
+            pa.int8(): (ElementType.ElementType.Byte, ArrayVal.AddByteValues, 1, None),
+            pa.uint8(): (
                 ElementType.ElementType.Byte,
                 ArrayVal.AddByteValues,
-                np.int8,
+                1,
+                pa.int8(),
             ),
-            np.dtype(np.uint8): (
-                ElementType.ElementType.Byte,
-                ArrayVal.AddByteValues,
-                np.int8,
-            ),
-            np.dtype(np.int16): (
+            pa.int16(): (
                 ElementType.ElementType.Short,
                 ArrayVal.AddIntValues,
-                np.int32,  # Widen short to int for transmission
+                4,  # After widening to int32
+                pa.int32(),  # Widen short to int for transmission
             ),
         }
 
-        if dtype in primitive_types:
-            elem_type, add_values_fn, cast_type = primitive_types[dtype]
-            data = arr if cast_type is None else arr.astype(cast_type)
-            vec_off = builder.CreateNumpyVector(data)
+        arrow_type = arr.type
+
+        # Special handling for bool arrays - Arrow uses bit-packing, Java expects byte-per-bool
+        if arrow_type == pa.bool_():
+            # Convert to byte array (1 byte per boolean)
+            packed = struct.pack(f"<{len(arr)}B", *(1 if b.as_py() else 0 for b in arr))
+            vec_off = _create_typed_vector(builder, packed, 1, len(arr))
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.Bool)
+            ArrayVal.AddBoolValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
+
+        if arrow_type in primitive_types:
+            elem_type, add_values_fn, itemsize, cast_type = primitive_types[arrow_type]
+            if cast_type is not None:
+                arr = arr.cast(cast_type)
+            # Get the data buffer (index 1, index 0 is validity bitmap)
+            # For primitive arrays without nulls, we can use the buffer directly
+            buf = arr.buffers()[1].to_pybytes()
+            vec_off = _create_typed_vector(builder, buf, itemsize, len(arr))
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, elem_type)
             add_values_fn(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
 
-        # String or object arrays - serialize each element
-        if dtype.kind in ("U", "O"):
-            elem_type = (
-                ElementType.ElementType.String
-                if dtype.kind == "U"
-                else ElementType.ElementType.Object
-            )
-        else:
-            # Fallback: treat as object array
-            elem_type = ElementType.ElementType.Object
+        # String array - serialize each element
+        if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+            item_offsets = [
+                self._build_argument(builder, arr[i].as_py()) for i in range(len(arr))
+            ]
+            ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
+            for offset in reversed(item_offsets):
+                builder.PrependUOffsetTRelative(offset)
+            vec_off = builder.EndVector()
+            ArrayVal.Start(builder)
+            ArrayVal.AddElementType(builder, ElementType.ElementType.String)
+            ArrayVal.AddObjectValues(builder, vec_off)
+            return Value.Value.ArrayVal, ArrayVal.End(builder)
 
-        item_offsets = [self._build_argument(builder, item) for item in arr]
+        # Fallback: treat as object array, serialize each element
+        item_offsets = [
+            self._build_argument(builder, arr[i].as_py()) for i in range(len(arr))
+        ]
         ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
         for offset in reversed(item_offsets):
             builder.PrependUOffsetTRelative(offset)
         vec_off = builder.EndVector()
         ArrayVal.Start(builder)
-        ArrayVal.AddElementType(builder, elem_type)
+        ArrayVal.AddElementType(builder, ElementType.ElementType.Object)
         ArrayVal.AddObjectValues(builder, vec_off)
         return Value.Value.ArrayVal, ArrayVal.End(builder)
 
@@ -2763,46 +2808,50 @@ class GatunClient:
         return Value.Value.ArrayVal, ArrayVal.End(builder)
 
     def _build_typed_array(self, builder, arr):
-        """Build an ArrayVal from Python array.array."""
+        """Build an ArrayVal from Python array.array.
+
+        Uses array.tobytes() for direct byte conversion and _create_typed_vector
+        for proper FlatBuffers vector creation.
+        """
         typecode = arr.typecode
-        # Convert array.array to numpy for CreateNumpyVector
+        n = len(arr)
+        # array.array.tobytes() gives us the raw bytes directly
         if typecode == "i":  # int (usually 32-bit)
-            np_arr = np.array(arr, dtype=np.int32)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            vec_off = _create_typed_vector(builder, arr.tobytes(), 4, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
             ArrayVal.AddIntValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif typecode == "l" or typecode == "q":  # long
-            np_arr = np.array(arr, dtype=np.int64)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            vec_off = _create_typed_vector(builder, arr.tobytes(), 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
             ArrayVal.AddLongValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif typecode == "d":  # double
-            np_arr = np.array(arr, dtype=np.float64)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            vec_off = _create_typed_vector(builder, arr.tobytes(), 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif typecode == "f":  # float -> widen to double
-            np_arr = np.array(arr, dtype=np.float64)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            # Need to widen float32 to float64
+            widened = struct.pack(f"<{n}d", *arr)
+            vec_off = _create_typed_vector(builder, widened, 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif typecode == "b" or typecode == "B":  # byte
-            vec_off = builder.CreateByteVector(arr.tobytes())
+            vec_off = _create_typed_vector(builder, arr.tobytes(), 1, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
             ArrayVal.AddByteValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif typecode == "h" or typecode == "H":  # short -> widen to int
-            np_arr = np.array(arr, dtype=np.int32)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            # Need to widen int16 to int32
+            widened = struct.pack(f"<{n}i", *arr)
+            vec_off = _create_typed_vector(builder, widened, 4, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
             ArrayVal.AddIntValues(builder, vec_off)
@@ -2811,53 +2860,62 @@ class GatunClient:
             raise TypeError(f"Unsupported array.array typecode: {typecode}")
 
     def _build_java_array(self, builder, java_array: JavaArray):
-        """Build an ArrayVal from a JavaArray (preserving array semantics for round-trip)."""
+        """Build an ArrayVal from a JavaArray (preserving array semantics for round-trip).
+
+        Uses struct.pack for efficient serialization and _create_typed_vector
+        for proper FlatBuffers vector creation.
+        """
         elem_type = java_array.element_type
+        items = list(java_array)
+        n = len(items)
 
         if elem_type == "Int":
-            np_arr = np.array(list(java_array), dtype=np.int32)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            packed = struct.pack(f"<{n}i", *items)
+            vec_off = _create_typed_vector(builder, packed, 4, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Int)
             ArrayVal.AddIntValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Long":
-            np_arr = np.array(list(java_array), dtype=np.int64)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            packed = struct.pack(f"<{n}q", *items)
+            vec_off = _create_typed_vector(builder, packed, 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Long)
             ArrayVal.AddLongValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Double":
-            np_arr = np.array(list(java_array), dtype=np.float64)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            packed = struct.pack(f"<{n}d", *items)
+            vec_off = _create_typed_vector(builder, packed, 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Double)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Float":
-            np_arr = np.array(list(java_array), dtype=np.float64)  # widened to double
-            vec_off = builder.CreateNumpyVector(np_arr)
+            # Widen float to double for transmission
+            packed = struct.pack(f"<{n}d", *items)
+            vec_off = _create_typed_vector(builder, packed, 8, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Float)
             ArrayVal.AddDoubleValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Bool":
-            np_arr = np.array(list(java_array), dtype=np.bool_)
-            vec_off = builder.CreateNumpyVector(np_arr)
+            # Pack bools as bytes (0 or 1)
+            packed = struct.pack(f"<{n}B", *(1 if b else 0 for b in items))
+            vec_off = _create_typed_vector(builder, packed, 1, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Bool)
             ArrayVal.AddBoolValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Byte":
-            vec_off = builder.CreateByteVector(bytes(java_array))
+            vec_off = _create_typed_vector(builder, bytes(items), 1, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Byte)
             ArrayVal.AddByteValues(builder, vec_off)
             return Value.Value.ArrayVal, ArrayVal.End(builder)
         elif elem_type == "Short":
-            np_arr = np.array(list(java_array), dtype=np.int32)  # widened to int
-            vec_off = builder.CreateNumpyVector(np_arr)
+            # Widen short to int for transmission
+            packed = struct.pack(f"<{n}i", *items)
+            vec_off = _create_typed_vector(builder, packed, 4, n)
             ArrayVal.Start(builder)
             ArrayVal.AddElementType(builder, ElementType.ElementType.Short)
             ArrayVal.AddIntValues(builder, vec_off)
@@ -2865,7 +2923,7 @@ class GatunClient:
         elif elem_type == "String":
             # String array - need to build each as Argument
             item_offsets = []
-            for item in java_array:
+            for item in items:
                 item_offsets.append(self._build_argument(builder, item))
             ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
             for offset in reversed(item_offsets):
@@ -2878,7 +2936,7 @@ class GatunClient:
         else:
             # Object array - need to build each as Argument
             item_offsets = []
-            for item in java_array:
+            for item in items:
                 item_offsets.append(self._build_argument(builder, item))
             ArrayVal.StartObjectValuesVector(builder, len(item_offsets))
             for offset in reversed(item_offsets):

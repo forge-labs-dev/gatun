@@ -2,7 +2,7 @@
 
 import array
 
-import numpy as np
+import pyarrow as pa
 
 
 # Uses the shared `client` fixture from conftest.py
@@ -18,7 +18,7 @@ class TestArrayReturnValues:
     def test_int_array_copyof(self, client):
         """Test Arrays.copyOf returns int[] which can be iterated."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1, 2, 3, 4, 5], dtype=np.int32)
+        original = pa.array([1, 2, 3, 4, 5], type=pa.int32())
         # copyOf returns int[]
         result = Arrays.copyOf(original, 5)
         assert list(result) == [1, 2, 3, 4, 5]
@@ -26,7 +26,7 @@ class TestArrayReturnValues:
     def test_double_array_copyof(self, client):
         """Test Arrays.copyOf returns double[] which can be iterated."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1.5, 2.5, 3.5], dtype=np.float64)
+        original = pa.array([1.5, 2.5, 3.5], type=pa.float64())
         result = Arrays.copyOf(original, 3)
         assert list(result) == [1.5, 2.5, 3.5]
 
@@ -57,7 +57,7 @@ class TestArrayArguments:
     def test_int_array_argument(self, client):
         """Test passing int[] to Java."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([3, 1, 4, 1, 5], dtype=np.int32)
+        arr = pa.array([3, 1, 4, 1, 5], type=pa.int32())
         Arrays.sort(arr)
         # Note: Arrays.sort modifies in place but we can't verify that
         # Instead, test that it doesn't error
@@ -65,35 +65,35 @@ class TestArrayArguments:
     def test_arrays_tostring(self, client):
         """Test Arrays.toString(int[])."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([1, 2, 3], dtype=np.int32)
+        arr = pa.array([1, 2, 3], type=pa.int32())
         result = Arrays.toString(arr)
         assert result == "[1, 2, 3]"
 
     def test_long_array_tostring(self, client):
         """Test Arrays.toString(long[])."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([1, 2, 3], dtype=np.int64)
+        arr = pa.array([1, 2, 3], type=pa.int64())
         result = Arrays.toString(arr)
         assert result == "[1, 2, 3]"
 
     def test_double_array_tostring(self, client):
         """Test Arrays.toString(double[])."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([1.5, 2.5, 3.5], dtype=np.float64)
+        arr = pa.array([1.5, 2.5, 3.5], type=pa.float64())
         result = Arrays.toString(arr)
         assert result == "[1.5, 2.5, 3.5]"
 
     def test_boolean_array_tostring(self, client):
         """Test Arrays.toString(boolean[])."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([True, False, True], dtype=np.bool_)
+        arr = pa.array([True, False, True], type=pa.bool_())
         result = Arrays.toString(arr)
         assert result == "[true, false, true]"
 
     def test_string_array_tostring(self, client):
         """Test Arrays.toString(Object[]) with strings."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array(["hello", "world"], dtype=object)
+        arr = pa.array(["hello", "world"])
         result = Arrays.toString(arr)
         assert result == "[hello, world]"
 
@@ -144,7 +144,7 @@ class TestArrayRoundTrip:
     def test_int_array_roundtrip_via_copy(self, client):
         """Test int[] round trip via Arrays.copyOf."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([10, 20, 30], dtype=np.int32)
+        original = pa.array([10, 20, 30], type=pa.int32())
 
         # copyOf returns int[]
         copied = Arrays.copyOf(original, 3)
@@ -153,7 +153,7 @@ class TestArrayRoundTrip:
     def test_double_array_roundtrip(self, client):
         """Test double[] round trip."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1.1, 2.2, 3.3], dtype=np.float64)
+        original = pa.array([1.1, 2.2, 3.3], type=pa.float64())
 
         # Arrays.copyOf returns double[]
         copied = Arrays.copyOf(original, 3)
@@ -180,14 +180,14 @@ class TestArrayEdgeCases:
     def test_empty_int_array(self, client):
         """Test empty int array."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([], dtype=np.int32)
+        arr = pa.array([], type=pa.int32())
         result = Arrays.toString(arr)
         assert result == "[]"
 
     def test_large_array(self, client):
         """Test larger array (100 elements)."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.arange(100, dtype=np.int32)
+        arr = pa.array(range(100), type=pa.int32())
         # Just verify it doesn't error
         result = Arrays.toString(arr)
         assert result.startswith("[0, 1, 2,")
@@ -196,7 +196,7 @@ class TestArrayEdgeCases:
     def test_float32_array(self, client):
         """Test float32 array (widened to double)."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([1.5, 2.5, 3.5], dtype=np.float32)
+        arr = pa.array([1.5, 2.5, 3.5], type=pa.float32())
         result = Arrays.toString(arr)
         # Float widened to double
         assert "1.5" in result
@@ -206,6 +206,6 @@ class TestArrayEdgeCases:
     def test_int16_array(self, client):
         """Test int16 array (widened to int)."""
         Arrays = client.jvm.java.util.Arrays
-        arr = np.array([100, 200, 300], dtype=np.int16)
+        arr = pa.array([100, 200, 300], type=pa.int16())
         result = Arrays.toString(arr)
         assert result == "[100, 200, 300]"

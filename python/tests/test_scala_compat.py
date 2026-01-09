@@ -11,7 +11,7 @@ The reflection support enables proper handling of:
 - Java arrays that need to be passed back to Java methods
 """
 
-import numpy as np
+import pyarrow as pa
 
 from gatun import JavaArray
 from gatun.client import _reflect_cache
@@ -171,7 +171,7 @@ class TestJavaArrayRoundTrip:
     def test_java_int_array_preserved(self, client):
         """Test that int[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1, 2, 3, 4, 5], dtype=np.int32)
+        original = pa.array([1, 2, 3, 4, 5], type=pa.int32())
 
         # copyOf returns int[]
         result = Arrays.copyOf(original, 5)
@@ -183,7 +183,7 @@ class TestJavaArrayRoundTrip:
     def test_java_long_array_preserved(self, client):
         """Test that long[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1, 2, 3], dtype=np.int64)
+        original = pa.array([1, 2, 3], type=pa.int64())
 
         result = Arrays.copyOf(original, 3)
 
@@ -193,7 +193,7 @@ class TestJavaArrayRoundTrip:
     def test_java_double_array_preserved(self, client):
         """Test that double[] arrays have correct element type."""
         Arrays = client.jvm.java.util.Arrays
-        original = np.array([1.5, 2.5, 3.5], dtype=np.float64)
+        original = pa.array([1.5, 2.5, 3.5], type=pa.float64())
 
         result = Arrays.copyOf(original, 3)
 
