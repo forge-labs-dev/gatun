@@ -353,16 +353,15 @@ This distinction exists because Object arrays are kept as references on the Java
 ```python
 import pyarrow as pa
 
-# Simple: IPC format
+# Send a PyArrow table to Java
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
 result = client.send_arrow_table(table)  # "Received 3 rows"
 
-# Zero-copy buffer transfer (optimal for large data)
+# For large data, use zero-copy buffer transfer
+table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
 arena = client.get_payload_arena()
 schema_cache = {}
-for batch in batches:
-    arena.reset()
-    client.send_arrow_buffers(batch, arena, schema_cache)
+client.send_arrow_buffers(table, arena, schema_cache)
 arena.close()
 ```
 

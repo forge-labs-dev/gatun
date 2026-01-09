@@ -392,8 +392,11 @@ table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
 arena = client.get_payload_arena()
 schema_cache = {}
 
-# Send multiple tables efficiently
-for batch in batches:
+# Send table via zero-copy buffer transfer
+client.send_arrow_buffers(table, arena, schema_cache)
+
+# For multiple batches, reset arena between sends
+for batch in table.to_batches():
     arena.reset()  # Reuse arena for each batch
     client.send_arrow_buffers(batch, arena, schema_cache)
 
@@ -401,7 +404,7 @@ arena.close()
 ```
 
 Data flow (Python -> Java):
-1. Python copies Arrow buffers into shared memory (one copy)
+1. Python copies Arrow buffers into shared memory (one memcpy)
 2. Python sends buffer descriptors (offsets/lengths) to Java
 3. Java wraps buffers directly as ArrowBuf (zero-copy read)
 
