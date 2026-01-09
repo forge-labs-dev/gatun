@@ -378,14 +378,12 @@ obj = client.create_object("java.util.ArrayList", 100)  # with capacity
 client.invoke_method(obj.object_id, "add", "item")
 result = client.invoke_static_method("java.lang.Math", "max", 10, 20)
 
-# Access fields
-size = client.get_field(obj, "size")
-client.set_field(obj, "fieldName", value)
+# Access static fields
+max_int = client.get_field(client.jvm.java.lang.Integer, "MAX_VALUE")
 
 # Vectorized operations (single round-trip for multiple operations)
-client.get_fields(obj, ["field1", "field2"])
-client.invoke_methods(obj, [("method1", (arg,)), ("method2", ())])
-client.create_objects([("class1", ()), ("class2", (arg,))])
+client.invoke_methods(obj, [("add", ("a",)), ("add", ("b",)), ("size", ())])
+client.create_objects([("java.util.ArrayList", ()), ("java.util.HashMap", ())])
 ```
 
 ### Observability
@@ -518,34 +516,34 @@ except JavaNumberFormatException as e:
 Gatun uses a client-server architecture with shared memory for high-performance IPC:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Python Client                            │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
-│  │ GatunClient │  │ AsyncClient  │  │    BridgeAdapter       │  │
-│  └──────┬──────┘  └──────┬───────┘  └───────────┬────────────┘  │
-│         └────────────────┼──────────────────────┘               │
-│                          ▼                                       │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │              FlatBuffers Serialization                     │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ Unix Domain Socket (length prefix)
-                             │ + Shared Memory (command/response data)
-┌────────────────────────────▼────────────────────────────────────┐
-│                          Java Server                             │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                      GatunServer                           │  │
-│  │  - Command dispatch (create, invoke, field access, etc.)  │  │
-│  │  - Object registry and session management                  │  │
-│  │  - Security allowlist enforcement                          │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌──────────────────┐  │
-│  │ ReflectionCache │ │ MethodResolver  │ │ ArrowMemoryHandler│  │
-│  │ - Method cache  │ │ - Overload res. │ │ - Arrow IPC       │  │
-│  │ - Constructor   │ │ - Varargs       │ │ - Zero-copy xfer  │  │
-│  │ - Field cache   │ │ - Type compat.  │ │                   │  │
-│  └─────────────────┘ └─────────────────┘ └──────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                        Python Client                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐  │
+│  │ GatunClient │  │ AsyncClient │  │    BridgeAdapter      │  │
+│  └──────┬──────┘  └──────┬──────┘  └───────────┬───────────┘  │
+│         └────────────────┼─────────────────────┘              │
+│                          ▼                                    │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │              FlatBuffers Serialization                  │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└──────────────────────────┬────────────────────────────────────┘
+                           │ Unix Domain Socket (length prefix)
+                           │ + Shared Memory (command/response)
+┌──────────────────────────▼────────────────────────────────────┐
+│                         Java Server                           │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │                     GatunServer                         │  │
+│  │  - Command dispatch (create, invoke, field access)      │  │
+│  │  - Object registry and session management               │  │
+│  │  - Security allowlist enforcement                       │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐  │
+│  │ ReflectionCache │ │ MethodResolver  │ │ ArrowHandler    │  │
+│  │ - Method cache  │ │ - Overload res. │ │ - Arrow IPC     │  │
+│  │ - Constructor   │ │ - Varargs       │ │ - Zero-copy     │  │
+│  │ - Field cache   │ │ - Type compat.  │ │                 │  │
+│  └─────────────────┘ └─────────────────┘ └─────────────────┘  │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### Communication Flow
