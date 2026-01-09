@@ -39,11 +39,17 @@ Format: `[4 bytes: version][4 bytes: arena_epoch][8 bytes: memory size][2 bytes:
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync    # Install deps and build JAR
 JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync --reinstall-package gatun  # Rebuild after schema/Java changes
-uv run pytest                        # Run all tests
+uv run pytest                        # Run all tests (with coverage)
 uv run pytest tests/test_gatun_core.py::test_name  # Run single test
+uv run pytest --no-cov               # Run without coverage (faster)
 uv run ruff check .                  # Lint
 uv run ruff format .                 # Format
 ```
+
+Coverage reports are generated automatically:
+- Terminal: shows missing lines after test run
+- HTML: `htmlcov/index.html` for detailed browsing
+- Config in `pyproject.toml` under `[tool.coverage.*]`
 
 ### Java (from repository root, if needed separately)
 ```bash
