@@ -580,3 +580,408 @@ class TestEdgeCases:
 
         assert abs(arr.get(0) - 3.141592653589793) < 1e-15
         assert abs(arr.get(1) - 2.718281828459045) < 1e-15
+
+
+class TestGatunNativeWorkarounds:
+    """Tests demonstrating Gatun-native solutions for Py4J patterns.
+
+    These tests show how to achieve functionality that may differ from Py4J's
+    API but accomplishes the same goals using Gatun's native capabilities.
+
+    Key insight: Gatun doesn't need to match Py4J 1:1. These patterns work
+    natively and are often more explicit/Pythonic.
+    """
+
+    # =========================================================================
+    # SCALA COMPANION OBJECT ACCESS
+    # =========================================================================
+    # Py4J pattern:
+    #   spark._jvm.org.apache.spark.sql.functions.col("x")
+    #
+    # In Scala, companion objects compile to static methods on a class.
+    # Gatun's JVM view naturally handles this - when you access a class path
+    # without instantiating, method calls are treated as static calls.
+    # =========================================================================
+
+    def test_static_method_via_jvm_view(self, client):
+        """
+        Scala companion objects compile to classes with static methods.
+        Gatun's JVM view handles this transparently.
+
+        Example PySpark pattern:
+            spark._jvm.org.apache.spark.sql.functions.col("name")
+
+        Gatun equivalent (already works):
+            client.jvm.org.apache.spark.sql.functions.col("name")
+
+        For allowed classes, this works out of the box:
+        """
+        # java.lang.Math is like a Scala object - all static methods
+        Math = client.jvm.java.lang.Math
+
+        # Call static methods via the class reference
+        assert Math.max(10, 20) == 20
+        assert Math.min(10, 20) == 10
+        assert Math.abs(-42) == 42
+
+        # Note: For Spark classes like org.apache.spark.sql.functions,
+        # just ensure they're in the allowlist. The JVM view handles the rest.
+
+    def test_invoke_static_method_explicit(self, client):
+        """
+        For maximum clarity or when building dynamic calls, use
+        invoke_static_method directly.
+
+        This is useful when:
+        - Method name comes from a variable
+        - Building generic wrappers
+        - Need explicit control over type hints
+        """
+        # Explicit static method invocation
+        result = client.invoke_static_method(
+            "java.lang.Integer",  # Fully qualified class name
+            "parseInt",           # Method name
+            "42"                  # Arguments
+        )
+        assert result == 42
+
+        # Multiple static calls with explicit API
+        max_result = client.invoke_static_method("java.lang.Math", "max", 100, 200)
+        assert max_result == 200
+
+    # =========================================================================
+    # ARRAY CREATION
+    # =========================================================================
+    # Py4J pattern:
+    #   gateway.new_array(gateway.jvm.java.lang.String, 10)
+    #
+    # Gatun approach: Use JavaArray from Python side (preferred) or
+    # java.lang.reflect.Array.newInstance() for dynamic creation.
+    # =========================================================================
+
+    def test_array_creation_python_side(self, client):
+        """
+        Preferred approach: Create arrays Python-side with JavaArray.
+
+        This is more Pythonic and avoids an extra round-trip to Java.
+        The array type is preserved when passed to Java methods.
+
+        Use this when you know the array contents upfront.
+        """
+        # Create typed arrays directly in Python
+        int_array = JavaArray([1, 2, 3, 4, 5], element_type="Int")
+        string_array = JavaArray(["hello", "world"], element_type="String")
+        double_array = JavaArray([1.5, 2.5, 3.5], element_type="Double")
+
+        # Pass to Java - type is preserved
+        Arrays = client.jvm.java.util.Arrays
+
+        assert Arrays.toString(int_array) == "[1, 2, 3, 4, 5]"
+        assert Arrays.toString(string_array) == "[hello, world]"
+        assert Arrays.toString(double_array) == "[1.5, 2.5, 3.5]"
+
+    def test_array_creation_pyarrow(self, client):
+        """
+        Alternative: Use PyArrow arrays for typed array creation.
+
+        This is efficient for large arrays and numeric data.
+        PyArrow arrays are converted to Java arrays with matching types.
+        """
+        # int32 -> int[], int64 -> long[]
+        int32_arr = pa.array([10, 20, 30], type=pa.int32())
+        int64_arr = pa.array([100, 200, 300], type=pa.int64())
+
+        # float64 -> double[]
+        double_arr = pa.array([1.1, 2.2, 3.3], type=pa.float64())
+
+        Arrays = client.jvm.java.util.Arrays
+
+        assert Arrays.toString(int32_arr) == "[10, 20, 30]"
+        assert Arrays.toString(int64_arr) == "[100, 200, 300]"
+        assert Arrays.toString(double_arr) == "[1.1, 2.2, 3.3]"
+
+    def test_array_creation_via_reflect(self, client):
+        """
+        For dynamic array creation, java.lang.reflect.Array can be used,
+        but JavaArray from Python side is usually simpler and more reliable.
+
+        This test demonstrates Array.newInstance and getLength work,
+        though Array.set/get for Object[] has limitations.
+
+        RECOMMENDED: Use JavaArray for most array creation needs.
+        """
+        Array = client.jvm.java.lang.reflect.Array
+
+        # Get a Class object to use with newInstance
+        arr_instance = client.jvm.java.util.ArrayList()
+        arr_class = arr_instance.getClass()
+
+        # Create ArrayList[3] dynamically
+        dynamic_array = Array.newInstance(arr_class, 3)
+
+        # Verify array was created with correct length
+        assert Array.getLength(dynamic_array) == 3
+
+        # RECOMMENDED APPROACH: Use JavaArray for known contents
+        # This is simpler and always works
+        int_arr = JavaArray([100, 200, 300], element_type="Int")
+        assert client.jvm.java.util.Arrays.toString(int_arr) == "[100, 200, 300]"
+
+        string_arr = JavaArray(["hello", "world"], element_type="String")
+        assert client.jvm.java.util.Arrays.toString(string_arr) == "[hello, world]"
+
+        # For dynamic size with no initial content, can use list then convert
+        size = 5
+        data = [i * 10 for i in range(size)]
+        dynamic_int_arr = JavaArray(data, element_type="Int")
+        assert Array.getLength(dynamic_int_arr) == 5
+
+    # =========================================================================
+    # TYPE INTROSPECTION / getClass()
+    # =========================================================================
+    # Py4J pattern:
+    #   obj.getClass().getName()
+    #
+    # Gatun: Works exactly the same via method chaining.
+    # =========================================================================
+
+    def test_getclass_pattern(self, client):
+        """
+        getClass().getName() pattern works via method chaining.
+
+        This is commonly used in PySpark for:
+        - Logging/debugging object types
+        - Runtime type dispatch
+        - Error messages
+        """
+        arr = client.jvm.java.util.ArrayList()
+        hm = client.jvm.java.util.HashMap()
+        sb = client.jvm.java.lang.StringBuilder()
+
+        # Chain getClass() and getName()
+        assert arr.getClass().getName() == "java.util.ArrayList"
+        assert hm.getClass().getName() == "java.util.HashMap"
+        assert sb.getClass().getName() == "java.lang.StringBuilder"
+
+        # Can also get simple name
+        assert arr.getClass().getSimpleName() == "ArrayList"
+
+    def test_getclass_for_interface_check(self, client):
+        """
+        For interface checking, is_instance_of is cleaner than
+        getClass().getInterfaces(), but both work.
+        """
+        arr = client.jvm.java.util.ArrayList()
+
+        # Cleaner: use is_instance_of
+        assert client.is_instance_of(arr, "java.util.List") is True
+        assert client.is_instance_of(arr, "java.util.RandomAccess") is True
+
+        # Also works: check via Class methods
+        cls = arr.getClass()
+
+        # Get superclass
+        superclass = cls.getSuperclass()
+        assert superclass.getName() == "java.util.AbstractList"
+
+    # =========================================================================
+    # DOUBLE PARAMETER METHODS (Auto-boxing edge case)
+    # =========================================================================
+    # Issue: Java methods with double params may not match int args
+    # Solution: Use Python floats, or add type hints
+    # =========================================================================
+
+    def test_double_params_use_floats(self, client):
+        """
+        For Java methods with double parameters, use Python floats.
+
+        This is actually more Pythonic - you're being explicit about
+        wanting floating-point math.
+        """
+        Math = client.jvm.java.lang.Math
+
+        # Use floats for double-param methods
+        result = Math.pow(2.0, 10.0)
+        assert result == 1024.0
+
+        result = Math.sqrt(16.0)
+        assert result == 4.0
+
+        # sin, cos, etc. all expect doubles
+        import math as pymath
+        result = Math.sin(pymath.pi / 2)
+        assert abs(result - 1.0) < 1e-10
+
+    def test_integer_methods_use_ints(self, client):
+        """
+        Methods with int/long parameters work fine with Python ints.
+        """
+        Math = client.jvm.java.lang.Math
+
+        # These methods have int overloads
+        assert Math.max(10, 20) == 20
+        assert Math.min(10, 20) == 10
+        assert Math.abs(-42) == 42
+
+        # Long values also work
+        large = 2**40
+        assert Math.abs(-large) == large
+
+    # =========================================================================
+    # DYNAMIC METHOD INVOCATION
+    # =========================================================================
+    # When method names come from variables (metaprogramming patterns)
+    # =========================================================================
+
+    def test_dynamic_method_invocation(self, client):
+        """
+        When method names are dynamic (from variables), use getattr or
+        direct attribute access on JavaObject.
+
+        Common in frameworks that need to call methods by name from config.
+        """
+        arr = client.jvm.java.util.ArrayList()
+        arr.add("item")
+
+        # Method name from variable - use getattr on JavaObject
+        method_names = ["size", "isEmpty", "toString"]
+
+        results = {}
+        for method_name in method_names:
+            # getattr returns a bound method-like object that can be called
+            method = getattr(arr, method_name)
+            results[method_name] = method()
+
+        assert results["size"] == 1
+        assert results["isEmpty"] is False
+        assert results["toString"] == "[item]"
+
+    def test_dynamic_method_with_args(self, client):
+        """
+        Dynamic method calls with arguments via getattr.
+        """
+        arr = client.jvm.java.util.ArrayList()
+
+        # Build up calls dynamically
+        operations = [
+            ("add", ("first",)),
+            ("add", ("second",)),
+            ("add", (0, "zeroth")),  # add(int, E)
+            ("get", (0,)),
+            ("get", (1,)),
+        ]
+
+        results = []
+        for method_name, args in operations:
+            method = getattr(arr, method_name)
+            result = method(*args)
+            results.append(result)
+
+        # add returns True, add(int, E) returns None (void)
+        assert results[0] is True
+        assert results[1] is True
+        assert results[2] is None  # add(int, E) returns void -> None
+        assert results[3] == "zeroth"
+        assert results[4] == "first"
+
+    # =========================================================================
+    # BATCH PATTERNS FOR PERFORMANCE
+    # =========================================================================
+    # PySpark often needs to make many JVM calls efficiently
+    # =========================================================================
+
+    def test_batch_for_bulk_setup(self, client):
+        """
+        Use batch API when setting up multiple objects.
+
+        This is crucial for PySpark performance - instead of N round-trips
+        for N operations, use a single round-trip with batch.
+
+        Note: batch.call() needs actual JavaObject, not BatchResult.
+        For setup patterns, create objects first, then batch operations.
+        """
+        # First create objects (can use create_objects for single round-trip)
+        list1, list2, map1 = client.create_objects([
+            ("java.util.ArrayList", ()),
+            ("java.util.ArrayList", ()),
+            ("java.util.HashMap", ()),
+        ])
+
+        # Then batch all the add/put operations
+        with client.batch() as b:
+            b.call(list1, "add", "item1")
+            b.call(list1, "add", "item2")
+            b.call(list2, "add", "other")
+            b.call(map1, "put", "key", "value")
+
+        # Now use the objects
+        assert list1.size() == 2
+        assert list2.size() == 1
+        assert map1.get("key") == "value"
+
+    def test_invoke_methods_for_same_target(self, client):
+        """
+        When calling multiple methods on the SAME object, use invoke_methods.
+
+        Even faster than batch for this specific pattern.
+        """
+        sb = client.jvm.java.lang.StringBuilder()
+
+        # Single round-trip for all method calls on same object
+        results = client.invoke_methods(sb, [
+            ("append", ("Hello",)),
+            ("append", (" ",)),
+            ("append", ("World",)),
+            ("length", ()),
+            ("toString", ()),
+        ])
+
+        # Results in order
+        assert results[3] == 11  # length
+        assert results[4] == "Hello World"  # toString
+
+    # =========================================================================
+    # COLLECTIONS: PREFER PYTHON-SIDE WHEN POSSIBLE
+    # =========================================================================
+
+    def test_prefer_python_iteration(self, client):
+        """
+        When processing Java collections, iterate Python-side.
+
+        The JavaObject __iter__ protocol fetches items efficiently.
+        Don't call size() + get() in a loop - use Python iteration.
+        """
+        arr = client.jvm.java.util.ArrayList()
+        for i in range(10):
+            arr.add(f"item_{i}")
+
+        # Good: Python iteration (internally optimized)
+        result = [item.upper() for item in arr]
+        assert result[0] == "ITEM_0"
+        assert len(result) == 10
+
+        # Also good: Convert to list once, then use Python
+        items = list(arr)
+        filtered = [x for x in items if "5" in x]
+        assert filtered == ["item_5"]
+
+    def test_build_collections_python_side(self, client):
+        """
+        Build collections Python-side when possible, then pass to Java.
+
+        This avoids multiple round-trips for add() calls.
+        """
+        # Good: Build Python list, pass once
+        data = [f"item_{i}" for i in range(100)]
+
+        arr = client.jvm.java.util.ArrayList()
+        arr.addAll(data)  # Single call with Python list
+
+        assert arr.size() == 100
+
+        # For maps: build Python dict, use putAll or pass to constructor
+        map_data = {f"key_{i}": f"value_{i}" for i in range(50)}
+        hm = client.jvm.java.util.HashMap()
+        hm.putAll(map_data)
+
+        assert hm.size() == 50
