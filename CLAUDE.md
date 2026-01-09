@@ -460,7 +460,8 @@ str_array = JavaArray(["a", "b"], element_type="String")
 - `dict` -> Java `Map` (HashMap)
 - `bytes` -> Java `byte[]`
 - `JavaArray` -> Java arrays (preserves array type)
-- `numpy.ndarray` -> Java arrays (int32->int[], int64->long[], float64->double[])
+- `pyarrow.Array` -> Java arrays (int32->int[], int64->long[], float64->double[], bool->boolean[], string->String[])
+- `array.array` -> Java arrays (typecode 'i'->int[], 'q'->long[], 'd'->double[])
 - Object references (returned as `JavaObject` wrappers)
 - `null`/`None`
 
