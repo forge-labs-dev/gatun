@@ -123,20 +123,33 @@ class TestJavaArrayRoundTrip:
     """
 
     def test_java_array_type_preserved(self, client):
-        """Test that arrays from Java are JavaArray instances."""
+        """Test that Object[] from Java are returned as JavaObject (reference to Java-side array).
+
+        With the fix for Array.set/get, Object arrays are now kept as ObjectRef on the Java side
+        rather than being auto-converted to ArrayVal. This allows Array.set/get to work properly.
+        JavaObject supports len(), iteration, and indexing for arrays.
+        """
+        from gatun.client import JavaObject
+
         arr = client.jvm.java.util.ArrayList()
         arr.add("a")
         arr.add("b")
 
-        # toArray() returns Object[]
+        # toArray() returns Object[] - now returned as JavaObject reference
         result = arr.toArray()
 
-        # Should be a JavaArray, not a regular list
-        assert isinstance(result, JavaArray)
-        assert result.element_type == "Object"
+        # Object arrays are now JavaObject (reference to Java-side array)
+        assert isinstance(result, JavaObject)
+        # Can still access elements via Array.get or indexing
+        assert result[0] == "a"
+        assert result[1] == "b"
 
     def test_java_array_has_list_interface(self, client):
-        """Test that JavaArray still acts like a Python list."""
+        """Test that Object[] from Java behaves like a Python list via JavaObject protocols.
+
+        JavaObject implements __len__, __iter__, __getitem__ for arrays, allowing
+        them to be used like Python lists.
+        """
         arr = client.jvm.java.util.ArrayList()
         arr.add("x")
         arr.add("y")
@@ -144,7 +157,7 @@ class TestJavaArrayRoundTrip:
 
         result = arr.toArray()
 
-        # Should behave like a list
+        # Should behave like a list via JavaObject's __len__, __iter__, __getitem__
         assert len(result) == 3
         assert result[0] == "x"
         assert result[1] == "y"
@@ -152,19 +165,24 @@ class TestJavaArrayRoundTrip:
         assert list(result) == ["x", "y", "z"]
 
     def test_java_array_round_trip_object(self, client):
-        """Test Object[] round-trip preserves array semantics."""
+        """Test Object[] round-trip preserves array semantics.
+
+        Object arrays now return as JavaObject (reference to Java-side array).
+        When passed back to Java, the ObjectRef is used directly.
+        """
+        from gatun.client import JavaObject
+
         # Create array from ArrayList
         arr = client.jvm.java.util.ArrayList()
         arr.add("hello")
         arr.add("world")
         java_array = arr.toArray()
 
-        # Verify it's a JavaArray
-        assert isinstance(java_array, JavaArray)
+        # Object arrays are now JavaObject (reference to Java-side array)
+        assert isinstance(java_array, JavaObject)
 
         # Pass it back to Java - Arrays.toString expects Object[]
-        # If JavaArray was wrongly converted to ArrayList, this would
-        # give a different result or error
+        # The JavaObject (ObjectRef) is passed directly to Java
         result = client.jvm.java.util.Arrays.toString(java_array)
         assert result == "[hello, world]"
 
@@ -201,7 +219,13 @@ class TestJavaArrayRoundTrip:
         assert result.element_type == "Double"
 
     def test_java_string_array_preserved(self, client):
-        """Test that String[] arrays have correct element type."""
+        """Test that Object[] with String elements is returned as JavaObject.
+
+        toArray() returns Object[], which now stays as ObjectRef on Java side.
+        The elements can be accessed via iteration or indexing.
+        """
+        from gatun.client import JavaObject
+
         arr = client.jvm.java.util.ArrayList()
         arr.add("a")
         arr.add("b")
@@ -209,29 +233,39 @@ class TestJavaArrayRoundTrip:
 
         result = arr.toArray()
 
-        # Object[] with strings
-        assert isinstance(result, JavaArray)
-        assert result.element_type == "Object"
+        # Object[] is now JavaObject (reference to Java-side array)
+        assert isinstance(result, JavaObject)
+        # Elements accessible via iteration
         assert list(result) == ["a", "b", "c"]
 
-    def test_java_array_size_method(self, client):
-        """Test JavaArray.size() method for Java-style access."""
+    def test_java_array_len_function(self, client):
+        """Test that len() works on Object[] returned as JavaObject.
+
+        Object arrays are returned as JavaObject references. Use Python's
+        len() function to get the array length.
+        """
         arr = client.jvm.java.util.ArrayList()
         arr.add("item")
         java_array = arr.toArray()
 
-        # Java-style size() method
-        assert java_array.size() == 1
+        # Use len() for array length
+        assert len(java_array) == 1
 
-    def test_java_array_length_property(self, client):
-        """Test JavaArray.length property for Java-style access."""
+    def test_java_array_iteration(self, client):
+        """Test that Object[] returned as JavaObject supports iteration.
+
+        JavaObject implements __iter__ for arrays, allowing standard
+        Python iteration patterns.
+        """
         arr = client.jvm.java.util.ArrayList()
         arr.add("a")
         arr.add("b")
         java_array = arr.toArray()
 
-        # Java-style length property (like array.length in Java)
-        assert java_array.length == 2
+        # len() works
+        assert len(java_array) == 2
+        # iteration works
+        assert list(java_array) == ["a", "b"]
 
 
 class TestJavaArraySerialization:

@@ -296,28 +296,44 @@ def test_arraylist_add_overloads(client):
 
 
 def test_return_object_ref_array(client):
-    """Test that return_object_ref=True returns ObjectRef for arrays."""
+    """Test that Object arrays are returned as JavaObject (reference to Java-side array).
+
+    With the fix for Array.set/get, Object arrays (like String[]) are now kept as
+    ObjectRef on the Java side rather than being auto-converted to ArrayVal.
+    This allows Array.set/get to work properly on Object arrays.
+
+    Primitive arrays (int[], long[], double[]) are still auto-converted to JavaArray.
+    """
     from gatun import JavaArray
     from gatun.client import JavaObject
 
-    # Get Class object for String
+    # Get Class object for String (Object array)
     class_obj = client.invoke_static_method(
         "java.lang.Class", "forName", "java.lang.String"
     )
 
-    # Without return_object_ref, arrays are auto-converted to JavaArray
-    arr_auto = client.invoke_static_method(
+    # Object arrays (String[]) are now returned as JavaObject by default
+    # This is because they're kept as ObjectRef for Array.set/get to work
+    arr_obj = client.invoke_static_method(
         "java.lang.reflect.Array", "newInstance", class_obj, 3
     )
-    assert isinstance(arr_auto, JavaArray)
-    assert not isinstance(arr_auto, JavaObject)
+    assert isinstance(arr_obj, JavaObject)
+    assert hasattr(arr_obj, "object_id")
 
-    # With return_object_ref=True, arrays are returned as ObjectRef
+    # With return_object_ref=True, behavior is the same for Object arrays
     arr_ref = client.invoke_static_method(
         "java.lang.reflect.Array", "newInstance", class_obj, 3, return_object_ref=True
     )
     assert isinstance(arr_ref, JavaObject)
     assert hasattr(arr_ref, "object_id")
+
+    # Primitive arrays (int[]) are still auto-converted to JavaArray
+    import pyarrow as pa
+
+    original = pa.array([1, 2, 3], type=pa.int32())
+    int_arr = client.jvm.java.util.Arrays.copyOf(original, 3)
+    assert isinstance(int_arr, JavaArray)
+    assert int_arr.element_type == "Int"
 
 
 def test_return_object_ref_list(client):

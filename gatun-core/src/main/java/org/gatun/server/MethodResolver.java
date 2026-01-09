@@ -645,14 +645,27 @@ public final class MethodResolver {
 
   /**
    * Check if result should be auto-converted (not wrapped as ObjectRef).
+   *
+   * <p>Note: Only primitive arrays (int[], double[], etc.) are auto-converted.
+   * Object arrays (String[], ArrayList[], etc.) are kept as ObjectRef so they
+   * can be manipulated in Java via Array.set/get. This is necessary because
+   * auto-converting an Object[] copies its contents to Python, and subsequent
+   * Array.set calls would modify a temporary copy instead of the original.
    */
   public static boolean isAutoConvertible(Object obj) {
-    return obj instanceof String
+    if (obj instanceof String
         || obj instanceof Number
         || obj instanceof Boolean
         || obj instanceof Character
         || obj instanceof java.util.List
-        || obj instanceof java.util.Map
-        || obj.getClass().isArray();
+        || obj instanceof java.util.Map) {
+      return true;
+    }
+    // Only auto-convert primitive arrays, not Object arrays
+    if (obj.getClass().isArray()) {
+      Class<?> componentType = obj.getClass().getComponentType();
+      return componentType.isPrimitive();
+    }
+    return false;
   }
 }

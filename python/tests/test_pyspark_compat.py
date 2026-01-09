@@ -358,7 +358,12 @@ class TestArrayOperations:
         assert result == "[10, 20, 30]"
 
     def test_toarray_from_collection(self, client):
-        """Test ArrayList.toArray() returns proper JavaArray."""
+        """Test ArrayList.toArray() returns Object[] as JavaObject.
+
+        Object arrays (like String[], Object[]) are returned as JavaObject
+        so they can be manipulated in Java via Array.set/get.
+        Primitive arrays (int[], double[]) are still auto-converted to JavaArray.
+        """
         arr = client.jvm.java.util.ArrayList()
         arr.add("x")
         arr.add("y")
@@ -366,12 +371,19 @@ class TestArrayOperations:
 
         java_array = arr.toArray()
 
-        assert isinstance(java_array, JavaArray)
-        assert list(java_array) == ["x", "y", "z"]
+        # Object[] returns as JavaObject (can be manipulated via Array.set/get)
+        from gatun.client import JavaObject
+        assert isinstance(java_array, JavaObject)
 
         # Should work when passed back to Java
         result = client.jvm.java.util.Arrays.toString(java_array)
         assert result == "[x, y, z]"
+
+        # Can access elements via Array.get
+        Array = client.jvm.java.lang.reflect.Array
+        assert Array.get(java_array, 0) == "x"
+        assert Array.get(java_array, 1) == "y"
+        assert Array.getLength(java_array) == 3
 
 
 class TestTypeChecking:

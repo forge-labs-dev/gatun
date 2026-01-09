@@ -104,6 +104,42 @@ DEFAULT_SOCKET_TIMEOUT = 30.0
 # Handshake timeout - shorter since handshake should be fast
 HANDSHAKE_TIMEOUT = 10.0
 
+# FlatBuffer field offsets for ArrayVal - derived from generated code (ArrayVal.py)
+# These correspond to vtable slot numbers: (slot_index + 2) * 2
+# See: https://flatbuffers.dev/flatbuffers_internals.html
+_ARRAYVAL_INT_VALUES_OFFSET = 6  # slot 1: int_values
+_ARRAYVAL_LONG_VALUES_OFFSET = 8  # slot 2: long_values
+_ARRAYVAL_DOUBLE_VALUES_OFFSET = 10  # slot 3: double_values
+_ARRAYVAL_BOOL_VALUES_OFFSET = 12  # slot 4: bool_values
+_ARRAYVAL_BYTE_VALUES_OFFSET = 14  # slot 5: byte_values
+
+# FlatBuffer field offset for ArrowBatchDescriptor.schema_bytes
+_ARROW_BATCH_SCHEMA_BYTES_OFFSET = 6  # slot 1: schema_bytes
+
+
+def _unpack_flatbuffer_vector(tab, field_offset, length, fmt_char, elem_size):
+    """Unpack a primitive vector directly from FlatBuffer bytes.
+
+    This is a fast alternative to element-by-element access, using direct
+    buffer slicing and struct.unpack for O(1) bulk unpacking.
+
+    Args:
+        tab: FlatBuffer table object (has Offset, Vector, Bytes)
+        field_offset: VTable offset for the field (e.g., 6, 8, 10)
+        length: Number of elements in the vector
+        fmt_char: struct format character ('i' for int32, 'q' for int64, etc.)
+        elem_size: Size of each element in bytes
+
+    Returns:
+        List of unpacked values, or empty list if vector is absent
+    """
+    o = flatbuffers.number_types.UOffsetTFlags.py_type(tab.Offset(field_offset))
+    if o == 0 or length == 0:
+        return []
+    start = tab.Vector(o)
+    buf = tab.Bytes[start : start + length * elem_size]
+    return list(struct.unpack(f"<{length}{fmt_char}", buf))
+
 
 class PayloadTooLargeError(Exception):
     """Raised when a payload exceeds the available shared memory space."""
@@ -1595,39 +1631,60 @@ class GatunClient:
     def _unpack_array(self, array_val):
         """Unpack an ArrayVal FlatBuffer to a JavaArray (preserves array semantics).
 
-        Uses *AsNumpy() methods for O(1) bulk access instead of O(n) element-by-element.
+        Uses direct buffer slicing with struct.unpack for primitive types,
+        which is much faster than element-by-element access.
         """
         elem_type = array_val.ElementType()
+        tab = array_val._tab
 
         if elem_type == ElementType.ElementType.Int:
-            # Use IntValuesAsNumpy for fast bulk access, then tolist() for JavaArray
-            return JavaArray(array_val.IntValuesAsNumpy().tolist(), element_type="Int")
+            length = array_val.IntValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_INT_VALUES_OFFSET, length, "i", 4
+            )
+            return JavaArray(values, element_type="Int")
         elif elem_type == ElementType.ElementType.Long:
-            return JavaArray(
-                array_val.LongValuesAsNumpy().tolist(), element_type="Long"
+            length = array_val.LongValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_LONG_VALUES_OFFSET, length, "q", 8
             )
+            return JavaArray(values, element_type="Long")
         elif elem_type == ElementType.ElementType.Double:
-            return JavaArray(
-                array_val.DoubleValuesAsNumpy().tolist(), element_type="Double"
+            length = array_val.DoubleValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_DOUBLE_VALUES_OFFSET, length, "d", 8
             )
+            return JavaArray(values, element_type="Double")
         elif elem_type == ElementType.ElementType.Float:
             # Float was widened to double
-            return JavaArray(
-                array_val.DoubleValuesAsNumpy().tolist(), element_type="Float"
+            length = array_val.DoubleValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_DOUBLE_VALUES_OFFSET, length, "d", 8
             )
+            return JavaArray(values, element_type="Float")
         elif elem_type == ElementType.ElementType.Bool:
-            return JavaArray(
-                array_val.BoolValuesAsNumpy().tolist(), element_type="Bool"
+            length = array_val.BoolValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_BOOL_VALUES_OFFSET, length, "?", 1
             )
+            return JavaArray(values, element_type="Bool")
         elif elem_type == ElementType.ElementType.Byte:
-            # Use ByteValuesAsNumpy for fast zero-copy access, then tobytes()
-            # This is O(1) memcpy instead of O(n) element-by-element copy
-            return bytes(array_val.ByteValuesAsNumpy())
+            length = array_val.ByteValuesLength()
+            # Direct buffer slice for bytes
+            o = flatbuffers.number_types.UOffsetTFlags.py_type(
+                tab.Offset(_ARRAYVAL_BYTE_VALUES_OFFSET)
+            )
+            if o == 0 or length == 0:
+                return b""
+            start = tab.Vector(o)
+            return bytes(tab.Bytes[start : start + length])
         elif elem_type == ElementType.ElementType.Short:
             # Short was widened to int
-            return JavaArray(
-                array_val.IntValuesAsNumpy().tolist(), element_type="Short"
+            length = array_val.IntValuesLength()
+            values = _unpack_flatbuffer_vector(
+                tab, _ARRAYVAL_INT_VALUES_OFFSET, length, "i", 4
             )
+            return JavaArray(values, element_type="Short")
         elif elem_type == ElementType.ElementType.String:
             result = JavaArray(element_type="String")
             for i in range(array_val.ObjectValuesLength()):
@@ -1859,7 +1916,13 @@ class GatunClient:
                 raise RuntimeError(
                     f"No schema available for hash {schema_hash} and none cached"
                 )
-            schema_bytes = bytes(arrow_batch.SchemaBytesAsNumpy())
+            # Direct buffer slice - much faster than element-by-element access
+            # Access the underlying FlatBuffer and slice the vector directly
+            o = flatbuffers.number_types.UOffsetTFlags.py_type(
+                arrow_batch._tab.Offset(_ARROW_BATCH_SCHEMA_BYTES_OFFSET)
+            )
+            start = arrow_batch._tab.Vector(o)
+            schema_bytes = bytes(arrow_batch._tab.Bytes[start : start + schema_bytes_len])
             schema = deserialize_schema(schema_bytes)
             # Validate schema doesn't contain unsupported types (e.g., dictionary)
             _validate_supported_schema(schema)
