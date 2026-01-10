@@ -19,7 +19,11 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 
 ## Performance
 
-Gatun significantly outperforms Py4J (PySpark's default bridge) through shared memory IPC:
+Gatun uses shared memory IPC which provides different trade-offs vs Py4J (PySpark's default TCP-based bridge):
+
+### Latency (Single Operations)
+
+Gatun has **2-3x lower latency** for individual operations:
 
 | Operation | Gatun | Py4J | Speedup |
 |-----------|------:|-----:|--------:|
@@ -28,9 +32,21 @@ Gatun significantly outperforms Py4J (PySpark's default bridge) through shared m
 | Object creation | 150 μs | 400 μs | **2.7x** |
 | Static method | 130 μs | 360 μs | **2.8x** |
 
+### Throughput (Bulk Operations)
+
+For tight loops with pre-bound methods, Py4J can achieve higher ops/sec due to lower per-call overhead:
+
+| Operation | Gatun | Py4J | Notes |
+|-----------|------:|-----:|-------|
+| Bulk static calls (10K) | ~45K ops/s | ~60K ops/s | Py4J faster for simple calls |
+| Bulk instance calls (10K) | ~40K ops/s | ~55K ops/s | Py4J faster for simple calls |
+| Mixed workload | ~35K ops/s | ~30K ops/s | Gatun faster for varied operations |
+
+**Recommendation**: Use vectorized APIs or Arrow for bulk data instead of tight loops.
+
 ### Arrow Data Transfer
 
-For bulk data, Arrow zero-copy transfer provides massive speedups:
+For bulk data, Arrow zero-copy transfer provides massive speedups over per-element transfer:
 
 | Data Size | IPC Format | Zero-Copy Buffers | Throughput |
 |-----------|----------:|------------------:|-----------:|
@@ -49,7 +65,17 @@ Reduce round-trips with batch operations:
 | 10 method calls | 1,600 μs | 490 μs | **3.3x** |
 | 10 object creations | 2,400 μs | 1,100 μs | **2.2x** |
 
-*Benchmarks run on Apple M1, Java 21, Python 3.13. See [docs/benchmarks.md](docs/benchmarks.md) for methodology and full results.*
+### When to Use Gatun vs Py4J
+
+| Use Case | Recommendation |
+|----------|----------------|
+| Interactive/exploratory work | Gatun (lower latency) |
+| Bulk data transfer | Gatun (Arrow support) |
+| Simple tight loops | Py4J may be faster |
+| Mixed operations | Gatun |
+| PySpark integration | Either (Gatun via BridgeAdapter) |
+
+*Benchmarks run on Apple M1, Java 21, Python 3.13. See [docs/benchmarks.md](docs/benchmarks.md) for full methodology.*
 
 ## Installation
 

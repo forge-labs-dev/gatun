@@ -140,23 +140,59 @@ Comparing Arrow table transfer to traditional list/dict transfer:
 
 **Recommendation**: Use Arrow for bulk data transfer (>100 items).
 
+### Throughput: Bulk Simple Operations
+
+For tight loops with pre-bound methods calling simple operations, Py4J can achieve higher ops/sec:
+
+| Operation | Gatun | Py4J | Winner |
+|-----------|------:|-----:|--------|
+| Bulk static calls (10K) | ~45K ops/s | ~60K ops/s | **Py4J** |
+| Bulk instance calls (10K) | ~40K ops/s | ~55K ops/s | **Py4J** |
+| Bulk object creation (10K) | ~35K ops/s | ~45K ops/s | **Py4J** |
+| Mixed workload | ~35K ops/s | ~30K ops/s | **Gatun** |
+
+**Why Py4J is faster for simple tight loops**: Py4J's TCP-based protocol has lower per-call setup overhead for very simple operations. Gatun's shared memory approach has more setup overhead that pays off for larger payloads.
+
+**Recommendation**: Don't use tight loops for bulk operations. Instead:
+- Use **vectorized APIs** (`invoke_methods`, `create_objects`) for multiple same-target operations
+- Use **Arrow transfer** for bulk data
+- Use **batch API** for mixed operations
+
 ## Architecture Impact on Performance
 
-### Why Gatun is Faster
+### Where Gatun Excels
 
-1. **Shared Memory IPC**: Eliminates socket data copying for large payloads
-2. **FlatBuffers**: Zero-copy deserialization vs Py4J's pickle-like protocol
-3. **Persistent Connection**: No reconnection overhead per call
-4. **Single Process**: JVM runs as subprocess, no network stack
+1. **Lower Latency**: Shared memory IPC provides 2-3x lower latency per operation
+2. **Large Payloads**: Zero-copy Arrow transfer achieves 2+ GB/s throughput
+3. **Mixed Operations**: Better for varied workloads (create + call + get)
+4. **Data Transfer**: Arrow integration for efficient bulk data
+
+### Where Py4J Excels
+
+1. **Simple Tight Loops**: Lower per-call overhead for pre-bound method calls
+2. **Multiple Clients**: Can serve multiple Python processes from one JVM
+3. **Maturity**: Battle-tested in PySpark for years
 
 ### Performance Trade-offs
 
 | Feature | Gatun | Py4J |
 |---------|-------|------|
-| Latency | Lower (shared memory) | Higher (TCP/Unix socket) |
-| Throughput | Higher (zero-copy Arrow) | Lower (serialization) |
-| Memory | Fixed shared memory region | Dynamic per-call |
-| Scalability | Single client per server | Multiple clients |
+| Per-call latency | **Lower** (shared memory) | Higher (TCP/Unix socket) |
+| Simple tight loops | ~45K ops/s | **~60K ops/s** |
+| Large data transfer | **2+ GB/s** (Arrow) | Limited by serialization |
+| Memory model | Fixed shared region | Dynamic per-call |
+| Client scaling | Single client per server | Multiple clients |
+
+### When to Use Gatun vs Py4J
+
+| Use Case | Recommendation | Reason |
+|----------|----------------|--------|
+| Interactive work | **Gatun** | Lower latency feels more responsive |
+| Bulk data transfer | **Gatun** | Arrow zero-copy is much faster |
+| Simple tight loops | **Py4J** | Lower per-call overhead |
+| Mixed operations | **Gatun** | Better for varied workloads |
+| Multiple clients | **Py4J** | Gatun is single-client |
+| PySpark production | Either | Gatun via BridgeAdapter |
 
 ## Benchmark Files
 
