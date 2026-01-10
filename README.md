@@ -17,6 +17,40 @@ High-performance Python-to-Java bridge using shared memory and Unix domain socke
 - **Vectorized APIs**: invoke_methods, create_objects, get_fields for 2-5x additional speedup
 - **Observability**: Server metrics, structured logging, and JFR events for debugging and monitoring
 
+## Performance
+
+Gatun significantly outperforms Py4J (PySpark's default bridge) through shared memory IPC:
+
+| Operation | Gatun | Py4J | Speedup |
+|-----------|------:|-----:|--------:|
+| Method call (no args) | 120 μs | 350 μs | **2.9x** |
+| Method call (with args) | 140 μs | 380 μs | **2.7x** |
+| Object creation | 150 μs | 400 μs | **2.7x** |
+| Static method | 130 μs | 360 μs | **2.8x** |
+
+### Arrow Data Transfer
+
+For bulk data, Arrow zero-copy transfer provides massive speedups:
+
+| Data Size | IPC Format | Zero-Copy Buffers | Throughput |
+|-----------|----------:|------------------:|-----------:|
+| 1K rows | 800 μs | 520 μs | 54 MB/s |
+| 10K rows | 890 μs | 570 μs | 509 MB/s |
+| 100K rows | 1.4 ms | 1.0 ms | **1.5 GB/s** |
+| 500K rows | 5.9 ms | 3.6 ms | **2.1 GB/s** |
+
+### Vectorized APIs
+
+Reduce round-trips with batch operations:
+
+| Operation | Individual Calls | Vectorized | Speedup |
+|-----------|----------------:|-----------:|--------:|
+| 3 method calls | 720 μs | 490 μs | **1.5x** |
+| 10 method calls | 1,600 μs | 490 μs | **3.3x** |
+| 10 object creations | 2,400 μs | 1,100 μs | **2.2x** |
+
+*Benchmarks run on Apple M1, Java 21, Python 3.13. See [docs/benchmarks.md](docs/benchmarks.md) for methodology and full results.*
+
 ## Installation
 
 ```bash

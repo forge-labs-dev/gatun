@@ -6,7 +6,9 @@ used by PySpark, based on analysis of the PySpark codebase.
 
 Usage:
     cd python
-    uv run python benchmarks/benchmark_comparison.py
+    uv run python benchmarks/benchmark_comparison.py           # Full benchmark
+    uv run python benchmarks/benchmark_comparison.py --quick   # Quick mode (~30s)
+    uv run python benchmarks/benchmark_comparison.py --gatun-only  # Skip Py4J
 
 Categories tested:
     0. Baseline - Python overhead measurement for calibration
@@ -25,6 +27,7 @@ Fairness notes:
     - Batch timing used for fast operations to reduce Python overhead
 """
 
+import argparse
 import json
 import os
 import platform
@@ -34,13 +37,20 @@ import sys
 import time
 from typing import Callable
 
-# Benchmark configuration
+# Benchmark configuration - can be modified by --quick flag
 WARMUP_SECONDS = 2.0  # Time-based warmup for JIT + classloading
 WARMUP_MIN_ITERATIONS = 1000  # Minimum warmup iterations
 BENCHMARK_ITERATIONS = 1000
 BATCH_SIZE = 100  # For batch timing of fast operations
 BULK_SIZE = 10000
 NUM_TRIALS = 3  # Number of complete benchmark trials for median-of-medians
+
+# Quick mode settings
+QUICK_WARMUP_SECONDS = 0.5
+QUICK_WARMUP_MIN_ITERATIONS = 100
+QUICK_BENCHMARK_ITERATIONS = 100
+QUICK_BULK_SIZE = 1000
+QUICK_NUM_TRIALS = 1
 
 
 def get_cpu_info() -> str:
@@ -1820,12 +1830,48 @@ def print_baseline(gatun_baseline: dict, py4j_baseline: dict | None):
     print()
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Comprehensive Gatun vs Py4J performance benchmarks"
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Run quick benchmarks with fewer iterations (~30s instead of ~5min)",
+    )
+    parser.add_argument(
+        "--gatun-only",
+        action="store_true",
+        help="Skip Py4J benchmarks (useful if Py4J not installed)",
+    )
+    parser.add_argument(
+        "--json",
+        metavar="FILE",
+        help="Save results to JSON file",
+    )
+    return parser.parse_args()
+
+
 def main():
+    global WARMUP_SECONDS, WARMUP_MIN_ITERATIONS, BENCHMARK_ITERATIONS, BULK_SIZE, NUM_TRIALS
+
+    args = parse_args()
+
+    # Apply quick mode settings
+    if args.quick:
+        WARMUP_SECONDS = QUICK_WARMUP_SECONDS
+        WARMUP_MIN_ITERATIONS = QUICK_WARMUP_MIN_ITERATIONS
+        BENCHMARK_ITERATIONS = QUICK_BENCHMARK_ITERATIONS
+        BULK_SIZE = QUICK_BULK_SIZE
+        NUM_TRIALS = QUICK_NUM_TRIALS
+
     # Print environment info first for reproducibility
     print_environment()
 
+    mode_str = " [QUICK MODE]" if args.quick else ""
     print("=" * 80)
-    print(" Comprehensive Gatun vs Py4J Performance Benchmarks")
+    print(f" Comprehensive Gatun vs Py4J Performance Benchmarks{mode_str}")
     print("=" * 80)
     print(f"Warmup: {WARMUP_SECONDS}s (min {WARMUP_MIN_ITERATIONS} iterations)")
     print(f"Benchmark iterations: {BENCHMARK_ITERATIONS}")
@@ -1873,7 +1919,7 @@ def main():
     gatun_latency = aggregate_trials(gatun_latency_trials)
     gatun_throughput = aggregate_throughput_trials(gatun_throughput_trials)
 
-    # Run Py4J benchmarks with multiple trials
+    # Run Py4J benchmarks with multiple trials (unless --gatun-only)
     py4j_latency_auto_trials = []
     py4j_latency_no_auto_trials = []
     py4j_throughput_auto_trials = []
@@ -1881,23 +1927,26 @@ def main():
     py4j_baseline = None
     py4j_sweep = None
 
-    for trial in range(NUM_TRIALS):
-        print(f"[Trial {trial + 1}/{NUM_TRIALS}] Running Py4J benchmarks...")
-        py4j_results = run_py4j_benchmarks()
+    if not args.gatun_only:
+        for trial in range(NUM_TRIALS):
+            print(f"[Trial {trial + 1}/{NUM_TRIALS}] Running Py4J benchmarks...")
+            py4j_results = run_py4j_benchmarks()
 
-        if py4j_baseline is None:
-            py4j_baseline = py4j_results.get("baseline")
-        if py4j_sweep is None:
-            py4j_sweep = py4j_results.get("payload_sweep")
+            if py4j_baseline is None:
+                py4j_baseline = py4j_results.get("baseline")
+            if py4j_sweep is None:
+                py4j_sweep = py4j_results.get("payload_sweep")
 
-        if py4j_results.get("latency_auto_true"):
-            py4j_latency_auto_trials.append(py4j_results["latency_auto_true"])
-        if py4j_results.get("latency_auto_false"):
-            py4j_latency_no_auto_trials.append(py4j_results["latency_auto_false"])
-        if py4j_results.get("throughput_auto_true"):
-            py4j_throughput_auto_trials.append(py4j_results["throughput_auto_true"])
-        if py4j_results.get("throughput_auto_false"):
-            py4j_throughput_no_auto_trials.append(py4j_results["throughput_auto_false"])
+            if py4j_results.get("latency_auto_true"):
+                py4j_latency_auto_trials.append(py4j_results["latency_auto_true"])
+            if py4j_results.get("latency_auto_false"):
+                py4j_latency_no_auto_trials.append(py4j_results["latency_auto_false"])
+            if py4j_results.get("throughput_auto_true"):
+                py4j_throughput_auto_trials.append(py4j_results["throughput_auto_true"])
+            if py4j_results.get("throughput_auto_false"):
+                py4j_throughput_no_auto_trials.append(py4j_results["throughput_auto_false"])
+    else:
+        print("[Skipping Py4J benchmarks (--gatun-only)]")
 
     # Aggregate Py4J trials
     py4j_latency_auto = (
