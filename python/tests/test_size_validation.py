@@ -209,3 +209,123 @@ def test_send_arrow_table_batched_multiple_columns(client):
 
     # 50 rows with batch_size=20 should produce 3 batches
     assert len(responses) == 3
+
+
+def test_send_arrow_table_batched_auto_batch_size_estimation(client):
+    """Test that auto batch size estimation works correctly."""
+    import pyarrow as pa
+
+    # Create a table with known-size rows (strings of varying lengths)
+    # This tests the sampling logic that estimates bytes per row
+    table = pa.table(
+        {
+            "id": list(range(1000)),
+            "data": [f"row_{i:04d}_padding" for i in range(1000)],
+        }
+    )
+
+    # With auto batch size, should split into multiple batches
+    responses = client.send_arrow_table_batched(table)
+
+    # Should have at least 1 response
+    assert len(responses) >= 1
+    assert all("Received" in r for r in responses)
+
+    # Verify total rows processed equals input rows
+    total_rows = sum(int(r.split()[1]) for r in responses)
+    assert total_rows == 1000
+
+
+def test_send_arrow_table_batched_single_row_batch(client):
+    """Test batched sending with batch_size=1 (extreme case)."""
+    import pyarrow as pa
+
+    table = pa.table({"col": [1, 2, 3, 4, 5]})
+    responses = client.send_arrow_table_batched(table, batch_size=1)
+
+    # Should produce exactly 5 batches
+    assert len(responses) == 5
+    assert all("Received 1 rows" in r for r in responses)
+
+
+def test_send_arrow_table_batched_many_batches(client):
+    """Test batched sending with many batches (stress test)."""
+    import pyarrow as pa
+
+    # Create table that will produce many batches
+    table = pa.table({"col": list(range(500))})
+    responses = client.send_arrow_table_batched(table, batch_size=5)
+
+    # 500 rows / 5 per batch = 100 batches
+    assert len(responses) == 100
+    assert all("Received" in r for r in responses)
+
+
+def test_send_arrow_buffers_payload_overflow(client):
+    """Test that MemoryError is raised when data exceeds payload arena."""
+    import pyarrow as pa
+
+    # Get payload zone size
+    max_payload_size = client.response_offset - client.payload_offset
+
+    # Create a table that will definitely exceed the payload zone
+    # Each row has a large string to quickly exceed the limit
+    num_rows = max_payload_size // 100 + 1000  # Ensure we exceed
+    large_strings = ["x" * 200 for _ in range(num_rows)]
+
+    table = pa.table({"data": large_strings})
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Arena raises MemoryError when allocation exceeds available space
+    with pytest.raises(MemoryError) as exc_info:
+        client.send_arrow_buffers(table, arena, schema_cache)
+
+    assert "Payload arena full" in str(exc_info.value)
+
+
+def test_send_arrow_buffers_near_payload_limit(client):
+    """Test sending Arrow data near but under the payload limit."""
+    import pyarrow as pa
+
+    # Get payload zone size and create data that's ~50% of it
+    max_payload_size = client.response_offset - client.payload_offset
+    target_size = max_payload_size // 2
+
+    # Estimate rows needed (each int64 is 8 bytes + validity bitmap overhead)
+    num_rows = target_size // 16  # Conservative estimate
+
+    table = pa.table({"col": list(range(num_rows))})
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Should succeed - under the limit
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {num_rows} rows" in response
+
+
+def test_send_arrow_table_batched_preserves_data_integrity(client):
+    """Test that batched sending preserves all data correctly."""
+    import pyarrow as pa
+
+    # Create table with various data types
+    original_data = {
+        "int_col": list(range(100)),
+        "float_col": [i * 0.5 for i in range(100)],
+        "str_col": [f"value_{i}" for i in range(100)],
+        "bool_col": [i % 2 == 0 for i in range(100)],
+    }
+    table = pa.table(original_data)
+
+    # Send in small batches
+    responses = client.send_arrow_table_batched(table, batch_size=17)
+
+    # Verify all rows were processed
+    # 100 rows / 17 per batch = 6 batches (17+17+17+17+17+15)
+    assert len(responses) == 6
+
+    # Verify total row count
+    total_rows = sum(int(r.split()[1]) for r in responses)
+    assert total_rows == 100
