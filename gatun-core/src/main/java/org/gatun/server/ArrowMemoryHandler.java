@@ -522,11 +522,13 @@ public class ArrowMemoryHandler {
         long alignedOffset = (currentOffset + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 
         if (length > 0) {
-          // Copy buffer data to payload shm using bulk copy
+          // Copy buffer data to payload shm using bulk copy.
+          // We use nioBuffer() to get a ByteBuffer view of ArrowBuf's native memory
+          // (zero-copy), then wrap it as MemorySegment. This avoids using
+          // MemorySegment.ofAddress().reinterpret() which is a restricted operation
+          // requiring --enable-native-access.
           MemorySegment dest = payloadShm.asSlice(alignedOffset, length);
-          // Create a MemorySegment view of the ArrowBuf's native memory
-          MemorySegment src = MemorySegment.ofAddress(buffer.memoryAddress()).reinterpret(length);
-          // Bulk copy - much faster than byte-by-byte
+          MemorySegment src = MemorySegment.ofBuffer(buffer.nioBuffer(0, (int) length));
           dest.copyFrom(src);
         }
 

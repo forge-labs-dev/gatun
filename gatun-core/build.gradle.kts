@@ -24,8 +24,7 @@ dependencies {
 }
 
 val runtimeJvmArgs = listOf(
-    "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED",
-    "--enable-native-access=ALL-UNNAMED"
+    "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
 )
 
 application {
