@@ -37,8 +37,8 @@ Format: `[4 bytes: version][4 bytes: arena_epoch][8 bytes: memory size][2 bytes:
 
 ### Python (from python/ directory)
 ```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync    # Install deps and build JAR
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync --reinstall-package gatun  # Rebuild after schema/Java changes
+JAVA_HOME=/opt/homebrew/opt/openjdk uv sync    # Install deps and build JAR
+JAVA_HOME=/opt/homebrew/opt/openjdk uv sync --reinstall-package gatun  # Rebuild after schema/Java changes
 uv run pytest                        # Run all tests (with coverage)
 uv run pytest tests/test_gatun_core.py::test_name  # Run single test
 uv run pytest --no-cov               # Run without coverage (faster)
@@ -68,7 +68,7 @@ The build backend (`python/gatun_build_backend.py`) automatically regenerates Fl
 
 ## Key Implementation Details
 
-- Java 21 with preview features required (`--enable-preview`)
+- Java 22+ required
 - Arrow memory requires JVM flags: `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`
 - Python client uses `weakref.finalize` for automatic Java object cleanup
 - Socket path: Generated randomly in `/tmp/gatun_<pid>_<random>.sock` by default

@@ -7,7 +7,7 @@ This script compares the performance of:
 3. create_objects vs multiple create_object calls
 
 Run with:
-    JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_vectorized.py
+    JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_vectorized.py
 """
 
 import time

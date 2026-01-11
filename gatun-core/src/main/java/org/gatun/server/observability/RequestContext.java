@@ -8,11 +8,7 @@ import org.gatun.protocol.Action;
  * <p>This record is immutable and captures all relevant information at request start time.
  */
 public record RequestContext(
-    long sessionId,
-    long requestId,
-    byte action,
-    String target,
-    long startNanos) {
+    long sessionId, long requestId, byte action, String target, long startNanos) {
 
   /** Create a new request context with current timestamp. */
   public static RequestContext create(long sessionId, long requestId, byte action, String target) {

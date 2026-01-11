@@ -32,7 +32,6 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.gatun.protocol.*; // Import all generated classes
 import org.gatun.server.MethodResolver.MethodWithArgs;
-import org.gatun.server.observability.GatunEvents;
 import org.gatun.server.observability.Metrics;
 import org.gatun.server.observability.SessionObserver;
 import org.gatun.server.observability.StructuredLogger;
@@ -148,8 +147,7 @@ public class GatunServer {
       ThreadLocal.withInitial(HashSet::new);
 
   // Per-request: nesting depth counter for convertArgument recursion
-  private static final ThreadLocal<Integer> argumentNestingDepth =
-      ThreadLocal.withInitial(() -> 0);
+  private static final ThreadLocal<Integer> argumentNestingDepth = ThreadLocal.withInitial(() -> 0);
 
   // --- REUSABLE FLATBUFFER TEMP OBJECTS ---
   // These are ThreadLocal to avoid per-request allocation overhead.
@@ -165,8 +163,7 @@ public class GatunServer {
       ThreadLocal.withInitial(ObjectRef::new);
   private static final ThreadLocal<ListVal> tempListVal = ThreadLocal.withInitial(ListVal::new);
   private static final ThreadLocal<MapVal> tempMapVal = ThreadLocal.withInitial(MapVal::new);
-  private static final ThreadLocal<ArrayVal> tempArrayVal =
-      ThreadLocal.withInitial(ArrayVal::new);
+  private static final ThreadLocal<ArrayVal> tempArrayVal = ThreadLocal.withInitial(ArrayVal::new);
   private static final ThreadLocal<CallbackRef> tempCallbackRef =
       ThreadLocal.withInitial(CallbackRef::new);
 
@@ -299,7 +296,8 @@ public class GatunServer {
       // --- HANDSHAKE: Send Protocol Version, Memory Size, and SHM Path to Client ---
       // Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
       //         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
-      byte[] shmPathBytes = sessionShmPath.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+      byte[] shmPathBytes =
+          sessionShmPath.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
       ByteBuffer handshakeBuf = ByteBuffer.allocate(16 + 2 + shmPathBytes.length);
       handshakeBuf.order(ByteOrder.LITTLE_ENDIAN);
       handshakeBuf.putInt(PROTOCOL_VERSION);
@@ -343,9 +341,11 @@ public class GatunServer {
           LOG.warning("Invalid command size: " + commandSize + " (max: " + PAYLOAD_OFFSET + ")");
           // Send error response and continue
           FlatBufferBuilder errBuilder = new FlatBufferBuilder(256);
-          int errOffset = packError(errBuilder,
-              "Invalid command size: " + commandSize + " bytes (max: " + PAYLOAD_OFFSET + ")",
-              "java.lang.IllegalArgumentException");
+          int errOffset =
+              packError(
+                  errBuilder,
+                  "Invalid command size: " + commandSize + " bytes (max: " + PAYLOAD_OFFSET + ")",
+                  "java.lang.IllegalArgumentException");
           errBuilder.finish(errOffset);
           ByteBuffer errBuf = errBuilder.dataBuffer();
           int errSize = errBuf.remaining();
@@ -479,7 +479,11 @@ public class GatunServer {
               } else {
                 // Fallback: use normal resolution (handles inherited methods, etc)
                 MethodWithArgs mwa =
-                    MethodResolver.findMethodWithArgs(target.getClass(), methodName, ReflectionCache.EMPTY_CLASS_ARRAY, ReflectionCache.EMPTY_OBJECT_ARRAY);
+                    MethodResolver.findMethodWithArgs(
+                        target.getClass(),
+                        methodName,
+                        ReflectionCache.EMPTY_CLASS_ARRAY,
+                        ReflectionCache.EMPTY_OBJECT_ARRAY);
                 result = mwa.cached.invoke(target, mwa.args);
               }
             } else {
@@ -496,7 +500,8 @@ public class GatunServer {
 
               // Find and invoke method via MethodHandle (faster than reflection)
               MethodWithArgs mwa =
-                  MethodResolver.findMethodWithArgs(target.getClass(), methodName, argTypes, javaArgs);
+                  MethodResolver.findMethodWithArgs(
+                      target.getClass(), methodName, argTypes, javaArgs);
               result = mwa.cached.invoke(target, mwa.args);
             }
 
@@ -537,12 +542,14 @@ public class GatunServer {
             }
 
             // Find and invoke static method via MethodHandle (faster than reflection)
-            MethodWithArgs mwa = MethodResolver.findMethodWithArgs(clazz, methodName, argTypes, javaArgs);
+            MethodWithArgs mwa =
+                MethodResolver.findMethodWithArgs(clazz, methodName, argTypes, javaArgs);
             result = mwa.cached.invoke(null, mwa.args);
 
             // Wrap returned objects in registry
             // If returnObjectRef is true, always wrap as ObjectRef (no auto-conversion)
-            if (result != null && (cmd.returnObjectRef() || !MethodResolver.isAutoConvertible(result))) {
+            if (result != null
+                && (cmd.returnObjectRef() || !MethodResolver.isAutoConvertible(result))) {
               quota.allocateObject();
               long newId = objectIdCounter.getAndIncrement();
               objectRegistry.put(newId, result);
@@ -885,7 +892,7 @@ public class GatunServer {
               }
               results.add(fieldValue);
             }
-            result = results;  // Will be packed as ListVal
+            result = results; // Will be packed as ListVal
 
           } else if (cmd.action() == Action.InvokeMethods) {
             // Vectorized method calls: invoke multiple methods on same target
@@ -897,7 +904,8 @@ public class GatunServer {
 
             InvokeMethodsRequest req = cmd.invokeMethods();
             if (req == null) {
-              throw new IllegalArgumentException("InvokeMethods action requires invoke_methods field");
+              throw new IllegalArgumentException(
+                  "InvokeMethods action requires invoke_methods field");
             }
 
             int callCount = req.methodCallsLength();
@@ -927,18 +935,21 @@ public class GatunServer {
                 if (handle != null) {
                   methodResult = handle.invoke(target);
                 } else {
-                  var mwa = MethodResolver.findMethodWithArgs(
-                      target.getClass(), methodName, argTypes, javaArgs);
+                  var mwa =
+                      MethodResolver.findMethodWithArgs(
+                          target.getClass(), methodName, argTypes, javaArgs);
                   methodResult = mwa.cached.invoke(target, mwa.args);
                 }
               } else {
-                var mwa = MethodResolver.findMethodWithArgs(
-                    target.getClass(), methodName, argTypes, javaArgs);
+                var mwa =
+                    MethodResolver.findMethodWithArgs(
+                        target.getClass(), methodName, argTypes, javaArgs);
                 methodResult = mwa.cached.invoke(target, mwa.args);
               }
 
               // Wrap result if needed
-              if (methodResult != null && (returnObjectRef || !MethodResolver.isAutoConvertible(methodResult))) {
+              if (methodResult != null
+                  && (returnObjectRef || !MethodResolver.isAutoConvertible(methodResult))) {
                 quota.allocateObject();
                 long newId = objectIdCounter.getAndIncrement();
                 objectRegistry.put(newId, methodResult);
@@ -947,13 +958,14 @@ public class GatunServer {
               }
               results.add(methodResult);
             }
-            result = results;  // Will be packed as ListVal
+            result = results; // Will be packed as ListVal
 
           } else if (cmd.action() == Action.CreateObjects) {
             // Vectorized object creation: create multiple objects
             CreateObjectsRequest req = cmd.createObjects();
             if (req == null) {
-              throw new IllegalArgumentException("CreateObjects action requires create_objects field");
+              throw new IllegalArgumentException(
+                  "CreateObjects action requires create_objects field");
             }
 
             int objCount = req.objectsLength();
@@ -996,7 +1008,7 @@ public class GatunServer {
               sessionObjectIds.add(newId);
               results.add(new ObjectRefT(newId));
             }
-            result = results;  // Will be packed as ListVal of ObjectRefs
+            result = results; // Will be packed as ListVal of ObjectRefs
 
           } else if (cmd.action() == Action.Batch) {
             // Batch command: execute multiple sub-commands in sequence
@@ -1019,13 +1031,16 @@ public class GatunServer {
 
               try {
                 // Execute sub-command and get result
-                Object subResult = executeCommand(subCmd, sessionObjectIds, sessionCallbackIds, sharedMem, quota);
-                subResponseOffsets[i] = packSuccessWithSession(builder, subResult, sessionObjectIds);
+                Object subResult =
+                    executeCommand(subCmd, sessionObjectIds, sessionCallbackIds, sharedMem, quota);
+                subResponseOffsets[i] =
+                    packSuccessWithSession(builder, subResult, sessionObjectIds);
                 executedCount++;
               } catch (Throwable subT) {
                 // Pack error for this sub-command
                 Throwable subCause = subT;
-                if (subT instanceof java.lang.reflect.InvocationTargetException && subT.getCause() != null) {
+                if (subT instanceof java.lang.reflect.InvocationTargetException
+                    && subT.getCause() != null) {
                   subCause = subT.getCause();
                 }
                 String subMessage = formatException(subCause);
@@ -1035,13 +1050,14 @@ public class GatunServer {
 
                 if (stopOnError) {
                   errorIndex = i;
-                  break;  // Stop executing remaining commands
+                  break; // Stop executing remaining commands
                 }
               }
             }
 
             // Build BatchResponse
-            responseOffset = packBatchResponse(builder, subResponseOffsets, executedCount, errorIndex);
+            responseOffset =
+                packBatchResponse(builder, subResponseOffsets, executedCount, errorIndex);
 
             // Skip normal packSuccess - we've already built the response
             builder.finish(responseOffset);
@@ -1075,7 +1091,7 @@ public class GatunServer {
               cancelledRequests.get().remove(requestId);
             }
             currentRequestId.remove();
-            continue;  // Skip the normal response logic below
+            continue; // Skip the normal response logic below
 
           } else if (cmd.action() == Action.GetMetrics) {
             // Return server metrics as a string report
@@ -1541,7 +1557,7 @@ public class GatunServer {
       type = boolean.class;
     } else if (valType == Value.CharVal) {
       CharVal cv = (CharVal) arg.val(tempCharVal.get());
-      value = (char) cv.v();  // Convert ushort to char
+      value = (char) cv.v(); // Convert ushort to char
       type = char.class;
     } else if (valType == Value.ObjectRef) {
       ObjectRef ref = (ObjectRef) arg.val(tempObjectRef.get());
@@ -1673,8 +1689,7 @@ public class GatunServer {
       if (typeHint != null && !typeHint.isEmpty()) {
         Class<?> hintedType = resolveTypeHint(typeHint);
         if (hintedType.isPrimitive()) {
-          throw new IllegalArgumentException(
-              "Cannot pass null to primitive type: " + typeHint);
+          throw new IllegalArgumentException("Cannot pass null to primitive type: " + typeHint);
         }
         type = hintedType;
         // Skip the type hint resolution below since we already handled it
@@ -1821,7 +1836,6 @@ public class GatunServer {
       return arr;
     }
   }
-
 
   // --- HELPER: Format exception with full stack trace ---
   private static String formatException(Throwable t) {
@@ -2052,7 +2066,8 @@ public class GatunServer {
 
           // Send callback request to Python and wait for response
           // Use captured session context so this works from any thread
-          return invokeCallback(callbackId, method.getName(), args == null ? new Object[0] : args, ctx);
+          return invokeCallback(
+              callbackId, method.getName(), args == null ? new Object[0] : args, ctx);
         };
 
     return Proxy.newProxyInstance(
@@ -2067,8 +2082,8 @@ public class GatunServer {
    * be called from any thread, not just the handleClient thread. A lock ensures thread-safe
    * round-trip communication when multiple threads invoke callbacks concurrently.
    */
-  private Object invokeCallback(long callbackId, String methodName, Object[] args, SessionContext ctx)
-      throws Exception {
+  private Object invokeCallback(
+      long callbackId, String methodName, Object[] args, SessionContext ctx) throws Exception {
     if (ctx == null || ctx.channel == null || ctx.sharedMem == null) {
       throw new IllegalStateException("Callback invoked with invalid session context");
     }
@@ -2215,9 +2230,10 @@ public class GatunServer {
   private int packBatchResponse(
       FlatBufferBuilder builder, int[] responseOffsets, int count, int errorIndex) {
     // Create vector of response offsets (only include executed ones)
-    int[] toInclude = count == responseOffsets.length
-        ? responseOffsets
-        : java.util.Arrays.copyOf(responseOffsets, count);
+    int[] toInclude =
+        count == responseOffsets.length
+            ? responseOffsets
+            : java.util.Arrays.copyOf(responseOffsets, count);
     int responsesVec = BatchResponse.createResponsesVector(builder, toInclude);
 
     // Build BatchResponse
@@ -2333,16 +2349,14 @@ public class GatunServer {
   /**
    * Get the global Metrics instance for monitoring.
    *
-   * <p>Use this to access request counts, latency percentiles, object counts, etc.
-   * Thread-safe and can be called from any thread.
+   * <p>Use this to access request counts, latency percentiles, object counts, etc. Thread-safe and
+   * can be called from any thread.
    */
   public static Metrics getMetrics() {
     return Metrics.getInstance();
   }
 
-  /**
-   * Get a formatted metrics report for logging or debugging.
-   */
+  /** Get a formatted metrics report for logging or debugging. */
   public static String getMetricsReport() {
     return Metrics.getInstance().report();
   }
@@ -2350,8 +2364,8 @@ public class GatunServer {
   /**
    * Enable trace mode for verbose method resolution logging.
    *
-   * <p>When enabled, logs detailed information about method overload resolution
-   * decisions. Useful for debugging "wrong method called" issues.
+   * <p>When enabled, logs detailed information about method overload resolution decisions. Useful
+   * for debugging "wrong method called" issues.
    *
    * <p>Enable via: -Dgatun.trace=true or call this method.
    */
@@ -2359,9 +2373,7 @@ public class GatunServer {
     StructuredLogger.setTraceMode(enabled);
   }
 
-  /**
-   * Check if trace mode is enabled.
-   */
+  /** Check if trace mode is enabled. */
   public static boolean isTraceMode() {
     return StructuredLogger.isTraceEnabled();
   }
@@ -2388,8 +2400,8 @@ public class GatunServer {
   /**
    * Configure Java logging based on system properties.
    *
-   * <p>Reads gatun.log.level to set the logging level for org.gatun.server.
-   * Valid levels: FINEST, FINER, FINE, INFO, WARNING, SEVERE
+   * <p>Reads gatun.log.level to set the logging level for org.gatun.server. Valid levels: FINEST,
+   * FINER, FINE, INFO, WARNING, SEVERE
    */
   private static void configureLogging() {
     String levelStr = System.getProperty("gatun.log.level");

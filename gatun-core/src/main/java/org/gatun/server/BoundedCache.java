@@ -8,14 +8,15 @@ import java.util.function.Function;
 /**
  * A thread-safe bounded cache with LRU eviction.
  *
- * <p>This cache evicts the least recently used entries when the size exceeds the maximum.
- * Designed for use in long-running processes like Spark drivers where unbounded caches
- * can cause memory issues with dynamically generated classes and methods.
+ * <p>This cache evicts the least recently used entries when the size exceeds the maximum. Designed
+ * for use in long-running processes like Spark drivers where unbounded caches can cause memory
+ * issues with dynamically generated classes and methods.
  *
  * <p>Thread-safety is achieved with a read-write lock:
+ *
  * <ul>
- *   <li>Reads (get) acquire read lock - allows concurrent reads</li>
- *   <li>Writes (put, computeIfAbsent) acquire write lock - exclusive access</li>
+ *   <li>Reads (get) acquire read lock - allows concurrent reads
+ *   <li>Writes (put, computeIfAbsent) acquire write lock - exclusive access
  * </ul>
  *
  * @param <K> the key type
@@ -42,16 +43,17 @@ public final class BoundedCache<K, V> {
     }
     this.maxSize = maxSize;
     // accessOrder=true makes it LRU (access order rather than insertion order)
-    this.map = new LinkedHashMap<>(16, 0.75f, true) {
-      @Override
-      protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-        boolean shouldRemove = size() > BoundedCache.this.maxSize;
-        if (shouldRemove) {
-          evictions++;
-        }
-        return shouldRemove;
-      }
-    };
+    this.map =
+        new LinkedHashMap<>(16, 0.75f, true) {
+          @Override
+          protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+            boolean shouldRemove = size() > BoundedCache.this.maxSize;
+            if (shouldRemove) {
+              evictions++;
+            }
+            return shouldRemove;
+          }
+        };
   }
 
   /**
@@ -93,8 +95,8 @@ public final class BoundedCache<K, V> {
   /**
    * Get or compute a value if absent.
    *
-   * <p>Note: The mapping function is called while holding the write lock.
-   * Keep computation lightweight to avoid blocking other threads.
+   * <p>Note: The mapping function is called while holding the write lock. Keep computation
+   * lightweight to avoid blocking other threads.
    *
    * @param key the key
    * @param mappingFunction function to compute the value if absent
@@ -133,9 +135,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get the current size of the cache.
-   */
+  /** Get the current size of the cache. */
   public int size() {
     lock.readLock().lock();
     try {
@@ -145,9 +145,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Clear all entries from the cache.
-   */
+  /** Clear all entries from the cache. */
   public void clear() {
     lock.writeLock().lock();
     try {
@@ -157,9 +155,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get cache statistics as a formatted string.
-   */
+  /** Get cache statistics as a formatted string. */
   public String getStats() {
     lock.readLock().lock();
     try {
@@ -173,9 +169,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get the number of cache hits.
-   */
+  /** Get the number of cache hits. */
   public long getHits() {
     lock.readLock().lock();
     try {
@@ -185,9 +179,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get the number of cache misses.
-   */
+  /** Get the number of cache misses. */
   public long getMisses() {
     lock.readLock().lock();
     try {
@@ -197,9 +189,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get the number of evictions.
-   */
+  /** Get the number of evictions. */
   public long getEvictions() {
     lock.readLock().lock();
     try {
@@ -209,9 +199,7 @@ public final class BoundedCache<K, V> {
     }
   }
 
-  /**
-   * Get the maximum size of the cache.
-   */
+  /** Get the maximum size of the cache. */
   public int getMaxSize() {
     return maxSize;
   }

@@ -75,7 +75,7 @@ Reduce round-trips with batch operations:
 | Mixed operations | Gatun |
 | PySpark integration | Either (Gatun via BridgeAdapter) |
 
-*Benchmarks run on Apple M1, Java 21, Python 3.13. See [docs/benchmarks.md](docs/benchmarks.md) for full methodology.*
+*Benchmarks run on Apple M1, Java 22, Python 3.13. See [docs/benchmarks.md](docs/benchmarks.md) for full methodology.*
 
 ## Installation
 
@@ -83,7 +83,7 @@ Reduce round-trips with batch operations:
 pip install gatun
 ```
 
-Requires Java 21+.
+Requires Java 22+.
 
 ## Quick Start
 
@@ -624,7 +624,7 @@ Gatun uses a client-server architecture with shared memory for high-performance 
 
 ```bash
 cd python
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv sync  # Install deps and build JAR
+JAVA_HOME=/opt/homebrew/opt/openjdk uv sync  # Install deps and build JAR
 uv run pytest              # Run tests
 uv run ruff check .        # Lint
 uv run ruff format .       # Format

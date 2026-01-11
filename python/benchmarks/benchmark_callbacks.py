@@ -8,7 +8,7 @@ This script measures the overhead of Python callbacks invoked from Java:
 
 Run with:
     cd python
-    JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_callbacks.py
+    JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_callbacks.py
 """
 
 import time

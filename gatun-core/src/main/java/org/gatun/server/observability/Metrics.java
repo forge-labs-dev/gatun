@@ -10,12 +10,13 @@ import org.gatun.protocol.Action;
  * Collects and exposes metrics for monitoring Gatun server performance.
  *
  * <p>Metrics include:
+ *
  * <ul>
- *   <li>Request counts and rates per action type</li>
- *   <li>Latency percentiles (p50, p99) per action</li>
- *   <li>Object registry counts</li>
- *   <li>Arrow data transfer metrics</li>
- *   <li>Callback metrics</li>
+ *   <li>Request counts and rates per action type
+ *   <li>Latency percentiles (p50, p99) per action
+ *   <li>Object registry counts
+ *   <li>Arrow data transfer metrics
+ *   <li>Callback metrics
  * </ul>
  *
  * <p>Uses lock-free data structures for minimal overhead during request processing.
@@ -199,8 +200,9 @@ public class Metrics {
       long p50 = getLatencyPercentile(action, 0.50);
       long p99 = getLatencyPercentile(action, 0.99);
 
-      sb.append(String.format("  %s: count=%d errors=%d p50=%d p99=%d\n",
-          actionName, count, errors, p50, p99));
+      sb.append(
+          String.format(
+              "  %s: count=%d errors=%d p50=%d p99=%d\n", actionName, count, errors, p50, p99));
     }
 
     return sb.toString();
@@ -236,12 +238,14 @@ public class Metrics {
   }
 
   /**
-   * Simple latency tracker using bucketed histogram.
-   * Provides approximate percentiles with minimal overhead.
+   * Simple latency tracker using bucketed histogram. Provides approximate percentiles with minimal
+   * overhead.
    */
   private static class LatencyTracker {
     // Buckets: 0-10us, 10-100us, 100-1000us, 1-10ms, 10-100ms, 100ms-1s, >1s
-    private static final long[] BUCKET_BOUNDS = {10, 100, 1000, 10_000, 100_000, 1_000_000, Long.MAX_VALUE};
+    private static final long[] BUCKET_BOUNDS = {
+      10, 100, 1000, 10_000, 100_000, 1_000_000, Long.MAX_VALUE
+    };
     private final LongAdder[] buckets = new LongAdder[BUCKET_BOUNDS.length];
     private final LongAdder totalCount = new LongAdder();
     private final LongAdder totalSum = new LongAdder();

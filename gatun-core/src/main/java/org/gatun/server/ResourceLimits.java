@@ -3,19 +3,20 @@ package org.gatun.server;
 /**
  * Resource limits to prevent buggy clients from exhausting server resources.
  *
- * <p>All limits are configurable via system properties with sensible defaults.
- * Limits are enforced per-session to provide isolation between clients.
+ * <p>All limits are configurable via system properties with sensible defaults. Limits are enforced
+ * per-session to provide isolation between clients.
  *
  * <p>System properties:
+ *
  * <ul>
- *   <li>gatun.limits.max_objects - Max objects per session (default: 100,000)</li>
- *   <li>gatun.limits.max_string_length - Max string length in bytes (default: 10MB)</li>
- *   <li>gatun.limits.max_list_entries - Max entries in list/map arguments (default: 100,000)</li>
- *   <li>gatun.limits.max_nesting_depth - Max nesting depth for collections (default: 100)</li>
- *   <li>gatun.limits.max_batch_size - Max commands in a batch (default: 10,000)</li>
- *   <li>gatun.limits.max_method_calls - Max calls in invoke_methods (default: 10,000)</li>
- *   <li>gatun.limits.session_idle_timeout_ms - Session idle timeout (default: 0 = disabled)</li>
- *   <li>gatun.limits.max_arrow_bytes - Max Arrow buffer bytes per session (default: 1GB)</li>
+ *   <li>gatun.limits.max_objects - Max objects per session (default: 100,000)
+ *   <li>gatun.limits.max_string_length - Max string length in bytes (default: 10MB)
+ *   <li>gatun.limits.max_list_entries - Max entries in list/map arguments (default: 100,000)
+ *   <li>gatun.limits.max_nesting_depth - Max nesting depth for collections (default: 100)
+ *   <li>gatun.limits.max_batch_size - Max commands in a batch (default: 10,000)
+ *   <li>gatun.limits.max_method_calls - Max calls in invoke_methods (default: 10,000)
+ *   <li>gatun.limits.session_idle_timeout_ms - Session idle timeout (default: 0 = disabled)
+ *   <li>gatun.limits.max_arrow_bytes - Max Arrow buffer bytes per session (default: 1GB)
  * </ul>
  */
 public final class ResourceLimits {
@@ -78,70 +79,77 @@ public final class ResourceLimits {
   /** Thrown when session object limit is exceeded. */
   public static class ObjectLimitExceededException extends ResourceLimitExceededException {
     public ObjectLimitExceededException(int current, int max) {
-      super(String.format(
-          "Object limit exceeded: session has %d objects (max: %d). "
-              + "Free unused objects or increase gatun.limits.max_objects.",
-          current, max));
+      super(
+          String.format(
+              "Object limit exceeded: session has %d objects (max: %d). "
+                  + "Free unused objects or increase gatun.limits.max_objects.",
+              current, max));
     }
   }
 
   /** Thrown when string is too long. */
   public static class StringTooLongException extends ResourceLimitExceededException {
     public StringTooLongException(int length, int max) {
-      super(String.format(
-          "String too long: %d bytes (max: %d). "
-              + "Increase gatun.limits.max_string_length if needed.",
-          length, max));
+      super(
+          String.format(
+              "String too long: %d bytes (max: %d). "
+                  + "Increase gatun.limits.max_string_length if needed.",
+              length, max));
     }
   }
 
   /** Thrown when list/map has too many entries. */
   public static class CollectionTooLargeException extends ResourceLimitExceededException {
     public CollectionTooLargeException(int size, int max) {
-      super(String.format(
-          "Collection too large: %d entries (max: %d). "
-              + "Increase gatun.limits.max_list_entries if needed.",
-          size, max));
+      super(
+          String.format(
+              "Collection too large: %d entries (max: %d). "
+                  + "Increase gatun.limits.max_list_entries if needed.",
+              size, max));
     }
   }
 
   /** Thrown when nesting is too deep. */
   public static class NestingTooDeepException extends ResourceLimitExceededException {
     public NestingTooDeepException(int depth, int max) {
-      super(String.format(
-          "Nesting too deep: %d levels (max: %d). "
-              + "Flatten data structure or increase gatun.limits.max_nesting_depth.",
-          depth, max));
+      super(
+          String.format(
+              "Nesting too deep: %d levels (max: %d). "
+                  + "Flatten data structure or increase gatun.limits.max_nesting_depth.",
+              depth, max));
     }
   }
 
   /** Thrown when batch is too large. */
   public static class BatchTooLargeException extends ResourceLimitExceededException {
     public BatchTooLargeException(int size, int max) {
-      super(String.format(
-          "Batch too large: %d commands (max: %d). "
-              + "Split into smaller batches or increase gatun.limits.max_batch_size.",
-          size, max));
+      super(
+          String.format(
+              "Batch too large: %d commands (max: %d). "
+                  + "Split into smaller batches or increase gatun.limits.max_batch_size.",
+              size, max));
     }
   }
 
   /** Thrown when Arrow buffer limit is exceeded. */
   public static class ArrowBufferLimitExceededException extends ResourceLimitExceededException {
     public ArrowBufferLimitExceededException(long current, long max) {
-      super(String.format(
-          "Arrow buffer limit exceeded: %d bytes (max: %d). "
-              + "Reset arena or increase gatun.limits.max_arrow_bytes.",
-          current, max));
+      super(
+          String.format(
+              "Arrow buffer limit exceeded: %d bytes (max: %d). "
+                  + "Reset arena or increase gatun.limits.max_arrow_bytes.",
+              current, max));
     }
   }
 
   /** Thrown when session times out due to inactivity. */
   public static class SessionTimeoutException extends ResourceLimitExceededException {
     public SessionTimeoutException(long idleMs, long timeoutMs) {
-      super(String.format(
-          "Session timed out after %d ms idle (timeout: %d ms). "
-              + "Increase gatun.limits.session_idle_timeout_ms or keep session active.",
-          idleMs, timeoutMs));
+      super(
+          String.format(
+              "Session timed out after %d ms idle (timeout: %d ms). "
+                  + "Increase gatun.limits.session_idle_timeout_ms or keep session active.",
+              idleMs, timeoutMs));
     }
   }
 

@@ -10,7 +10,7 @@ repositories {
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(21))
+        languageVersion.set(JavaLanguageVersion.of(22))
     }
 }
 
@@ -24,8 +24,8 @@ dependencies {
 }
 
 val runtimeJvmArgs = listOf(
-    "--enable-preview",
-    "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+    "--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED",
+    "--enable-native-access=ALL-UNNAMED"
 )
 
 application {
@@ -34,8 +34,7 @@ application {
 }
 
 tasks.withType<JavaCompile> {
-    options.compilerArgs.add("--enable-preview")
-    options.release.set(21)
+    options.release.set(22)
 }
 
 // Apply to ALL executions (run, custom JavaExec tasks, etc.)

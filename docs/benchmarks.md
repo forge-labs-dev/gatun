@@ -6,7 +6,7 @@ This document provides detailed performance benchmarks comparing Gatun with Py4J
 
 - **CPU**: Apple M1
 - **OS**: macOS
-- **Java**: OpenJDK 21
+- **Java**: OpenJDK 22+
 - **Python**: 3.13
 - **Gatun Memory**: 16MB shared memory
 
@@ -25,22 +25,22 @@ All benchmarks follow these principles:
 cd python
 
 # Full comparison benchmark (Gatun vs Py4J)
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_comparison.py
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_comparison.py
 
 # Quick mode (~30s instead of ~5min)
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_comparison.py --quick
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_comparison.py --quick
 
 # Gatun only (skip Py4J)
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_comparison.py --gatun-only
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_comparison.py --gatun-only
 
 # Arrow data transfer benchmarks
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_arrow.py
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_arrow.py
 
 # Vectorized API benchmarks
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_vectorized.py
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_vectorized.py
 
 # Python callback benchmarks
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_callbacks.py
+JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_callbacks.py
 ```
 
 ## Results Summary
@@ -215,7 +215,7 @@ cd gatun/python
 uv sync
 
 # Set Java home (adjust for your system)
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+export JAVA_HOME=/opt/homebrew/opt/openjdk
 
 # Run all benchmarks
 uv run python benchmarks/benchmark_comparison.py

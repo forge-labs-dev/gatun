@@ -55,10 +55,11 @@ def _install_signal_handlers():
         except (OSError, ValueError):
             pass  # Can't set signal handler (e.g., not main thread)
 
-# JVM Flags required for Apache Arrow & Netty (Java 21+)
+# JVM Flags required for Apache Arrow & Netty (Java 22+)
 # Also includes flags needed for Spark's Kryo serialization
 DEFAULT_JVM_FLAGS = [
-    "--enable-preview",
+    # Foreign Function & Memory API (required for MemorySegment.reinterpret)
+    "--enable-native-access=ALL-UNNAMED",
     # Arrow/Netty memory requirements
     "--add-opens=java.base/java.nio=ALL-UNNAMED",
     "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",

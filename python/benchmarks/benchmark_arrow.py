@@ -8,7 +8,7 @@ This script compares different Arrow data transfer methods in Gatun:
 
 Run with:
     cd python
-    JAVA_HOME=/opt/homebrew/opt/openjdk@21 uv run python benchmarks/benchmark_arrow.py
+    JAVA_HOME=/opt/homebrew/opt/openjdk uv run python benchmarks/benchmark_arrow.py
 """
 
 import time

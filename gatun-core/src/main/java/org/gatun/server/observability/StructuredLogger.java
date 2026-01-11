@@ -6,14 +6,15 @@ import java.util.logging.Logger;
 /**
  * Structured logger that outputs key-value pairs for easy parsing.
  *
- * <p>Log format:
- * {@code [timestamp] [level] [sessionId=N requestId=N action=X target=Y latency_us=Z ...]}
+ * <p>Log format: {@code [timestamp] [level] [sessionId=N requestId=N action=X target=Y latency_us=Z
+ * ...]}
  *
  * <p>This format is:
+ *
  * <ul>
- *   <li>Human readable for debugging</li>
- *   <li>Easy to parse with grep/awk for ad-hoc analysis</li>
- *   <li>Compatible with log aggregation systems (Splunk, ELK, etc.)</li>
+ *   <li>Human readable for debugging
+ *   <li>Easy to parse with grep/awk for ad-hoc analysis
+ *   <li>Compatible with log aggregation systems (Splunk, ELK, etc.)
  * </ul>
  */
 public class StructuredLogger {
@@ -48,9 +49,7 @@ public class StructuredLogger {
     metricsEnabled = enabled;
   }
 
-  /**
-   * Log a completed request with structured fields.
-   */
+  /** Log a completed request with structured fields. */
   public static void logRequest(RequestContext ctx, boolean success, String errorType) {
     if (!LOG.isLoggable(Level.FINE)) return;
 
@@ -77,9 +76,7 @@ public class StructuredLogger {
     LOG.fine(sb.toString());
   }
 
-  /**
-   * Log a callback invocation with structured fields.
-   */
+  /** Log a callback invocation with structured fields. */
   public static void logCallback(
       long sessionId,
       long callbackId,
@@ -109,9 +106,7 @@ public class StructuredLogger {
     LOG.fine("CALLBACK " + sb.toString());
   }
 
-  /**
-   * Log method resolution decision (only in trace mode).
-   */
+  /** Log method resolution decision (only in trace mode). */
   public static void logMethodResolution(
       String className,
       String methodName,
@@ -140,9 +135,7 @@ public class StructuredLogger {
     LOG.finer(sb.toString());
   }
 
-  /**
-   * Log an error with full context for debugging.
-   */
+  /** Log an error with full context for debugging. */
   public static void logError(
       long sessionId,
       long requestId,
@@ -168,17 +161,13 @@ public class StructuredLogger {
     }
   }
 
-  /**
-   * Log session start.
-   */
+  /** Log session start. */
   public static void logSessionStart(long sessionId, String shmPath) {
     if (!LOG.isLoggable(Level.FINE)) return;
     LOG.fine("SESSION_START sessionId=" + sessionId + " shm=" + shmPath);
   }
 
-  /**
-   * Log session end with summary.
-   */
+  /** Log session end with summary. */
   public static void logSessionEnd(
       long sessionId, int objectCount, long requestCount, long durationMillis) {
     if (!LOG.isLoggable(Level.FINE)) return;
@@ -192,9 +181,7 @@ public class StructuredLogger {
     LOG.fine(sb.toString());
   }
 
-  /**
-   * Log Arrow data transfer.
-   */
+  /** Log Arrow data transfer. */
   public static void logArrowTransfer(
       long sessionId, String direction, long rowCount, long bytesCopied, boolean zeroCopy) {
     if (!LOG.isLoggable(Level.FINE)) return;
@@ -209,9 +196,7 @@ public class StructuredLogger {
     LOG.fine(sb.toString());
   }
 
-  /**
-   * Log object registry change.
-   */
+  /** Log object registry change. */
   public static void logObjectRegistry(
       long sessionId, long objectId, String operation, String objectType, int registrySize) {
     if (!LOG.isLoggable(Level.FINER)) return;
@@ -228,9 +213,7 @@ public class StructuredLogger {
     LOG.finer(sb.toString());
   }
 
-  /**
-   * Dump metrics to log (called periodically if metrics enabled).
-   */
+  /** Dump metrics to log (called periodically if metrics enabled). */
   public static void dumpMetrics() {
     if (!metricsEnabled) return;
 

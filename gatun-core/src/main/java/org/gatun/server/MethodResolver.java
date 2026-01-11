@@ -11,11 +11,12 @@ import org.gatun.server.observability.StructuredLogger;
  * Handles method and constructor resolution with overload matching.
  *
  * <p>This class provides:
+ *
  * <ul>
- *   <li>Method resolution with specificity scoring for overload selection</li>
- *   <li>Constructor resolution with similar scoring</li>
- *   <li>Varargs handling and argument repacking</li>
- *   <li>Type compatibility checking including primitive widening</li>
+ *   <li>Method resolution with specificity scoring for overload selection
+ *   <li>Constructor resolution with similar scoring
+ *   <li>Varargs handling and argument repacking
+ *   <li>Type compatibility checking including primitive widening
  * </ul>
  *
  * <p>All methods are static and thread-safe.
@@ -66,11 +67,12 @@ public final class MethodResolver {
    * Resolve method without caching (called on cache miss).
    *
    * <p>Uses specificity scoring to select the best matching overload:
+   *
    * <ul>
-   *   <li>Non-varargs methods get higher priority (base 1000)</li>
-   *   <li>Exact type matches get 10 points per parameter</li>
-   *   <li>Compatible specific types get 5 points</li>
-   *   <li>Object parameters get 0 points (least specific)</li>
+   *   <li>Non-varargs methods get higher priority (base 1000)
+   *   <li>Exact type matches get 10 points per parameter
+   *   <li>Compatible specific types get 5 points
+   *   <li>Object parameters get 0 points (least specific)
    * </ul>
    */
   private static java.lang.reflect.Method resolveMethod(
@@ -139,7 +141,12 @@ public final class MethodResolver {
         StructuredLogger.logMethodResolution(
             clazz.getName(), name, candidateCount, chosenMethod, bestScore, argTypes);
         GatunEvents.emitMethodResolution(
-            clazz.getName(), name, candidateCount, chosenMethod, bestScore, formatArgTypes(argTypes));
+            clazz.getName(),
+            name,
+            candidateCount,
+            chosenMethod,
+            bestScore,
+            formatArgTypes(argTypes));
       }
       return bestMatch;
     }
@@ -223,9 +230,7 @@ public final class MethodResolver {
     return new ConstructorWithArgs(toCache, toCache.prepareArgs(args));
   }
 
-  /**
-   * Resolve constructor without caching (called on cache miss).
-   */
+  /** Resolve constructor without caching (called on cache miss). */
   private static java.lang.reflect.Constructor<?> resolveConstructor(
       Class<?> clazz, Class<?>[] argTypes, Object[] args) throws NoSuchMethodException {
     // First try exact match
@@ -292,9 +297,10 @@ public final class MethodResolver {
    * Check if argTypes are compatible with varargs method/constructor params.
    *
    * <p>Handles two cases:
+   *
    * <ol>
-   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly</li>
-   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args spread</li>
+   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly
+   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args spread
    * </ol>
    */
   public static boolean isVarargsCompatible(Class<?>[] paramTypes, Class<?>[] argTypes) {
@@ -331,14 +337,16 @@ public final class MethodResolver {
    * Calculate specificity score for varargs method/constructor.
    *
    * <p>Score components:
+   *
    * <ul>
-   *   <li>Base: 100 (lower than non-varargs base of 1000)</li>
-   *   <li>Fixed params: sum of getTypeSpecificity for each</li>
-   *   <li>Varargs: specificity of packed array or spread elements</li>
-   *   <li>Penalty: -1 per fixed param (prefer fewer fixed params on tie)</li>
+   *   <li>Base: 100 (lower than non-varargs base of 1000)
+   *   <li>Fixed params: sum of getTypeSpecificity for each
+   *   <li>Varargs: specificity of packed array or spread elements
+   *   <li>Penalty: -1 per fixed param (prefer fewer fixed params on tie)
    * </ul>
    */
-  public static int getVarargsSpecificity(Class<?>[] paramTypes, Class<?>[] argTypes, int fixedCount) {
+  public static int getVarargsSpecificity(
+      Class<?>[] paramTypes, Class<?>[] argTypes, int fixedCount) {
     int specificity = 0;
 
     // Score fixed parameters
@@ -371,9 +379,10 @@ public final class MethodResolver {
    * Try to match varargs method and repack arguments.
    *
    * <p>Handles two cases:
+   *
    * <ol>
-   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly</li>
-   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args need repacking</li>
+   *   <li>"Packed" case: m(String... xs) called as m(new String[]{"a","b"}) - array passed directly
+   *   <li>"Spread" case: m(String... xs) called as m("a", "b") - individual args need repacking
    * </ol>
    *
    * @return repacked arguments if compatible, null otherwise
@@ -454,12 +463,13 @@ public final class MethodResolver {
    * Check if argType can be assigned to paramType.
    *
    * <p>Handles (in order of preference for scoring):
+   *
    * <ol>
-   *   <li>Exact match</li>
-   *   <li>Boxing/unboxing (int <-> Integer)</li>
-   *   <li>Primitive widening (byte -> short -> int -> long -> float -> double)</li>
-   *   <li>Reference widening (subclass -> superclass/interface)</li>
-   *   <li>Object accepts anything (except null to primitive)</li>
+   *   <li>Exact match
+   *   <li>Boxing/unboxing (int <-> Integer)
+   *   <li>Primitive widening (byte -> short -> int -> long -> float -> double)
+   *   <li>Reference widening (subclass -> superclass/interface)
+   *   <li>Object accepts anything (except null to primitive)
    * </ol>
    *
    * <p>Note: null (represented as Object.class with null value) cannot be assigned to primitives.
@@ -517,17 +527,19 @@ public final class MethodResolver {
   }
 
   /**
-   * Check if primitive widening conversion is valid (JLS 5.1.2).
-   * Widening: byte -> short -> int -> long -> float -> double
-   *           char -> int -> long -> float -> double
+   * Check if primitive widening conversion is valid (JLS 5.1.2). Widening: byte -> short -> int ->
+   * long -> float -> double char -> int -> long -> float -> double
    */
   private static boolean isPrimitiveWidening(Class<?> to, Class<?> from) {
     if (to == from) return true;
 
     // byte widens to short, int, long, float, double
     if (from == byte.class) {
-      return to == short.class || to == int.class || to == long.class
-          || to == float.class || to == double.class;
+      return to == short.class
+          || to == int.class
+          || to == long.class
+          || to == float.class
+          || to == double.class;
     }
     // short widens to int, long, float, double
     if (from == short.class) {
@@ -556,14 +568,15 @@ public final class MethodResolver {
    * Calculate specificity score for a type match. Higher = more specific = preferred.
    *
    * <p>Scoring (based on Java method resolution order):
+   *
    * <ul>
-   *   <li>100: Exact match</li>
-   *   <li>90: Boxing/unboxing match</li>
-   *   <li>80: Primitive widening (closer types score higher)</li>
-   *   <li>70: Boxed type widening</li>
-   *   <li>50: Specific interface/superclass match</li>
-   *   <li>10: Object parameter (least specific)</li>
-   *   <li>0: No match</li>
+   *   <li>100: Exact match
+   *   <li>90: Boxing/unboxing match
+   *   <li>80: Primitive widening (closer types score higher)
+   *   <li>70: Boxed type widening
+   *   <li>50: Specific interface/superclass match
+   *   <li>10: Object parameter (least specific)
+   *   <li>0: No match
    * </ul>
    */
   public static int getTypeSpecificity(Class<?> paramType, Class<?> argType) {
@@ -581,29 +594,37 @@ public final class MethodResolver {
     }
 
     // Primitive widening - score based on "distance"
-    if (paramType.isPrimitive() && argType.isPrimitive() && isPrimitiveWidening(paramType, argType)) {
+    if (paramType.isPrimitive()
+        && argType.isPrimitive()
+        && isPrimitiveWidening(paramType, argType)) {
       return 80 - getPrimitiveWideningDistance(paramType, argType);
     }
 
     // Boxed widening
     Class<?> paramPrimitive = WRAPPER_TO_PRIMITIVE.get(paramType);
     Class<?> argPrimitive = WRAPPER_TO_PRIMITIVE.get(argType);
-    if (paramPrimitive != null && argPrimitive != null && isPrimitiveWidening(paramPrimitive, argPrimitive)) {
+    if (paramPrimitive != null
+        && argPrimitive != null
+        && isPrimitiveWidening(paramPrimitive, argPrimitive)) {
       return 70 - getPrimitiveWideningDistance(paramPrimitive, argPrimitive);
     }
 
     // Mixed primitive/boxed widening
-    if (paramType.isPrimitive() && argPrimitive != null && isPrimitiveWidening(paramType, argPrimitive)) {
+    if (paramType.isPrimitive()
+        && argPrimitive != null
+        && isPrimitiveWidening(paramType, argPrimitive)) {
       return 75 - getPrimitiveWideningDistance(paramType, argPrimitive);
     }
-    if (paramPrimitive != null && argType.isPrimitive() && isPrimitiveWidening(paramPrimitive, argType)) {
+    if (paramPrimitive != null
+        && argType.isPrimitive()
+        && isPrimitiveWidening(paramPrimitive, argType)) {
       return 75 - getPrimitiveWideningDistance(paramPrimitive, argType);
     }
 
     // Reference type hierarchy
     if (paramType.isAssignableFrom(argType)) {
       if (paramType == Object.class) return 10; // Object is least specific
-      if (paramType.isInterface()) return 50;   // Interface match
+      if (paramType.isInterface()) return 50; // Interface match
       return 60; // Superclass match
     }
 
@@ -621,8 +642,8 @@ public final class MethodResolver {
   }
 
   /**
-   * Get the "distance" for primitive widening (used to prefer closer conversions).
-   * Lower distance = less widening = more preferred.
+   * Get the "distance" for primitive widening (used to prefer closer conversions). Lower distance =
+   * less widening = more preferred.
    */
   private static int getPrimitiveWideningDistance(Class<?> to, Class<?> from) {
     // Order: byte(0) < short(1) < int(2) < long(3) < float(4) < double(5)
@@ -646,11 +667,10 @@ public final class MethodResolver {
   /**
    * Check if result should be auto-converted (not wrapped as ObjectRef).
    *
-   * <p>Note: Only primitive arrays (int[], double[], etc.) are auto-converted.
-   * Object arrays (String[], ArrayList[], etc.) are kept as ObjectRef so they
-   * can be manipulated in Java via Array.set/get. This is necessary because
-   * auto-converting an Object[] copies its contents to Python, and subsequent
-   * Array.set calls would modify a temporary copy instead of the original.
+   * <p>Note: Only primitive arrays (int[], double[], etc.) are auto-converted. Object arrays
+   * (String[], ArrayList[], etc.) are kept as ObjectRef so they can be manipulated in Java via
+   * Array.set/get. This is necessary because auto-converting an Object[] copies its contents to
+   * Python, and subsequent Array.set calls would modify a temporary copy instead of the original.
    */
   public static boolean isAutoConvertible(Object obj) {
     if (obj instanceof String

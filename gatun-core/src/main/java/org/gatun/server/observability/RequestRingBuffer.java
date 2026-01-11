@@ -6,9 +6,9 @@ import java.util.List;
 /**
  * Thread-safe ring buffer that stores the last N requests for a session.
  *
- * <p>On fatal errors, this buffer can be dumped to help diagnose what led to the failure.
- * Each session gets its own ring buffer, sized appropriately for debugging without
- * excessive memory overhead.
+ * <p>On fatal errors, this buffer can be dumped to help diagnose what led to the failure. Each
+ * session gets its own ring buffer, sized appropriately for debugging without excessive memory
+ * overhead.
  */
 public class RequestRingBuffer {
   /** Default capacity - stores last 64 requests per session. */
@@ -116,8 +116,8 @@ public class RequestRingBuffer {
   }
 
   /**
-   * Dump the ring buffer contents as a formatted string.
-   * Useful for including in error reports or logs.
+   * Dump the ring buffer contents as a formatted string. Useful for including in error reports or
+   * logs.
    */
   public synchronized String dump() {
     List<RequestRecord> records = getRecords();

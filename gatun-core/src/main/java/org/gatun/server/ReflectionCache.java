@@ -11,21 +11,22 @@ import java.util.logging.Logger;
  * Centralized cache for reflection lookups to avoid repeated reflection overhead.
  *
  * <p>This class caches:
+ *
  * <ul>
- *   <li>Method lookups (with MethodHandle for fast invocation)</li>
- *   <li>Constructor lookups</li>
- *   <li>Field lookups (static and instance)</li>
- *   <li>Class lookups by name (keyed by classloader for Spark compatibility)</li>
- *   <li>No-arg methods as MethodHandles for the common case</li>
+ *   <li>Method lookups (with MethodHandle for fast invocation)
+ *   <li>Constructor lookups
+ *   <li>Field lookups (static and instance)
+ *   <li>Class lookups by name (keyed by classloader for Spark compatibility)
+ *   <li>No-arg methods as MethodHandles for the common case
  * </ul>
  *
- * <p><b>Security boundary:</b> Only PUBLIC methods and constructors are cached and callable.
- * This uses {@code getMethods()} and {@code getConstructors()} which return only public members.
- * The {@code setAccessible(true)} calls are solely for creating MethodHandles on public methods
- * of private inner classes (e.g., {@code ArrayList$Itr}), not for accessing private methods.
+ * <p><b>Security boundary:</b> Only PUBLIC methods and constructors are cached and callable. This
+ * uses {@code getMethods()} and {@code getConstructors()} which return only public members. The
+ * {@code setAccessible(true)} calls are solely for creating MethodHandles on public methods of
+ * private inner classes (e.g., {@code ArrayList$Itr}), not for accessing private methods.
  *
- * <p><b>Cache sizing:</b> Signature-based caches (method, constructor, field) use bounded LRU
- * with configurable maximum size to prevent memory growth in long-running sessions (e.g., Spark).
+ * <p><b>Cache sizing:</b> Signature-based caches (method, constructor, field) use bounded LRU with
+ * configurable maximum size to prevent memory growth in long-running sessions (e.g., Spark).
  * Class-keyed caches use WeakHashMap to allow GC when classes are unloaded.
  *
  * <p>All caches are thread-safe.
@@ -37,13 +38,13 @@ public final class ReflectionCache {
   // Default max entries for signature-based caches (method, constructor)
   // Configurable via system property for tuning in large Spark jobs
   private static final int DEFAULT_MAX_SIGNATURE_CACHE_SIZE = 10_000;
-  private static final int MAX_SIGNATURE_CACHE_SIZE = Integer.getInteger(
-      "gatun.cache.maxSignatureEntries", DEFAULT_MAX_SIGNATURE_CACHE_SIZE);
+  private static final int MAX_SIGNATURE_CACHE_SIZE =
+      Integer.getInteger("gatun.cache.maxSignatureEntries", DEFAULT_MAX_SIGNATURE_CACHE_SIZE);
 
   // Default max entries for field caches (typically smaller)
   private static final int DEFAULT_MAX_FIELD_CACHE_SIZE = 2_000;
-  private static final int MAX_FIELD_CACHE_SIZE = Integer.getInteger(
-      "gatun.cache.maxFieldEntries", DEFAULT_MAX_FIELD_CACHE_SIZE);
+  private static final int MAX_FIELD_CACHE_SIZE =
+      Integer.getInteger("gatun.cache.maxFieldEntries", DEFAULT_MAX_FIELD_CACHE_SIZE);
 
   // --- METHOD CACHE ---
   // Key: (class, methodName, argTypes) -> CachedMethod (method + MethodHandle + varargs info)
@@ -118,16 +119,16 @@ public final class ReflectionCache {
 
   // Common JDK classes with no-arg constructors to pre-warm the cache
   private static final String[] PREWARM_CLASSES = {
-      "java.util.ArrayList",
-      "java.util.LinkedList",
-      "java.util.HashMap",
-      "java.util.LinkedHashMap",
-      "java.util.HashSet",
-      "java.util.LinkedHashSet",
-      "java.util.TreeMap",
-      "java.util.TreeSet",
-      "java.lang.StringBuilder",
-      "java.lang.StringBuffer"
+    "java.util.ArrayList",
+    "java.util.LinkedList",
+    "java.util.HashMap",
+    "java.util.LinkedHashMap",
+    "java.util.HashSet",
+    "java.util.LinkedHashSet",
+    "java.util.TreeMap",
+    "java.util.TreeSet",
+    "java.lang.StringBuilder",
+    "java.lang.StringBuffer"
   };
 
   // Static initializer to pre-warm constructor and method caches
@@ -139,11 +140,14 @@ public final class ReflectionCache {
         java.lang.reflect.Constructor<?> ctor = clazz.getDeclaredConstructor();
         noArgConstructorCache.put(clazz, ctor);
         // Pre-cache common no-arg methods as MethodHandles
-        for (String methodName : new String[] {"size", "isEmpty", "toString", "hashCode", "clear"}) {
+        for (String methodName :
+            new String[] {"size", "isEmpty", "toString", "hashCode", "clear"}) {
           try {
             java.lang.reflect.Method method = clazz.getMethod(methodName);
             MethodHandle handle = METHOD_LOOKUP.unreflect(method);
-            noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
+            noArgMethodHandleCache
+                .computeIfAbsent(clazz, k -> new ConcurrentHashMap<>())
+                .put(methodName, handle);
           } catch (NoSuchMethodException | IllegalAccessException e) {
             // Method doesn't exist on this class - skip
           }
@@ -159,9 +163,7 @@ public final class ReflectionCache {
 
   // ========== NO-ARG CONSTRUCTOR ==========
 
-  /**
-   * Get no-arg constructor for a class, using cache.
-   */
+  /** Get no-arg constructor for a class, using cache. */
   public static java.lang.reflect.Constructor<?> getNoArgConstructor(Class<?> clazz)
       throws NoSuchMethodException {
     java.lang.reflect.Constructor<?> ctor = noArgConstructorCache.get(clazz);
@@ -194,7 +196,9 @@ public final class ReflectionCache {
       java.lang.reflect.Method method = clazz.getMethod(methodName);
       MethodHandle handle = METHOD_LOOKUP.unreflect(method);
       // Cache it
-      noArgMethodHandleCache.computeIfAbsent(clazz, k -> new ConcurrentHashMap<>()).put(methodName, handle);
+      noArgMethodHandleCache
+          .computeIfAbsent(clazz, k -> new ConcurrentHashMap<>())
+          .put(methodName, handle);
       return handle;
     } catch (NoSuchMethodException | IllegalAccessException e) {
       // Not a simple no-arg method or not accessible - return null so caller uses normal resolution
@@ -204,9 +208,7 @@ public final class ReflectionCache {
 
   // ========== STATIC FIELD ==========
 
-  /**
-   * Get a static field by class and name, using cache.
-   */
+  /** Get a static field by class and name, using cache. */
   public static java.lang.reflect.Field getStaticField(Class<?> clazz, String fieldName)
       throws NoSuchFieldException {
     String key = clazz.getName() + "." + fieldName;
@@ -223,9 +225,7 @@ public final class ReflectionCache {
 
   // ========== INSTANCE FIELD ==========
 
-  /**
-   * Get an instance field by class and name, using cache. Searches up the class hierarchy.
-   */
+  /** Get an instance field by class and name, using cache. Searches up the class hierarchy. */
   public static java.lang.reflect.Field getInstanceField(Class<?> clazz, String fieldName)
       throws NoSuchFieldException {
     String key = clazz.getName() + "." + fieldName;
@@ -250,9 +250,7 @@ public final class ReflectionCache {
 
   // ========== METHODS CACHE ==========
 
-  /**
-   * Get all public methods for a class, using cache.
-   */
+  /** Get all public methods for a class, using cache. */
   public static java.lang.reflect.Method[] getCachedMethods(Class<?> clazz) {
     java.lang.reflect.Method[] methods = methodsCache.get(clazz);
     if (methods != null) {
@@ -265,9 +263,7 @@ public final class ReflectionCache {
 
   // ========== CONSTRUCTORS CACHE ==========
 
-  /**
-   * Get all public constructors for a class, using cache.
-   */
+  /** Get all public constructors for a class, using cache. */
   public static java.lang.reflect.Constructor<?>[] getCachedConstructors(Class<?> clazz) {
     java.lang.reflect.Constructor<?>[] ctors = constructorsCache.get(clazz);
     if (ctors != null) {
@@ -281,24 +277,20 @@ public final class ReflectionCache {
   // ========== CLASS CACHE ==========
 
   /**
-   * Get the effective classloader for class lookups.
-   * Prefers thread context classloader (used by Spark), falls back to system loader.
+   * Get the effective classloader for class lookups. Prefers thread context classloader (used by
+   * Spark), falls back to system loader.
    */
   private static ClassLoader getEffectiveClassLoader() {
     ClassLoader cl = Thread.currentThread().getContextClassLoader();
     return cl != null ? cl : ClassLoader.getSystemClassLoader();
   }
 
-  /**
-   * Get or create the class name map for a classloader.
-   */
+  /** Get or create the class name map for a classloader. */
   private static Map<String, Class<?>> getClassMapForLoader(ClassLoader loader) {
     return classCache.computeIfAbsent(loader, k -> new ConcurrentHashMap<>());
   }
 
-  /**
-   * Get a class by name, using cache. Classloader-safe for Spark/dynamic loaders.
-   */
+  /** Get a class by name, using cache. Classloader-safe for Spark/dynamic loaders. */
   public static Class<?> getClass(String className) throws ClassNotFoundException {
     ClassLoader loader = getEffectiveClassLoader();
     Map<String, Class<?>> loaderCache = getClassMapForLoader(loader);
@@ -313,8 +305,8 @@ public final class ReflectionCache {
   }
 
   /**
-   * Try to get a class by name without throwing. Returns null if not found.
-   * Classloader-safe for Spark/dynamic loaders.
+   * Try to get a class by name without throwing. Returns null if not found. Classloader-safe for
+   * Spark/dynamic loaders.
    */
   public static Class<?> tryGetClass(String className) {
     ClassLoader loader = getEffectiveClassLoader();
@@ -335,32 +327,24 @@ public final class ReflectionCache {
 
   // ========== METHOD RESOLUTION ==========
 
-  /**
-   * Get a cached method, or null if not cached.
-   */
+  /** Get a cached method, or null if not cached. */
   public static CachedMethod getCachedMethod(MethodCacheKey key) {
     return methodCache.get(key);
   }
 
-  /**
-   * Cache a resolved method.
-   */
+  /** Cache a resolved method. */
   public static void cacheMethod(MethodCacheKey key, CachedMethod cached) {
     methodCache.put(key, cached);
   }
 
   // ========== CONSTRUCTOR RESOLUTION ==========
 
-  /**
-   * Get a cached constructor, or null if not cached.
-   */
+  /** Get a cached constructor, or null if not cached. */
   public static CachedConstructor getCachedConstructor(ConstructorCacheKey key) {
     return constructorCache.get(key);
   }
 
-  /**
-   * Cache a resolved constructor.
-   */
+  /** Cache a resolved constructor. */
   public static void cacheConstructor(ConstructorCacheKey key, CachedConstructor cached) {
     constructorCache.put(key, cached);
   }
@@ -559,7 +543,8 @@ public final class ReflectionCache {
         try {
           constructor.setAccessible(true);
           MethodHandles.Lookup privateLookup =
-              MethodHandles.privateLookupIn(constructor.getDeclaringClass(), MethodHandles.lookup());
+              MethodHandles.privateLookupIn(
+                  constructor.getDeclaringClass(), MethodHandles.lookup());
           h = privateLookup.unreflectConstructor(constructor);
         } catch (IllegalAccessException | IllegalArgumentException ex) {
           // Final fallback: use Constructor.newInstance (slower but always works)
@@ -619,8 +604,8 @@ public final class ReflectionCache {
   }
 
   /**
-   * Get VarHandle for instance field access. Returns null if not available.
-   * VarHandle is faster than Field.get/set after JIT warmup.
+   * Get VarHandle for instance field access. Returns null if not available. VarHandle is faster
+   * than Field.get/set after JIT warmup.
    */
   public static VarHandle getInstanceVarHandle(Class<?> clazz, String fieldName) {
     String key = clazz.getName() + "." + fieldName;
@@ -633,7 +618,8 @@ public final class ReflectionCache {
     try {
       java.lang.reflect.Field field = getInstanceField(clazz, fieldName);
       // Use privateLookupIn for private fields
-      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
+      MethodHandles.Lookup lookup =
+          MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
       VarHandle vh = lookup.unreflectVarHandle(field);
       varHandleCache.put(key, vh);
       return vh;
@@ -643,9 +629,7 @@ public final class ReflectionCache {
     }
   }
 
-  /**
-   * Get VarHandle for static field access. Returns null if not available.
-   */
+  /** Get VarHandle for static field access. Returns null if not available. */
   public static CachedStaticVarHandle getStaticVarHandle(Class<?> clazz, String fieldName) {
     String key = clazz.getName() + "." + fieldName;
     CachedStaticVarHandle cached = staticVarHandleCache.get(key);
@@ -655,7 +639,8 @@ public final class ReflectionCache {
 
     try {
       java.lang.reflect.Field field = getStaticField(clazz, fieldName);
-      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
+      MethodHandles.Lookup lookup =
+          MethodHandles.privateLookupIn(field.getDeclaringClass(), METHOD_LOOKUP);
       VarHandle vh = lookup.unreflectVarHandle(field);
       CachedStaticVarHandle result = new CachedStaticVarHandle(vh, field.getDeclaringClass());
       staticVarHandleCache.put(key, result);
@@ -682,9 +667,15 @@ public final class ReflectionCache {
     sb.append("  varHandleCache: ").append(varHandleCache.getStats()).append("\n");
     sb.append("  staticVarHandleCache: ").append(staticVarHandleCache.getStats()).append("\n");
     sb.append("  methodsCache: size=").append(methodsCache.size()).append(" (WeakHashMap)\n");
-    sb.append("  constructorsCache: size=").append(constructorsCache.size()).append(" (WeakHashMap)\n");
-    sb.append("  noArgConstructorCache: size=").append(noArgConstructorCache.size()).append(" (WeakHashMap)\n");
-    sb.append("  noArgMethodHandleCache: size=").append(noArgMethodHandleCache.size()).append(" (WeakHashMap)\n");
+    sb.append("  constructorsCache: size=")
+        .append(constructorsCache.size())
+        .append(" (WeakHashMap)\n");
+    sb.append("  noArgConstructorCache: size=")
+        .append(noArgConstructorCache.size())
+        .append(" (WeakHashMap)\n");
+    sb.append("  noArgMethodHandleCache: size=")
+        .append(noArgMethodHandleCache.size())
+        .append(" (WeakHashMap)\n");
     // Count class cache entries across all loaders
     int classCount = 0;
     synchronized (classCache) {
@@ -692,28 +683,25 @@ public final class ReflectionCache {
         classCount += loaderCache.size();
       }
     }
-    sb.append("  classCache: size=").append(classCount).append(" across ")
-        .append(classCache.size()).append(" loaders (WeakHashMap)\n");
+    sb.append("  classCache: size=")
+        .append(classCount)
+        .append(" across ")
+        .append(classCache.size())
+        .append(" loaders (WeakHashMap)\n");
     return sb.toString();
   }
 
-  /**
-   * Get method cache statistics.
-   */
+  /** Get method cache statistics. */
   public static BoundedCache<MethodCacheKey, CachedMethod> getMethodCache() {
     return methodCache;
   }
 
-  /**
-   * Get constructor cache statistics.
-   */
+  /** Get constructor cache statistics. */
   public static BoundedCache<ConstructorCacheKey, CachedConstructor> getConstructorCache() {
     return constructorCache;
   }
 
-  /**
-   * Clear all caches. Useful for testing or when classloaders change.
-   */
+  /** Clear all caches. Useful for testing or when classloaders change. */
   public static void clearAllCaches() {
     methodCache.clear();
     constructorCache.clear();

@@ -8,7 +8,7 @@ subprojects {
     configure<com.diffplug.gradle.spotless.SpotlessExtension> {
         java {
             target("src/**/*.java")
-            googleJavaFormat()
+            googleJavaFormat("1.33.0")
             removeUnusedImports()
             trimTrailingWhitespace()
             endWithNewline()

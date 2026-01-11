@@ -77,7 +77,7 @@ def get_cpu_info() -> str:
 def get_jvm_version() -> str:
     """Get JVM version."""
     try:
-        java_home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk@21")
+        java_home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk")
         java_cmd = os.path.join(java_home, "bin", "java")
         result = subprocess.run(
             [java_cmd, "-version"],
@@ -1680,7 +1680,7 @@ if not jar_path:
 print("PY4J_JAR:" + jar_path)
 print("PY4J_PORT:" + str(port))
 
-java_home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk@21")
+java_home = os.environ.get("JAVA_HOME", "/opt/homebrew/opt/openjdk")
 java_cmd = os.path.join(java_home, "bin", "java")
 
 # JVM tuning for stable microbenchmarking:

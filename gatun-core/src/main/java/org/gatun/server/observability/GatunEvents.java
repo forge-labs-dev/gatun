@@ -5,8 +5,8 @@ import jdk.jfr.*;
 /**
  * JFR (Java Flight Recorder) events for profiling and diagnostics.
  *
- * <p>These events integrate with JFR tooling (JDK Mission Control, async-profiler, etc.)
- * to provide deep visibility into Gatun server behavior without code changes.
+ * <p>These events integrate with JFR tooling (JDK Mission Control, async-profiler, etc.) to provide
+ * deep visibility into Gatun server behavior without code changes.
  *
  * <p>Enable with: -XX:StartFlightRecording=filename=gatun.jfr,settings=profile
  */
@@ -16,8 +16,8 @@ public class GatunEvents {
   private static final String CATEGORY = "Gatun";
 
   /**
-   * Event emitted when a request starts and ends.
-   * Captures timing, action type, and target information.
+   * Event emitted when a request starts and ends. Captures timing, action type, and target
+   * information.
    */
   @Name("org.gatun.Request")
   @Label("Request")
@@ -44,9 +44,7 @@ public class GatunEvents {
     public String errorType;
   }
 
-  /**
-   * Event emitted during method resolution to track overload selection.
-   */
+  /** Event emitted during method resolution to track overload selection. */
   @Name("org.gatun.MethodResolution")
   @Label("Method Resolution")
   @Category(CATEGORY)
@@ -72,9 +70,7 @@ public class GatunEvents {
     public String argumentTypes;
   }
 
-  /**
-   * Event emitted when objects are added/removed from the registry.
-   */
+  /** Event emitted when objects are added/removed from the registry. */
   @Name("org.gatun.ObjectRegistry")
   @Label("Object Registry")
   @Category(CATEGORY)
@@ -97,9 +93,7 @@ public class GatunEvents {
     public int registrySize;
   }
 
-  /**
-   * Event emitted for callback round-trips (Java -> Python -> Java).
-   */
+  /** Event emitted for callback round-trips (Java -> Python -> Java). */
   @Name("org.gatun.Callback")
   @Label("Callback")
   @Category(CATEGORY)
@@ -125,9 +119,7 @@ public class GatunEvents {
     public String errorMessage;
   }
 
-  /**
-   * Event emitted for Arrow data transfers.
-   */
+  /** Event emitted for Arrow data transfers. */
   @Name("org.gatun.ArrowTransfer")
   @Label("Arrow Transfer")
   @Category(CATEGORY)
@@ -150,9 +142,7 @@ public class GatunEvents {
     public boolean zeroCopy;
   }
 
-  /**
-   * Event emitted when a session starts or ends.
-   */
+  /** Event emitted when a session starts or ends. */
   @Name("org.gatun.Session")
   @Label("Session")
   @Category(CATEGORY)

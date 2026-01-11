@@ -6,9 +6,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Tracks resource usage for a single session.
  *
- * <p>Each client session gets its own quota tracker that enforces limits
- * and provides usage statistics. The quota is thread-safe but designed
- * for single-session use (one client = one thread typically).
+ * <p>Each client session gets its own quota tracker that enforces limits and provides usage
+ * statistics. The quota is thread-safe but designed for single-session use (one client = one thread
+ * typically).
  */
 public class SessionQuota {
   private final long sessionId;
@@ -56,31 +56,23 @@ public class SessionQuota {
     touchActivity();
   }
 
-  /**
-   * Release an object slot.
-   */
+  /** Release an object slot. */
   public void releaseObject() {
     objectCount.decrementAndGet();
     touchActivity();
   }
 
-  /**
-   * Get current object count.
-   */
+  /** Get current object count. */
   public int getObjectCount() {
     return objectCount.get();
   }
 
-  /**
-   * Get peak object count for this session.
-   */
+  /** Get peak object count for this session. */
   public int getPeakObjectCount() {
     return peakObjectCount.get();
   }
 
-  /**
-   * Get total objects created (including freed ones).
-   */
+  /** Get total objects created (including freed ones). */
   public long getTotalObjectsCreated() {
     return totalObjectsCreated.get();
   }
@@ -109,102 +101,76 @@ public class SessionQuota {
     touchActivity();
   }
 
-  /**
-   * Release Arrow buffer space (e.g., on arena reset).
-   */
+  /** Release Arrow buffer space (e.g., on arena reset). */
   public void releaseArrowBytes(long bytes) {
     arrowBytesAllocated.addAndGet(-bytes);
     touchActivity();
   }
 
-  /**
-   * Reset Arrow buffer quota (on arena reset).
-   */
+  /** Reset Arrow buffer quota (on arena reset). */
   public void resetArrowBytes() {
     arrowBytesAllocated.set(0);
     touchActivity();
   }
 
-  /**
-   * Get current Arrow bytes allocated.
-   */
+  /** Get current Arrow bytes allocated. */
   public long getArrowBytesAllocated() {
     return arrowBytesAllocated.get();
   }
 
-  /**
-   * Get peak Arrow bytes for this session.
-   */
+  /** Get peak Arrow bytes for this session. */
   public long getPeakArrowBytes() {
     return peakArrowBytes.get();
   }
 
-  /**
-   * Get total Arrow bytes transferred.
-   */
+  /** Get total Arrow bytes transferred. */
   public long getTotalArrowBytesTransferred() {
     return totalArrowBytesTransferred.get();
   }
 
   // ========== ACTIVITY TRACKING ==========
 
-  /**
-   * Update last activity timestamp.
-   */
+  /** Update last activity timestamp. */
   public void touchActivity() {
     lastActivityNanos = System.nanoTime();
   }
 
-  /**
-   * Get nanoseconds since last activity.
-   */
+  /** Get nanoseconds since last activity. */
   public long getIdleNanos() {
     return System.nanoTime() - lastActivityNanos;
   }
 
-  /**
-   * Get milliseconds since last activity.
-   */
+  /** Get milliseconds since last activity. */
   public long getIdleMs() {
     return getIdleNanos() / 1_000_000;
   }
 
-  /**
-   * Check if session has timed out due to inactivity.
-   */
+  /** Check if session has timed out due to inactivity. */
   public boolean isTimedOut() {
     return ResourceLimits.isSessionTimedOut(lastActivityNanos);
   }
 
   // ========== REQUEST TRACKING ==========
 
-  /**
-   * Record a request.
-   */
+  /** Record a request. */
   public void recordRequest() {
     requestCount.incrementAndGet();
     touchActivity();
   }
 
-  /**
-   * Get request count.
-   */
+  /** Get request count. */
   public long getRequestCount() {
     return requestCount.get();
   }
 
   // ========== REPORTING ==========
 
-  /**
-   * Get session ID.
-   */
+  /** Get session ID. */
   public long getSessionId() {
     return sessionId;
   }
 
-  /**
-   * Get a summary of quota usage for logging.
-   */
+  /** Get a summary of quota usage for logging. */
   public String getSummary() {
     return String.format(
         "Session %d: objects=%d (peak=%d, total=%d), "
