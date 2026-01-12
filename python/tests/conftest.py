@@ -95,28 +95,38 @@ def make_client(java_gateway):
     Use this for Hypothesis tests where each example should get a fresh
     connection to avoid protocol state corruption affecting subsequent examples.
 
+    The factory automatically closes clients after each use via a finalizer,
+    preventing resource exhaustion when running many Hypothesis examples.
+
     Usage:
         def test_something(make_client):
             client = make_client()
-            try:
-                # ... test code ...
-            finally:
-                client.close()
+            # ... test code ...
+            # client is automatically closed when the next make_client() is called
+            # or when the test function ends
     """
     socket_str = str(java_gateway.socket_path)
-    created_clients = []
+    current_client = [None]  # Use list to allow mutation in closure
 
     def _make():
+        # Close the previous client before creating a new one
+        if current_client[0] is not None:
+            try:
+                if current_client[0].sock:
+                    current_client[0].sock.close()
+            except Exception:
+                pass
+
         c = _create_client(socket_str)
-        created_clients.append(c)
+        current_client[0] = c
         return c
 
     yield _make
 
-    # Cleanup all created clients
-    for c in created_clients:
+    # Cleanup the last client
+    if current_client[0] is not None:
         try:
-            if c.sock:
-                c.sock.close()
+            if current_client[0].sock:
+                current_client[0].sock.close()
         except Exception:
             pass
