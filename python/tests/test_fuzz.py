@@ -6,33 +6,127 @@ These tests verify that:
 3. Corrupted bytes don't cause undefined behavior
 4. Zone boundary violations are caught
 
-IMPORTANT: Tests that send raw malformed data use make_client (factory pattern)
-to get a fresh connection per Hypothesis example. This prevents protocol state
-corruption from one example affecting subsequent examples.
-
-NOTE: These tests are currently skipped because they hang when run in sequence.
-This needs server/client cleanup fixes to properly handle connection teardown.
+IMPORTANT: Fuzz tests use a dedicated gateway (fuzz_gateway) to avoid corrupting
+the main gateway used by other tests. Tests that send raw malformed data use
+make_client (factory pattern) to get a fresh connection per Hypothesis example.
 """
 
+import logging
 import struct
+import tempfile
+import time
+from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="Fuzz tests hang when run in sequence - needs server/client cleanup fixes"
-)
 from hypothesis import given, strategies as st, settings, assume, HealthCheck
 
 import flatbuffers
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
+from gatun.launcher import launch_gateway
+from gatun.client import GatunClient
 
+
+logger = logging.getLogger("gatun.tests.fuzz")
 
 # Tests using high-level APIs can safely suppress this check since they don't
 # corrupt protocol state. Tests that send raw malformed data use make_client
 # to create a fresh client per example (which also triggers this check but
 # is safe because each example creates its own client).
 SUPPRESS_FIXTURE_CHECK = [HealthCheck.function_scoped_fixture]
+
+
+# --- Fuzz Test Gateway ---
+# Fuzz tests use a separate gateway to avoid corrupting the main gateway.
+# This is module-scoped so it's created once for all fuzz tests.
+
+
+@pytest.fixture(scope="module")
+def fuzz_gateway():
+    """
+    A separate gateway for fuzz tests to avoid polluting the main gateway.
+
+    Fuzz tests send malformed data that can corrupt server state. Using a
+    separate gateway ensures that other tests are not affected.
+    """
+    socket_path = Path(tempfile.gettempdir()) / "gatun_fuzz_test.sock"
+
+    if socket_path.exists():
+        socket_path.unlink()
+
+    logger.info(f"Launching Fuzz Test Gateway (64MB) at {socket_path}...")
+    session = launch_gateway(memory="64MB", socket_path=str(socket_path))
+
+    yield session
+
+    logger.info("Stopping Fuzz Test Gateway...")
+    session.stop()
+
+    if socket_path.exists():
+        socket_path.unlink()
+
+
+def _create_fuzz_client(socket_path: str) -> GatunClient:
+    """Helper to create and connect a client with retry logic."""
+    c = GatunClient(socket_path)
+    connected = False
+    for _ in range(10):
+        connected = c.connect()
+        if connected:
+            break
+        time.sleep(0.1)
+
+    if not connected:
+        raise RuntimeError(f"Client failed to connect to Gateway at {socket_path}")
+
+    return c
+
+
+@pytest.fixture(scope="function")
+def make_client(fuzz_gateway):
+    """
+    Factory fixture for creating fresh clients for fuzz tests.
+
+    Each Hypothesis example should get a fresh connection to avoid
+    protocol state corruption affecting subsequent examples.
+    """
+    socket_str = str(fuzz_gateway.socket_path)
+    current_client = [None]
+
+    def _make():
+        # Close the previous client before creating a new one
+        if current_client[0] is not None:
+            try:
+                if current_client[0].sock:
+                    current_client[0].sock.close()
+            except Exception:
+                pass
+
+        c = _create_fuzz_client(socket_str)
+        current_client[0] = c
+        return c
+
+    yield _make
+
+    # Cleanup the last client
+    if current_client[0] is not None:
+        try:
+            if current_client[0].sock:
+                current_client[0].sock.close()
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="function")
+def client(fuzz_gateway):
+    """Single client fixture for tests that don't need fresh clients per example."""
+    c = _create_fuzz_client(str(fuzz_gateway.socket_path))
+    yield c
+    try:
+        if c.sock:
+            c.sock.close()
+    except Exception:
+        pass
 
 
 class TestMalformedCommandHandling:
@@ -529,6 +623,9 @@ class TestZoneBoundaryFuzzing:
 class TestCallbackFuzzing:
     """Test handling of malformed callbacks."""
 
+    @pytest.mark.skip(
+        reason="Server hangs on invalid interface names - needs callback error handling fix"
+    )
     @given(
         interface_name=st.text(min_size=0, max_size=200),
     )
