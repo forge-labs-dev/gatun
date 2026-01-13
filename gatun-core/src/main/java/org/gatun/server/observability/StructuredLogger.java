@@ -1,5 +1,8 @@
 package org.gatun.server.observability;
 
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -19,6 +22,29 @@ import java.util.logging.Logger;
  */
 public class StructuredLogger {
   private static final Logger LOG = Logger.getLogger("org.gatun.server");
+
+  /** Rate limit for ring buffer dumps: minimum interval in nanoseconds (1 second). */
+  private static final long RING_BUFFER_DUMP_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
+
+  /** Last time a ring buffer was dumped (global rate limit). */
+  private static final AtomicLong lastRingBufferDumpNanos = new AtomicLong(0);
+
+  /**
+   * Client errors that don't warrant diagnostic ring buffer dumps. These are expected errors from
+   * invalid client input, not server-side issues that need debugging context.
+   */
+  private static final Set<String> CLIENT_ERROR_TYPES =
+      Set.of(
+          "java.lang.NumberFormatException",
+          "java.lang.IllegalArgumentException",
+          "java.lang.SecurityException",
+          "java.lang.NoSuchMethodException",
+          "java.lang.NoSuchFieldException",
+          "java.lang.ClassNotFoundException",
+          "java.lang.IndexOutOfBoundsException",
+          "java.lang.NullPointerException",
+          "java.lang.ArrayIndexOutOfBoundsException",
+          "java.lang.StringIndexOutOfBoundsException");
 
   /** Enable trace mode for verbose method resolution logging. */
   private static boolean traceMode =
@@ -135,14 +161,33 @@ public class StructuredLogger {
     LOG.finer(sb.toString());
   }
 
-  /** Log an error with full context for debugging. */
+  /**
+   * Log an error with context for debugging.
+   *
+   * <p>Ring buffer dumps are only performed for server errors (not client errors like
+   * NumberFormatException) and are rate-limited to avoid flooding logs.
+   *
+   * @param sessionId The session ID
+   * @param requestId The request ID
+   * @param action The action being performed
+   * @param target The target (class/method name)
+   * @param errorType The fully qualified exception class name
+   * @param errorMessage The error message
+   * @param ringBuffer The request ring buffer (may be null)
+   * @param isFatal Whether this error will end the session
+   */
   public static void logError(
       long sessionId,
       long requestId,
       String action,
       String target,
-      Throwable error,
-      RequestRingBuffer ringBuffer) {
+      String errorType,
+      String errorMessage,
+      RequestRingBuffer ringBuffer,
+      boolean isFatal) {
+    // Determine if this is a client error (expected) vs server error (unexpected)
+    boolean isClientError = CLIENT_ERROR_TYPES.contains(errorType);
+
     StringBuilder sb = new StringBuilder();
     sb.append("ERROR sessionId=").append(sessionId);
     sb.append(" requestId=").append(requestId);
@@ -150,15 +195,50 @@ public class StructuredLogger {
     if (target != null) {
       sb.append(" target=").append(truncate(target, 100));
     }
-    sb.append(" error=").append(error.getClass().getName());
-    sb.append(" message=").append(truncate(error.getMessage(), 200));
+    sb.append(" error=").append(errorType);
+    sb.append(" message=").append(truncate(errorMessage, 200));
+    sb.append(" type=").append(isClientError ? "CLIENT" : "SERVER");
 
-    LOG.warning(sb.toString());
+    // Client errors are logged at FINE level, server errors at WARNING
+    if (isClientError) {
+      if (LOG.isLoggable(Level.FINE)) {
+        LOG.fine(sb.toString());
+      }
+    } else {
+      LOG.warning(sb.toString());
+    }
 
-    // If we have a ring buffer, dump recent requests for context
-    if (ringBuffer != null && LOG.isLoggable(Level.INFO)) {
+    // Only dump ring buffer for:
+    // 1. Server errors (not client errors)
+    // 2. Fatal errors that will end the session
+    // 3. Rate-limited to once per second to avoid log flooding
+    boolean shouldDumpRingBuffer =
+        ringBuffer != null
+            && (!isClientError || isFatal)
+            && LOG.isLoggable(Level.INFO)
+            && tryAcquireRingBufferDumpPermit();
+
+    if (shouldDumpRingBuffer) {
       LOG.info("Request history for session " + sessionId + ":\n" + ringBuffer.dump());
     }
+  }
+
+  /**
+   * Try to acquire permission to dump ring buffer (rate-limited).
+   *
+   * @return true if dump is allowed, false if rate-limited
+   */
+  private static boolean tryAcquireRingBufferDumpPermit() {
+    long now = System.nanoTime();
+    long last = lastRingBufferDumpNanos.get();
+
+    // Check if enough time has passed since last dump
+    if (now - last < RING_BUFFER_DUMP_INTERVAL_NANOS) {
+      return false;
+    }
+
+    // Try to update the timestamp (CAS to handle concurrent access)
+    return lastRingBufferDumpNanos.compareAndSet(last, now);
   }
 
   /** Log session start. */

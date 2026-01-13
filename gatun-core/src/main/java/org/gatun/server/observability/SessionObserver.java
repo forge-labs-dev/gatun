@@ -66,15 +66,17 @@ public class SessionObserver {
       currentJfrEvent = null;
     }
 
-    // Log full error context if failed
+    // Log error context if failed (not fatal - session continues)
     if (!success && errorMessage != null) {
       StructuredLogger.logError(
           sessionId,
           currentRequest.requestId(),
           currentRequest.actionName(),
           currentRequest.target(),
-          new RuntimeException(errorType + ": " + errorMessage),
-          ringBuffer);
+          errorType,
+          errorMessage,
+          ringBuffer,
+          false /* isFatal */);
     }
 
     currentRequest = null;
