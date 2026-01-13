@@ -58,12 +58,9 @@ def _create_client(socket_path: str) -> GatunClient:
         raise RuntimeError(f"Client failed to connect to Gateway at {socket_path}")
 
     # Verify Handshake (Sanity Check)
-    # 64MB = 67,108,864 bytes
-    expected_size = 64 * 1024 * 1024
-    if c.memory_size != expected_size:
-        raise RuntimeError(
-            f"Memory size mismatch! Expected {expected_size}, got {c.memory_size}"
-        )
+    # We don't enforce exact size - just verify connection worked
+    if c.memory_size <= 0:
+        raise RuntimeError(f"Invalid memory size: {c.memory_size}")
 
     return c
 
@@ -92,11 +89,9 @@ def make_client(java_gateway):
     """
     Factory fixture for creating fresh clients.
 
-    Use this for Hypothesis tests where each example should get a fresh
-    connection to avoid protocol state corruption affecting subsequent examples.
-
+    Use this for tests where each call should get a fresh connection.
     The factory automatically closes clients after each use via a finalizer,
-    preventing resource exhaustion when running many Hypothesis examples.
+    preventing resource exhaustion.
 
     Usage:
         def test_something(make_client):

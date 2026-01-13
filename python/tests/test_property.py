@@ -9,8 +9,18 @@ These tests verify that:
 6. Cleanup is idempotent
 """
 
+import logging
+import tempfile
+import time
+from pathlib import Path
+
 import pytest
 from hypothesis import given, strategies as st, settings, assume, HealthCheck
+
+from gatun.launcher import launch_gateway
+from gatun.client import GatunClient
+
+logger = logging.getLogger("gatun.tests.property")
 
 
 # Common settings for property tests
@@ -18,6 +28,88 @@ from hypothesis import given, strategies as st, settings, assume, HealthCheck
 HYPOTHESIS_SETTINGS = dict(
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
+
+
+# --- Property Test Gateway ---
+# Property tests use a separate gateway to avoid affecting other tests.
+# This is module-scoped so it's created once for all property tests.
+
+
+@pytest.fixture(scope="module")
+def property_gateway():
+    """
+    A separate gateway for property tests to avoid polluting the main gateway.
+
+    Property tests (using Hypothesis) can exhaust server resources or leave
+    it in a bad state due to many rapid connections. Using a separate gateway
+    ensures that other tests are not affected.
+    """
+    socket_path = Path(tempfile.gettempdir()) / "gatun_property_test.sock"
+
+    if socket_path.exists():
+        socket_path.unlink()
+
+    logger.info(f"Launching Property Test Gateway (64MB) at {socket_path}...")
+    session = launch_gateway(memory="64MB", socket_path=str(socket_path))
+
+    yield session
+
+    logger.info("Stopping Property Test Gateway...")
+    session.stop()
+
+    if socket_path.exists():
+        socket_path.unlink()
+
+
+def _create_property_client(socket_path: str) -> GatunClient:
+    """Helper to create and connect a client with retry logic."""
+    c = GatunClient(socket_path)
+    connected = False
+    for _ in range(10):
+        connected = c.connect()
+        if connected:
+            break
+        time.sleep(0.1)
+
+    if not connected:
+        raise RuntimeError(f"Client failed to connect to Gateway at {socket_path}")
+
+    return c
+
+
+@pytest.fixture(scope="function")
+def make_client(property_gateway):
+    """
+    Factory fixture for creating fresh clients for property tests.
+
+    Each Hypothesis example should get a fresh connection to avoid
+    protocol state corruption affecting subsequent examples.
+    """
+    socket_str = str(property_gateway.socket_path)
+    current_client = [None]
+
+    def _make():
+        # Close the previous client before creating a new one
+        if current_client[0] is not None:
+            try:
+                if current_client[0].sock:
+                    current_client[0].sock.close()
+            except Exception:
+                pass
+
+        c = _create_property_client(socket_str)
+        current_client[0] = c
+        return c
+
+    yield _make
+
+    # Cleanup the last client
+    if current_client[0] is not None:
+        try:
+            if current_client[0].sock:
+                current_client[0].sock.close()
+        except Exception:
+            pass
 
 
 # --- Strategy Definitions ---
