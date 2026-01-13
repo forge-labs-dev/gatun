@@ -406,7 +406,6 @@ class TestVectorizedAPIInvariants:
 class TestIterationInvariants:
     """Test that iteration support maintains invariants."""
 
-    @pytest.mark.skip(reason="Flaky due to server resource exhaustion - needs investigation")
     @given(
         items=st.lists(
             st.integers(min_value=-100, max_value=100), min_size=1, max_size=30
@@ -427,7 +426,6 @@ class TestIterationInvariants:
         # Should match original order
         assert collected == items
 
-    @pytest.mark.skip(reason="Flaky due to server resource exhaustion - needs investigation")
     @given(
         items=st.lists(
             st.integers(min_value=-100, max_value=100), min_size=0, max_size=20
@@ -447,7 +445,6 @@ class TestIterationInvariants:
 class TestErrorRecovery:
     """Test that errors don't corrupt state."""
 
-    @pytest.mark.skip(reason="Flaky due to server resource exhaustion - needs investigation")
     @given(
         good_ops=st.integers(min_value=1, max_value=10),
     )
