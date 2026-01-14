@@ -443,22 +443,3 @@ class TestGatunAdapter(BridgeContractTests):
         adapter = GatunAdapter()
         yield adapter
         adapter.close()
-
-
-# ==========================================================================
-# Py4J Adapter Tests (for comparison, optional)
-# ==========================================================================
-
-
-@pytest.mark.skip(reason="Py4J adapter not implemented yet")
-class TestPy4JAdapter(BridgeContractTests):
-    """Run contract tests against Py4JAdapter."""
-
-    @pytest.fixture
-    def bridge(self):
-        """Provide Py4JAdapter instance."""
-        from gatun.bridge_adapters import Py4JAdapter
-
-        adapter = Py4JAdapter()
-        yield adapter
-        adapter.close()
