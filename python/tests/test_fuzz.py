@@ -623,9 +623,6 @@ class TestZoneBoundaryFuzzing:
 class TestCallbackFuzzing:
     """Test handling of malformed callbacks."""
 
-    @pytest.mark.skip(
-        reason="Server hangs on invalid interface names - needs callback error handling fix"
-    )
     @given(
         interface_name=st.text(min_size=0, max_size=200),
     )

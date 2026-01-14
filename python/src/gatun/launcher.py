@@ -5,6 +5,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import threading
 import time
 import weakref
 from pathlib import Path
@@ -77,11 +78,42 @@ DEFAULT_JVM_FLAGS = [
 ]
 
 
+def _drain_pipe(pipe, storage: list):
+    """Drain a pipe to prevent buffer fill-up. Runs in background thread."""
+    try:
+        for line in pipe:
+            storage.append(line)
+    except (ValueError, OSError):
+        pass  # Pipe closed
+
+
 class GatunSession:
     def __init__(self, process, socket_path, memory_bytes):
         self.process = process
         self.socket_path = socket_path
         self.memory_bytes = memory_bytes
+        self._stdout_lines: list[str] = []
+        self._stderr_lines: list[str] = []
+        self._drain_threads: list[threading.Thread] = []
+
+    def _start_drain_threads(self):
+        """Start background threads to drain stdout/stderr pipes."""
+        if self.process.stdout:
+            t = threading.Thread(
+                target=_drain_pipe,
+                args=(self.process.stdout, self._stdout_lines),
+                daemon=True,
+            )
+            t.start()
+            self._drain_threads.append(t)
+        if self.process.stderr:
+            t = threading.Thread(
+                target=_drain_pipe,
+                args=(self.process.stderr, self._stderr_lines),
+                daemon=True,
+            )
+            t.start()
+            self._drain_threads.append(t)
 
     def stop(self):
         if self.process:
@@ -263,6 +295,14 @@ def launch_gateway(
 
     # 5. Register Cleanup
     session = GatunSession(process, socket_path, mem_bytes)
+
+    # Start background threads to drain stdout/stderr pipes.
+    # This prevents the Java process from blocking when the pipe buffer fills up
+    # (default ~64KB on most systems). Without draining, the server hangs after
+    # producing enough log output.
+    if not debug_mode:
+        session._start_drain_threads()
+
     _active_sessions.add(session)
     atexit.register(session.stop)
     _install_signal_handlers()
