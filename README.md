@@ -133,6 +133,10 @@ print(sb.toString())  # "hello"
 ### Collections
 
 ```python
+from gatun import connect, java_import
+
+client = connect()
+
 # HashMap
 hm = client.jvm.java.util.HashMap()
 hm.put("key1", "value1")
@@ -172,6 +176,10 @@ result = client.jvm.java.util.Arrays.asList("a", "b", "c")  # ['a', 'b', 'c']
 ### String Operations
 
 ```python
+from gatun import connect
+
+client = connect()
+
 # StringBuilder
 sb = client.jvm.java.lang.StringBuilder("Hello")
 sb.append(" ")
@@ -187,6 +195,10 @@ result = client.jvm.java.lang.String.format("Hello %s, you have %d messages", "A
 ### Math Operations
 
 ```python
+from gatun import connect
+
+client = connect()
+
 Math = client.jvm.java.lang.Math
 print(Math.abs(-42))        # 42
 print(Math.min(5, 3))       # 3
@@ -198,6 +210,10 @@ print(Math.sqrt(16.0))      # 4.0
 ### Integer Utilities
 
 ```python
+from gatun import connect
+
+client = connect()
+
 Integer = client.jvm.java.lang.Integer
 print(Integer.parseInt("42"))        # 42
 print(Integer.valueOf("123"))        # 123
@@ -210,6 +226,10 @@ print(Integer.MAX_VALUE)             # 2147483647 (static field)
 Python lists and dicts are automatically converted to Java collections:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 arr = client.jvm.java.util.ArrayList()
 arr.add([1, 2, 3])                    # Converted to Java List
 arr.add({"name": "Alice", "age": 30}) # Converted to Java Map
@@ -244,6 +264,10 @@ asyncio.run(main())
 Register Python functions as Java interface implementations:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 def compare(a, b):
     return -1 if a < b else (1 if a > b else 0)
 
@@ -260,20 +284,32 @@ client.jvm.java.util.Collections.sort(arr, comparator)
 Async callbacks work too:
 
 ```python
-async def async_compare(a, b):
-    await asyncio.sleep(0.01)  # Simulate async work
-    return -1 if a < b else (1 if a > b else 0)
+from gatun import aconnect
+import asyncio
 
-comparator = await client.register_callback(async_compare, "java.util.Comparator")
+async def main():
+    client = await aconnect()
+
+    async def async_compare(a, b):
+        await asyncio.sleep(0.01)  # Simulate async work
+        return -1 if a < b else (1 if a > b else 0)
+
+    comparator = await client.register_callback(async_compare, "java.util.Comparator")
+
+asyncio.run(main())
 ```
 
 ### Type Checking with is_instance_of
 
 ```python
+from gatun import connect
+
+client = connect()
+
 arr = client.create_object("java.util.ArrayList")
-client.is_instance_of(arr, "java.util.List")       # True
-client.is_instance_of(arr, "java.util.Collection") # True
-client.is_instance_of(arr, "java.util.Map")        # False
+print(client.is_instance_of(arr, "java.util.List"))       # True
+print(client.is_instance_of(arr, "java.util.Collection")) # True
+print(client.is_instance_of(arr, "java.util.Map"))        # False
 ```
 
 ### Pythonic Java Collections
@@ -281,6 +317,10 @@ client.is_instance_of(arr, "java.util.Map")        # False
 JavaObject wrappers support iteration, indexing, and length:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 arr = client.jvm.java.util.ArrayList()
 arr.add("a")
 arr.add("b")
@@ -306,6 +346,10 @@ items = list(arr)  # ["a", "b", "c"]
 Execute multiple commands in a single round-trip to reduce per-call overhead:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 arr = client.create_object("java.util.ArrayList")
 
 # Batch 100 operations in one round-trip (6x faster than individual calls)
@@ -337,6 +381,10 @@ with client.batch(stop_on_error=True) as b:
 For even faster bulk operations on the same target (2-5x speedup over batch):
 
 ```python
+from gatun import connect
+
+client = connect()
+
 # invoke_methods - Multiple calls on same object in one round-trip
 arr = client.create_object("java.util.ArrayList")
 results = client.invoke_methods(arr, [
@@ -372,8 +420,10 @@ values = client.get_fields(sb, ["count"])  # [5]
 Primitive arrays (`int[]`, `long[]`, `double[]`, etc.) are returned as `JavaArray`:
 
 ```python
-from gatun import JavaArray
+from gatun import connect, JavaArray
 import pyarrow as pa
+
+client = connect()
 
 # Primitive arrays from Java are JavaArray instances
 original = pa.array([1, 2, 3], type=pa.int32())
@@ -393,6 +443,10 @@ result = client.jvm.java.util.Arrays.toString(int_array)  # "[1, 2, 3]"
 Object arrays (`Object[]`, `String[]`) are returned as `JavaObject` references:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 # Object arrays from toArray() are JavaObject (not JavaArray)
 arr = client.jvm.java.util.ArrayList()
 arr.add("x")
@@ -413,7 +467,10 @@ This distinction exists because Object arrays are kept as references on the Java
 ### Arrow Data Transfer
 
 ```python
+from gatun import connect
 import pyarrow as pa
+
+client = connect()
 
 # Send a PyArrow table to Java
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
@@ -432,6 +489,10 @@ arena.close()
 For direct control:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 # Create objects
 obj = client.create_object("java.util.ArrayList")
 obj = client.create_object("java.util.ArrayList", 100)  # with capacity
@@ -453,6 +514,10 @@ client.create_objects([("java.util.ArrayList", ()), ("java.util.HashMap", ())])
 Get server metrics for debugging and monitoring:
 
 ```python
+from gatun import connect
+
+client = connect()
+
 # Get server metrics report
 metrics = client.get_metrics()
 print(metrics)
@@ -470,6 +535,8 @@ print(metrics)
 Enable trace mode for method resolution debugging:
 
 ```python
+from gatun import connect
+
 # Enable trace mode
 client = connect(trace=True)
 
@@ -557,6 +624,7 @@ Java exceptions are mapped to Python exceptions:
 
 ```python
 from gatun import (
+    connect,
     JavaException,
     JavaSecurityException,
     JavaIllegalArgumentException,
@@ -566,6 +634,8 @@ from gatun import (
     JavaIndexOutOfBoundsException,
     JavaNumberFormatException,
 )
+
+client = connect()
 
 try:
     client.jvm.java.lang.Integer.parseInt("not_a_number")
