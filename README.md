@@ -34,13 +34,15 @@ Gatun has **2-3x lower latency** for individual operations:
 
 ### Throughput (Bulk Operations)
 
-For tight loops with pre-bound methods, Py4J can achieve higher ops/sec due to lower per-call overhead:
+For tight loops with **pre-bound methods** (where class/method resolution is cached), Py4J achieves higher ops/sec:
 
 | Operation | Gatun | Py4J | Notes |
 |-----------|------:|-----:|-------|
-| Bulk static calls (10K) | ~45K ops/s | ~60K ops/s | Py4J faster for simple calls |
-| Bulk instance calls (10K) | ~40K ops/s | ~55K ops/s | Py4J faster for simple calls |
+| Bulk static calls (10K) | ~45K ops/s | ~60K ops/s | Pre-bound: `fn = Math.abs; fn(i)` |
+| Bulk instance calls (10K) | ~40K ops/s | ~55K ops/s | Pre-bound: `fn = arr.add; fn(i)` |
 | Mixed workload | ~35K ops/s | ~30K ops/s | Gatun faster for varied operations |
+
+**Why the difference?** Latency benchmarks measure full `client.jvm.java.lang.Math.max(10, 20)` calls including package navigation and method resolution (~120μs). Throughput benchmarks pre-bind methods first, measuring only the IPC cost (~22μs for Gatun). Py4J's TCP protocol has lower per-call IPC overhead than Gatun's shared memory protocol for small payloads.
 
 **Recommendation**: Use vectorized APIs or Arrow for bulk data instead of tight loops.
 

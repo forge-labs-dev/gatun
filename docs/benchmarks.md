@@ -142,7 +142,7 @@ Comparing Arrow table transfer to traditional list/dict transfer:
 
 ### Throughput: Bulk Simple Operations
 
-For tight loops with pre-bound methods calling simple operations, Py4J can achieve higher ops/sec:
+For tight loops with **pre-bound methods** (class/method already resolved), Py4J achieves higher ops/sec:
 
 | Operation | Gatun | Py4J | Winner |
 |-----------|------:|-----:|--------|
@@ -151,7 +151,12 @@ For tight loops with pre-bound methods calling simple operations, Py4J can achie
 | Bulk object creation (10K) | ~35K ops/s | ~45K ops/s | **Py4J** |
 | Mixed workload | ~35K ops/s | ~30K ops/s | **Gatun** |
 
-**Why Py4J is faster for simple tight loops**: Py4J's TCP-based protocol has lower per-call setup overhead for very simple operations. Gatun's shared memory approach has more setup overhead that pays off for larger payloads.
+**Why the numbers differ from latency benchmarks:**
+
+- **Latency benchmarks** measure full calls like `client.jvm.java.lang.Math.max(10, 20)`, which include package path navigation, class lookup, and method resolution (~120μs total).
+- **Throughput benchmarks** pre-bind methods first (`fn = Math.abs`), then call `fn(i)` in tight loops. This measures only the IPC round-trip cost (~22μs for Gatun, ~17μs for Py4J).
+
+The pre-binding pattern matches how real applications (like PySpark) cache method references. Py4J's TCP-based protocol has lower per-call IPC overhead than Gatun's FlatBuffers/shared-memory protocol for small payloads (simple primitives). Gatun's overhead pays off for larger payloads, complex operations, and mixed workloads.
 
 **Recommendation**: Don't use tight loops for bulk operations. Instead:
 - Use **vectorized APIs** (`invoke_methods`, `create_objects`) for multiple same-target operations
