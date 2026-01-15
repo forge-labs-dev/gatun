@@ -1,5 +1,7 @@
 # Gatun
 
+> **⚠️ Alpha Status**: This project is experimental and under active development. APIs may change without notice. Not recommended for production use.
+
 High-performance Python-to-Java bridge using shared memory and Unix domain sockets.
 
 ## Features
