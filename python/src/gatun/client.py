@@ -3402,7 +3402,9 @@ class GatunClient:
             pass
 
     def __enter__(self):
-        self.connect()
+        # Only connect if not already connected
+        if self.shm is None:
+            self.connect()
         return self
 
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
