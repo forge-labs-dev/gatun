@@ -928,3 +928,187 @@ def test_schema_hash_consistency_nested_types(client):
     )
 
     arena.close()
+
+
+def test_fixed_size_list_roundtrip(client):
+    """Test that fixed_size_list type is transferred correctly."""
+    # Fixed-size list of 3 int32s per row
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "coords": pa.array(
+                [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                type=pa.list_(pa.int32(), 3),
+            ),
+        }
+    )
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending table with fixed_size_list column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data
+    assert received_table.column("id").to_pylist() == [1, 2, 3]
+    assert received_table.column("coords").to_pylist() == [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+    arena.close()
+
+
+def test_large_list_roundtrip(client):
+    """Test that large_list type (64-bit offsets) is transferred correctly."""
+    table = pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "values": pa.array(
+                [[1, 2, 3], [4, 5]],
+                type=pa.large_list(pa.int32()),
+            ),
+        }
+    )
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    print(f"\nSending table with large_list column: {table.num_rows} rows")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
+    assert f"Received {table.num_rows} rows" in str(response)
+
+    received_table = client.get_arrow_data()
+
+    # Verify schema preserved
+    assert received_table.schema == table.schema
+
+    # Verify data
+    assert received_table.column("values").to_pylist() == [[1, 2, 3], [4, 5]]
+
+    arena.close()
+
+
+def test_payload_arena_out_of_memory():
+    """Test PayloadArena raises MemoryError when full."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        arena = PayloadArena.create(arena_path, 256)  # Small arena
+
+        # First allocation should succeed
+        info1 = arena.allocate(100)
+        assert info1.length == 100
+
+        # This should fail - not enough space
+        with pytest.raises(MemoryError) as exc_info:
+            arena.allocate(200)
+
+        assert "full" in str(exc_info.value).lower()
+
+        arena.close()
+    finally:
+        arena_path.unlink(missing_ok=True)
+
+
+def test_payload_arena_context_manager():
+    """Test PayloadArena works as a context manager."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        with PayloadArena.create(arena_path, 4096) as arena:
+            info = arena.allocate(100)
+            assert info.length == 100
+            assert arena.bytes_used() == 100
+
+        # After context exit, arena should be closed
+        # (we can't easily verify this, but at least it shouldn't raise)
+    finally:
+        arena_path.unlink(missing_ok=True)
+
+
+def test_payload_arena_allocate_and_copy_bytes():
+    """Test allocate_and_copy with Python bytes."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        arena = PayloadArena.create(arena_path, 4096)
+
+        data = b"hello world"
+        info = arena.allocate_and_copy(data)
+
+        assert info.length == len(data)
+        assert info.buffer is not None
+        assert bytes(info.buffer) == data
+
+        arena.close()
+    finally:
+        arena_path.unlink(missing_ok=True)
+
+
+def test_payload_arena_allocate_and_copy_arrow_buffer():
+    """Test allocate_and_copy with Arrow buffer."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        arena = PayloadArena.create(arena_path, 4096)
+
+        # Create an Arrow buffer
+        arr = pa.array([1, 2, 3, 4], type=pa.int32())
+        arrow_buffer = arr.buffers()[1]  # Data buffer
+
+        info = arena.allocate_and_copy(arrow_buffer)
+
+        assert info.length == arrow_buffer.size
+        assert info.buffer is not None
+
+        arena.close()
+    finally:
+        arena_path.unlink(missing_ok=True)
+
+
+def test_payload_arena_allocate_and_copy_zero_length():
+    """Test allocate_and_copy with zero-length data."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        arena = PayloadArena.create(arena_path, 4096)
+
+        info = arena.allocate_and_copy(b"")
+
+        assert info.length == 0
+        assert info.buffer is None  # Zero-length returns None buffer
+
+        arena.close()
+    finally:
+        arena_path.unlink(missing_ok=True)
+
+
+def test_payload_arena_bytes_available():
+    """Test bytes_available tracking."""
+    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
+        arena_path = Path(f.name)
+
+    try:
+        arena = PayloadArena.create(arena_path, 1024)
+
+        assert arena.bytes_available() == 1024
+
+        arena.allocate(100)
+        # After allocating 100 bytes (aligned to 64), available should decrease
+        assert arena.bytes_available() < 1024
+
+        arena.reset()
+        assert arena.bytes_available() == 1024
+
+        arena.close()
+    finally:
+        arena_path.unlink(missing_ok=True)

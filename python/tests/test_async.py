@@ -370,3 +370,94 @@ class TestAsyncVectorizedAPIs:
 
         assert len(objects) == 1
         assert await async_client.is_instance_of(objects[0], "java.util.ArrayList")
+
+
+class TestAsyncFieldOperations:
+    """Test async field get/set operations."""
+
+    @pytest.mark.asyncio
+    async def test_get_field(self, async_client):
+        """Test getting a field value asynchronously."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "hello")
+        count = await async_client.get_field(sb, "count")
+        assert count == 5
+
+    @pytest.mark.asyncio
+    async def test_get_field_with_object_id(self, async_client):
+        """Test get_field accepts object_id directly."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "test")
+        count = await async_client.get_field(sb.object_id, "count")
+        assert count == 4
+
+    @pytest.mark.asyncio
+    async def test_set_field(self, async_client):
+        """Test setting a field value asynchronously."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "hello world")
+        # Set count field to truncate the string
+        await async_client.set_field(sb, "count", 5)
+        result = await sb.toString()
+        assert result == "hello"
+
+    @pytest.mark.asyncio
+    async def test_set_field_with_object_id(self, async_client):
+        """Test set_field accepts object_id directly."""
+        sb = await async_client.create_object("java.lang.StringBuilder", "testing")
+        await async_client.set_field(sb.object_id, "count", 4)
+        result = await sb.toString()
+        assert result == "test"
+
+
+class TestAsyncObjectLifecycle:
+    """Test async object lifecycle methods."""
+
+    @pytest.mark.asyncio
+    async def test_free_object(self, async_client):
+        """Test freeing an object asynchronously."""
+        arr = await async_client.create_object("java.util.ArrayList")
+        obj_id = arr.object_id
+        # Free the object explicitly
+        await async_client.free_object(obj_id)
+        # Double free should not raise (fire-and-forget)
+        await async_client.free_object(obj_id)
+
+    @pytest.mark.asyncio
+    async def test_unregister_callback(self, async_client):
+        """Test unregistering a callback asynchronously."""
+
+        def compare(a, b):
+            return 0
+
+        comparator = await async_client.register_callback(compare, "java.util.Comparator")
+        callback_id = comparator.object_id
+
+        # Unregister should work
+        await async_client.unregister_callback(callback_id)
+
+        # Unregistering again should not raise
+        await async_client.unregister_callback(callback_id)
+
+
+class TestAsyncArrowTransfer:
+    """Test async Arrow data transfer."""
+
+    @pytest.mark.asyncio
+    async def test_send_arrow_table(self, async_client):
+        """Test sending an Arrow table asynchronously."""
+        import pyarrow as pa
+
+        table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+        result = await async_client.send_arrow_table(table)
+        assert "3 rows" in result
+
+    @pytest.mark.asyncio
+    async def test_send_arrow_table_large(self, async_client):
+        """Test sending a larger Arrow table."""
+        import pyarrow as pa
+
+        # Create a table with more data
+        table = pa.table({
+            "id": list(range(1000)),
+            "value": [f"item_{i}" for i in range(1000)],
+        })
+        result = await async_client.send_arrow_table(table)
+        assert "1000 rows" in result
