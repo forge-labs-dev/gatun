@@ -43,7 +43,7 @@ class GatunAdapter(BridgeAdapter):
             classpath: Additional JAR files for the classpath
         """
         # connect() launches the server and returns a connected client
-        self._client: GatunClient = gatun_connect(memory=memory)
+        self._client: GatunClient | None = gatun_connect(memory=memory)
 
     # === Object Lifecycle ===
 
@@ -193,6 +193,7 @@ class GatunAdapter(BridgeAdapter):
     @property
     def jvm(self) -> JVMView:
         """Get JVM view for navigating classes."""
+        assert self._client is not None, "Bridge is closed"
         return _GatunJVMViewAdapter(self._client.jvm, self._client)
 
     def java_import(self, package: str) -> None:
@@ -236,4 +237,4 @@ class _GatunJVMViewAdapter(JVMView):
 
     def __call__(self, *args: Any) -> JVMRef:
         """Create instance of this class."""
-        return self._jvm_view(*args)
+        return self._jvm_view(*args)  # type: ignore[operator]

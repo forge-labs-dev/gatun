@@ -9,7 +9,7 @@ import os
 import socket
 import struct
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 import weakref
 
 import flatbuffers
@@ -330,7 +330,7 @@ class TypeHint:
 
 
 # Mapping from Java exception class names to Python exception classes
-_JAVA_EXCEPTION_MAP: dict[str, type[JavaException]] = {
+_JAVA_EXCEPTION_MAP: dict[str, type[Exception]] = {
     "java.lang.SecurityException": JavaSecurityException,
     "java.lang.IllegalArgumentException": JavaIllegalArgumentException,
     "java.lang.NoSuchMethodException": JavaNoSuchMethodException,
@@ -1059,7 +1059,7 @@ class _LRUCache[V]:
 # Cache for reflection results to avoid repeated Java calls
 # Maps fully qualified name -> type ("class", "method", "field", "none")
 # Bounded to prevent memory bloat in long-running applications
-_reflect_cache = _LRUCache(_CACHE_MAX_SIZE)
+_reflect_cache: _LRUCache[str] = _LRUCache(_CACHE_MAX_SIZE)
 
 
 class _JVMNode:
@@ -1218,7 +1218,7 @@ class GatunClient:
         self._jvm = None
 
         # Callback registry: callback_id -> callable
-        self._callbacks: dict[int, callable] = {}
+        self._callbacks: dict[int, Callable[..., Any]] = {}
 
         # Request ID counter for cancellation support
         self._next_request_id = 1
@@ -1361,6 +1361,7 @@ class GatunClient:
 
         # Payload zone: from payload_offset to response_offset
         payload_size = self.response_offset - self.payload_offset
+        assert self.shm is not None, "Not connected"
         return PayloadArena.from_mmap(self.shm, self.payload_offset, payload_size)
 
     def _send_raw(self, data: bytes, wait_for_response=True, expects_response=True):
@@ -1699,12 +1700,13 @@ class GatunClient:
                 result.append(self._unpack_value(item.ValType(), item.Val()))
             return result
 
-    def _read_response(self, timeout: float | None = ...):
+    def _read_response(self, timeout: float | None = None, _use_default: bool = True):
         """Read and parse a response from the server.
 
         Args:
             timeout: Socket read timeout in seconds. None for no timeout.
                     Default uses self.socket_timeout (30 seconds by default).
+            _use_default: If True and timeout is None, use self.socket_timeout.
 
         Raises:
             SocketTimeoutError: If the socket read times out.
@@ -1712,8 +1714,8 @@ class GatunClient:
             ProtocolDesyncError: If the response size is invalid.
                                 Connection is closed before raising.
         """
-        # Resolve sentinel to instance default
-        if timeout is ...:
+        # Resolve to instance default if requested
+        if _use_default and timeout is None:
             timeout = self.socket_timeout
 
         while True:
@@ -1929,11 +1931,12 @@ class GatunClient:
             self._arrow_schema_cache[schema_hash] = schema
 
         # Get base address of payload zone in shared memory
+        assert self.shm is not None, "Not connected"
         base_address = ctypes.addressof(ctypes.c_char.from_buffer(self.shm))
         payload_base = base_address + self.payload_offset
 
         # Build PyArrow buffers from buffer descriptors
-        buffers = []
+        buffers: list[pa.Buffer | None] = []
         for i in range(arrow_batch.BuffersLength()):
             buf_desc = arrow_batch.Buffers(i)
             offset = buf_desc.Offset()
@@ -2532,7 +2535,7 @@ class GatunClient:
         return self._send_raw(builder.Output())
 
     def register_callback(
-        self, callback_fn: callable, interface_name: str
+        self, callback_fn: Callable[..., Any], interface_name: str
     ) -> "JavaObject":
         """Register a Python callable as a Java interface implementation.
 

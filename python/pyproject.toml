@@ -23,6 +23,7 @@ backend-path = ["."]
 [dependency-groups]
 dev = [
     "hypothesis>=6.100.0",
+    "mypy>=1.19.1",
     "py4j>=0.10.9.9",
     "pytest>=9.0.2",
     "pytest-asyncio>=0.25.0",
@@ -40,6 +41,18 @@ where = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "--cov=gatun --cov-report=term-missing --cov-report=html"
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+exclude = ["generated"]
+# Disable checks for attributes on Optional types - code handles at runtime
+disable_error_code = ["union-attr", "attr-defined"]
+
+[[tool.mypy.overrides]]
+module = ["flatbuffers.*", "pyarrow.*", "gatun.generated.*"]
+ignore_missing_imports = true
+ignore_errors = true
 
 [tool.coverage.run]
 source = ["src/gatun"]

@@ -37,7 +37,7 @@ class GatunConfig:
     connect_timeout: float = 5.0  # seconds
     startup_timeout: float = 5.0  # seconds
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Expand ~ in socket_path
         if self.socket_path:
             self.socket_path = os.path.expanduser(self.socket_path)
@@ -131,7 +131,7 @@ def get_config() -> GatunConfig:
     return _config
 
 
-def reset_config():
+def reset_config() -> None:
     """Reset the global configuration. Useful for testing."""
     global _config
     _config = None

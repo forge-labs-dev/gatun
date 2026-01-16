@@ -25,7 +25,7 @@ import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 import flatbuffers
 import pyarrow as pa
@@ -242,7 +242,7 @@ class AsyncGatunClient:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
-        self.memory_path = None  # Set during connect() from server handshake
+        self.memory_path: str | None = None  # Set during connect() from server handshake
         self.callback_timeout = (
             callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
         )
@@ -257,8 +257,8 @@ class AsyncGatunClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._lock = asyncio.Lock()
 
-        self.shm_file = None
-        self.shm = None
+        self.shm_file: Any = None  # BufferedRandom when connected
+        self.shm: mmap.mmap | None = None
 
         self.memory_size = 0
         self.command_offset = 0
@@ -266,7 +266,7 @@ class AsyncGatunClient:
         self.response_offset = 0
 
         self._jvm: Optional[AsyncJVMView] = None
-        self._callbacks: dict[int, callable] = {}
+        self._callbacks: dict[int, Callable[..., Any]] = {}
 
         # Reentrancy detection - tracks if we're inside a callback
         # Nested Java calls from callbacks would deadlock
@@ -1078,7 +1078,7 @@ class AsyncGatunClient:
         return await self._send_raw(builder.Output())
 
     async def register_callback(
-        self, callback_fn: callable, interface_name: str
+        self, callback_fn: Callable[..., Any], interface_name: str
     ) -> AsyncJavaObject:
         """Register a Python callable as a Java interface implementation.
 
@@ -1160,6 +1160,7 @@ class AsyncGatunClient:
             raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
 
         # Copy IPC data to shared memory payload zone using single memmove
+        assert self.shm is not None, "Not connected"
         payload_base = ctypes.addressof(ctypes.c_char.from_buffer(self.shm))
         payload_addr = payload_base + self.payload_offset
         ctypes.memmove(payload_addr, ipc_buffer.address, bytes_written)

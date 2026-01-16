@@ -23,9 +23,10 @@ Example:
 from __future__ import annotations
 
 import ctypes
+import io
 import mmap
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pyarrow as pa
 
@@ -53,6 +54,11 @@ class PayloadArena:
     # Arrow requires 64-byte alignment for SIMD operations
     ALIGNMENT = 64
 
+    # Instance attributes with optional types for from_mmap factory
+    path: Path | None
+    _file: "io.BufferedRandom | None"
+    _base_offset: int
+
     def __init__(self, path: Path | str, size: int):
         """Initialize the payload arena from an existing file.
 
@@ -65,6 +71,7 @@ class PayloadArena:
         self.path = Path(path).expanduser()
         self.size = size
         self.offset = 0  # Current allocation offset (bump pointer)
+        self._base_offset = 0  # No offset for direct file access
 
         # Open and map the shared memory file
         self._file = open(self.path, "r+b")
@@ -271,7 +278,7 @@ def _validate_supported_schema(schema: pa.Schema) -> None:
     Raises:
         UnsupportedArrowTypeError: If schema contains unsupported types
     """
-    unsupported = []
+    unsupported: list[str] = []
     _check_type_recursive(schema, unsupported)
 
     if unsupported:
