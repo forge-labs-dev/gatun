@@ -133,7 +133,9 @@ class TestMethodCalls:
 
         # String static methods
         assert client.jvm.java.lang.String.valueOf(123) == "123"
-        assert client.jvm.java.lang.String.format("Hello %s!", "World") == "Hello World!"
+        assert (
+            client.jvm.java.lang.String.format("Hello %s!", "World") == "Hello World!"
+        )
 
     def test_method_chaining(self, client):
         """Test method chaining (common in DataFrame API)."""
@@ -162,8 +164,8 @@ class TestMethodCalls:
         arr = client.jvm.java.util.ArrayList()
 
         # add(E e) vs add(int index, E element)
-        arr.add("first")           # add(E)
-        arr.add(0, "zeroth")       # add(int, E)
+        arr.add("first")  # add(E)
+        arr.add(0, "zeroth")  # add(int, E)
 
         assert arr.get(0) == "zeroth"
         assert arr.get(1) == "first"
@@ -265,6 +267,7 @@ class TestCallbackPatterns:
 
     def test_comparator_callback(self, client):
         """Test Comparator callback (used for custom sorting)."""
+
         def compare(a, b):
             # Reverse order comparator
             if a > b:
@@ -287,6 +290,7 @@ class TestCallbackPatterns:
 
     def test_callback_with_strings(self, client):
         """Test callback processing string arguments."""
+
         def string_compare(a, b):
             # Case-insensitive comparison
             a_lower = a.lower() if a else ""
@@ -373,6 +377,7 @@ class TestArrayOperations:
 
         # Object[] returns as JavaObject (can be manipulated via Array.set/get)
         from gatun.client import JavaObject
+
         assert isinstance(java_array, JavaObject)
 
         # Should work when passed back to Java
@@ -494,12 +499,14 @@ class TestBatchOperations:
 
     def test_create_objects_vectorized(self, client):
         """Test vectorized object creation."""
-        objects = client.create_objects([
-            ("java.util.ArrayList", ()),
-            ("java.util.HashMap", ()),
-            ("java.util.HashSet", ()),
-            ("java.util.LinkedList", ()),
-        ])
+        objects = client.create_objects(
+            [
+                ("java.util.ArrayList", ()),
+                ("java.util.HashMap", ()),
+                ("java.util.HashSet", ()),
+                ("java.util.LinkedList", ()),
+            ]
+        )
 
         assert len(objects) == 4
 
@@ -518,23 +525,26 @@ class TestBatchOperations:
         """Test vectorized method invocation."""
         arr = client.jvm.java.util.ArrayList()
 
-        results = client.invoke_methods(arr, [
-            ("add", ("a",)),
-            ("add", ("b",)),
-            ("add", ("c",)),
-            ("size", ()),
-            ("get", (0,)),
-            ("get", (1,)),
-            ("get", (2,)),
-        ])
+        results = client.invoke_methods(
+            arr,
+            [
+                ("add", ("a",)),
+                ("add", ("b",)),
+                ("add", ("c",)),
+                ("size", ()),
+                ("get", (0,)),
+                ("get", (1,)),
+                ("get", (2,)),
+            ],
+        )
 
         assert results[0] is True  # add returns true
         assert results[1] is True
         assert results[2] is True
-        assert results[3] == 3     # size
-        assert results[4] == "a"   # get(0)
-        assert results[5] == "b"   # get(1)
-        assert results[6] == "c"   # get(2)
+        assert results[3] == 3  # size
+        assert results[4] == "a"  # get(0)
+        assert results[5] == "b"  # get(1)
+        assert results[6] == "c"  # get(2)
 
 
 class TestEdgeCases:
@@ -652,8 +662,8 @@ class TestGatunNativeWorkarounds:
         # Explicit static method invocation
         result = client.invoke_static_method(
             "java.lang.Integer",  # Fully qualified class name
-            "parseInt",           # Method name
-            "42"                  # Arguments
+            "parseInt",  # Method name
+            "42",  # Arguments
         )
         assert result == 42
 
@@ -821,6 +831,7 @@ class TestGatunNativeWorkarounds:
 
         # sin, cos, etc. all expect doubles
         import math as pymath
+
         result = Math.sin(pymath.pi / 2)
         assert abs(result - 1.0) < 1e-10
 
@@ -913,11 +924,13 @@ class TestGatunNativeWorkarounds:
         For setup patterns, create objects first, then batch operations.
         """
         # First create objects (can use create_objects for single round-trip)
-        list1, list2, map1 = client.create_objects([
-            ("java.util.ArrayList", ()),
-            ("java.util.ArrayList", ()),
-            ("java.util.HashMap", ()),
-        ])
+        list1, list2, map1 = client.create_objects(
+            [
+                ("java.util.ArrayList", ()),
+                ("java.util.ArrayList", ()),
+                ("java.util.HashMap", ()),
+            ]
+        )
 
         # Then batch all the add/put operations
         with client.batch() as b:
@@ -940,13 +953,16 @@ class TestGatunNativeWorkarounds:
         sb = client.jvm.java.lang.StringBuilder()
 
         # Single round-trip for all method calls on same object
-        results = client.invoke_methods(sb, [
-            ("append", ("Hello",)),
-            ("append", (" ",)),
-            ("append", ("World",)),
-            ("length", ()),
-            ("toString", ()),
-        ])
+        results = client.invoke_methods(
+            sb,
+            [
+                ("append", ("Hello",)),
+                ("append", (" ",)),
+                ("append", ("World",)),
+                ("length", ()),
+                ("toString", ()),
+            ],
+        )
 
         # Results in order
         assert results[3] == 11  # length

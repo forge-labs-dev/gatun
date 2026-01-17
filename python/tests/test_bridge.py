@@ -6,7 +6,6 @@ These tests cover the BridgeAdapter protocol and GatunAdapter implementation.
 import pytest
 
 from gatun.bridge import (
-    BridgeAdapter,
     JavaException,
     JavaSecurityException,
     JavaIllegalArgumentException,
@@ -116,7 +115,9 @@ class TestJavaExceptions:
 
     def test_exception_map_values_are_correct_types(self):
         """Test JAVA_EXCEPTION_MAP values are correct exception classes."""
-        assert JAVA_EXCEPTION_MAP["java.lang.SecurityException"] is JavaSecurityException
+        assert (
+            JAVA_EXCEPTION_MAP["java.lang.SecurityException"] is JavaSecurityException
+        )
         assert (
             JAVA_EXCEPTION_MAP["java.lang.IllegalArgumentException"]
             is JavaIllegalArgumentException

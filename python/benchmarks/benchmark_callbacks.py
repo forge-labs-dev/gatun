@@ -79,10 +79,14 @@ def main():
         client.jvm.java.util.Collections.sort(arr, comparator)
 
     call_count[0] = 0
-    t_sort = benchmark("Sort 10 elements with Python comparator", sort_10_elements, iterations=50)
+    t_sort = benchmark(
+        "Sort 10 elements with Python comparator", sort_10_elements, iterations=50
+    )
     avg_callbacks_per_sort = call_count[0] / 50
     print(f"  Average callbacks per sort: {avg_callbacks_per_sort:.1f}")
-    print(f"  Estimated per-callback overhead: {t_sort / avg_callbacks_per_sort:.1f} μs")
+    print(
+        f"  Estimated per-callback overhead: {t_sort / avg_callbacks_per_sort:.1f} μs"
+    )
     print()
 
     # --- Comparison: Java vs Python comparator ---
@@ -101,7 +105,9 @@ def main():
             large_arr.add(100 - i)
         client.jvm.java.util.Collections.sort(large_arr)
 
-    t_java = benchmark("Sort 100 elements (Java comparator)", sort_java_comparator, iterations=30)
+    t_java = benchmark(
+        "Sort 100 elements (Java comparator)", sort_java_comparator, iterations=30
+    )
 
     # Use Python callback
     def sort_python_comparator():
@@ -111,7 +117,9 @@ def main():
         client.jvm.java.util.Collections.sort(large_arr, comparator)
 
     call_count[0] = 0
-    t_python = benchmark("Sort 100 elements (Python comparator)", sort_python_comparator, iterations=30)
+    t_python = benchmark(
+        "Sort 100 elements (Python comparator)", sort_python_comparator, iterations=30
+    )
     avg_callbacks = call_count[0] / 30
     print(f"  Average callbacks per sort: {avg_callbacks:.1f}")
     print(f"  Overhead ratio (Python/Java): {t_python / t_java:.1f}x")
@@ -137,7 +145,16 @@ def main():
 
     def sort_strings():
         str_arr.clear()
-        for s in ["zebra", "apple", "mango", "banana", "cherry", "date", "fig", "grape"]:
+        for s in [
+            "zebra",
+            "apple",
+            "mango",
+            "banana",
+            "cherry",
+            "date",
+            "fig",
+            "grape",
+        ]:
             str_arr.add(s)
         client.jvm.java.util.Collections.sort(str_arr, string_comparator)
 
@@ -187,7 +204,11 @@ def main():
         # removeIf uses Predicate
         numbers.removeIf(predicate)
 
-    benchmark("ArrayList.removeIf with Predicate (10 items)", filter_with_predicate, iterations=50)
+    benchmark(
+        "ArrayList.removeIf with Predicate (10 items)",
+        filter_with_predicate,
+        iterations=50,
+    )
     print()
 
     # --- Summary ---
@@ -201,7 +222,9 @@ def main():
     print("  - Callback overhead is dominated by IPC round-trip time")
     print()
     print("Recommendations:")
-    print("  - Use Java-side comparators when possible (Collections.sort without comparator)")
+    print(
+        "  - Use Java-side comparators when possible (Collections.sort without comparator)"
+    )
     print("  - Minimize callback invocations for performance-critical code")
     print("  - Consider doing comparison logic in Java and returning results to Python")
     print()

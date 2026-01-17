@@ -5,7 +5,7 @@ This module provides BridgeAdapter implementations for different backends.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from gatun.bridge import (
     BridgeAdapter,
@@ -50,7 +50,9 @@ class GatunAdapter(BridgeAdapter):
     def new(self, class_name: str, *args: Any) -> JVMRef:
         """Create a new JVM object."""
         try:
-            return self._client.create_object(class_name, *args)
+            assert self._client is not None, "Bridge is closed"
+            result: JVMRef = self._client.create_object(class_name, *args)
+            return result
         except GatunJavaException as e:
             raise self._convert_exception(e) from None
 
@@ -151,12 +153,15 @@ class GatunAdapter(BridgeAdapter):
 
             # Create the array using reflection
             # Use return_object_ref=True to get an ObjectRef instead of auto-converted array
-            return self._client.invoke_static_method(
-                "java.lang.reflect.Array",
-                "newInstance",
-                class_obj,
-                length,
-                return_object_ref=True,
+            return cast(
+                JVMRef,
+                self._client.invoke_static_method(
+                    "java.lang.reflect.Array",
+                    "newInstance",
+                    class_obj,
+                    length,
+                    return_object_ref=True,
+                ),
             )
         except GatunJavaException as e:
             raise self._convert_exception(e) from None
@@ -182,8 +187,11 @@ class GatunAdapter(BridgeAdapter):
     def array_length(self, array_ref: JVMRef) -> int:
         """Get length of JVM array."""
         try:
-            return self._client.invoke_static_method(
-                "java.lang.reflect.Array", "getLength", array_ref
+            return cast(
+                int,
+                self._client.invoke_static_method(
+                    "java.lang.reflect.Array", "getLength", array_ref
+                ),
             )
         except GatunJavaException as e:
             raise self._convert_exception(e) from None
@@ -237,4 +245,4 @@ class _GatunJVMViewAdapter(JVMView):
 
     def __call__(self, *args: Any) -> JVMRef:
         """Create instance of this class."""
-        return self._jvm_view(*args)  # type: ignore[operator]
+        return cast(JVMRef, self._jvm_view(*args))  # type: ignore[operator]

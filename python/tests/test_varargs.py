@@ -102,7 +102,6 @@ def test_varargs_packed_array(client):
     Java allows calling m(String... xs) as m(new String[]{"a","b"}).
     The array should be passed directly without being wrapped in another array.
     """
-    from gatun import JavaArray
 
     Arrays = client.jvm.java.util.Arrays
 
@@ -136,7 +135,6 @@ def test_varargs_packed_typed_array(client):
 
 def test_varargs_spread_vs_packed(client):
     """Test that spread and packed varargs give same result for asList."""
-    from gatun import JavaArray
 
     Arrays = client.jvm.java.util.Arrays
 
@@ -153,11 +151,11 @@ def test_varargs_spread_vs_packed(client):
 
     # When passed to asList, the array should be unpacked as varargs
     # Actually for asList, passing an array should treat elements as varargs
-    packed_result = Arrays.asList(java_array)
+    _ = Arrays.asList(java_array)
 
     # Both should give same logical result
     assert spread_result == ["a", "b", "c"]
-    # Note: packed_result might differ based on how Java handles it
+    # Note: packed result might differ based on how Java handles it
     # The key is that it doesn't error and produces a valid list
 
 

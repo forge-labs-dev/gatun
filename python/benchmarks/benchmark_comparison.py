@@ -1854,7 +1854,12 @@ def parse_args():
 
 
 def main():
-    global WARMUP_SECONDS, WARMUP_MIN_ITERATIONS, BENCHMARK_ITERATIONS, BULK_SIZE, NUM_TRIALS
+    global \
+        WARMUP_SECONDS, \
+        WARMUP_MIN_ITERATIONS, \
+        BENCHMARK_ITERATIONS, \
+        BULK_SIZE, \
+        NUM_TRIALS
 
     args = parse_args()
 
@@ -1944,7 +1949,9 @@ def main():
             if py4j_results.get("throughput_auto_true"):
                 py4j_throughput_auto_trials.append(py4j_results["throughput_auto_true"])
             if py4j_results.get("throughput_auto_false"):
-                py4j_throughput_no_auto_trials.append(py4j_results["throughput_auto_false"])
+                py4j_throughput_no_auto_trials.append(
+                    py4j_results["throughput_auto_false"]
+                )
     else:
         print("[Skipping Py4J benchmarks (--gatun-only)]")
 

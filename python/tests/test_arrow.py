@@ -957,7 +957,11 @@ def test_fixed_size_list_roundtrip(client):
 
     # Verify data
     assert received_table.column("id").to_pylist() == [1, 2, 3]
-    assert received_table.column("coords").to_pylist() == [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    assert received_table.column("coords").to_pylist() == [
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9],
+    ]
 
     arena.close()
 

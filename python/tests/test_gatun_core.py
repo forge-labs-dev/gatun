@@ -841,7 +841,9 @@ def test_constructor_cache_consistency(client):
     # Create many objects with the same constructor signature
     objects = []
     for i in range(50):
-        obj = client.create_object("java.util.ArrayList", i)  # ArrayList(int initialCapacity)
+        obj = client.create_object(
+            "java.util.ArrayList", i
+        )  # ArrayList(int initialCapacity)
         objects.append(obj)
 
     # Verify all objects work correctly

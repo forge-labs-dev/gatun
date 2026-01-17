@@ -25,7 +25,7 @@ import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar, cast
 
 import flatbuffers
 import pyarrow as pa
@@ -242,9 +242,13 @@ class AsyncGatunClient:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
-        self.memory_path: str | None = None  # Set during connect() from server handshake
-        self.callback_timeout = (
-            callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
+        self.memory_path: str | None = (
+            None  # Set during connect() from server handshake
+        )
+        self.callback_timeout: float | None = (
+            callback_timeout
+            if callback_timeout is not None
+            else DEFAULT_CALLBACK_TIMEOUT
         )
         self.socket_timeout = (
             socket_timeout if socket_timeout is not None else DEFAULT_SOCKET_TIMEOUT
@@ -547,7 +551,7 @@ class AsyncGatunClient:
         self._writer.write(struct.pack("<I", len(data)))
         await self._writer.drain()
 
-    def _unpack_value(self, val_type, val_table):
+    def _unpack_value(self, val_type: int, val_table: Any) -> Any:
         """Unpack a FlatBuffer Value union to a Python object."""
         from gatun.generated.org.gatun.protocol import (
             StringVal,
@@ -564,62 +568,62 @@ class AsyncGatunClient:
         if val_type == Value.Value.NullVal:
             return None
         elif val_type == Value.Value.StringVal:
-            union_obj = StringVal.StringVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V().decode("utf-8")
+            str_obj = StringVal.StringVal()
+            str_obj.Init(val_table.Bytes, val_table.Pos)
+            return str_obj.V().decode("utf-8")
         elif val_type == Value.Value.IntVal:
-            union_obj = IntVal.IntVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            int_obj = IntVal.IntVal()
+            int_obj.Init(val_table.Bytes, val_table.Pos)
+            return int_obj.V()
         elif val_type == Value.Value.DoubleVal:
-            union_obj = DoubleVal.DoubleVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            double_obj = DoubleVal.DoubleVal()
+            double_obj.Init(val_table.Bytes, val_table.Pos)
+            return double_obj.V()
         elif val_type == Value.Value.BoolVal:
-            union_obj = BoolVal.BoolVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            bool_obj = BoolVal.BoolVal()
+            bool_obj.Init(val_table.Bytes, val_table.Pos)
+            return bool_obj.V()
         elif val_type == Value.Value.ObjectRef:
-            union_obj = ObjectRef.ObjectRef()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return AsyncJavaObject(self, union_obj.Id())
+            ref_obj = ObjectRef.ObjectRef()
+            ref_obj.Init(val_table.Bytes, val_table.Pos)
+            return AsyncJavaObject(self, ref_obj.Id())
         elif val_type == Value.Value.ListVal:
-            union_obj = ListVal.ListVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            result = []
-            for i in range(union_obj.ItemsLength()):
-                item = union_obj.Items(i)
-                result.append(self._unpack_value(item.ValType(), item.Val()))
-            return result
+            list_obj = ListVal.ListVal()
+            list_obj.Init(val_table.Bytes, val_table.Pos)
+            list_result: list[Any] = []
+            for i in range(list_obj.ItemsLength()):
+                item = list_obj.Items(i)
+                list_result.append(self._unpack_value(item.ValType(), item.Val()))
+            return list_result
         elif val_type == Value.Value.MapVal:
-            union_obj = MapVal.MapVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            result = {}
-            for i in range(union_obj.EntriesLength()):
-                entry = union_obj.Entries(i)
+            map_obj = MapVal.MapVal()
+            map_obj.Init(val_table.Bytes, val_table.Pos)
+            map_result: dict[Any, Any] = {}
+            for i in range(map_obj.EntriesLength()):
+                entry = map_obj.Entries(i)
                 key = self._unpack_value(entry.KeyType(), entry.Key())
                 value = self._unpack_value(entry.ValueType(), entry.Value())
-                result[key] = value
-            return result
+                map_result[key] = value
+            return map_result
         elif val_type == Value.Value.ArrayVal:
-            union_obj = ArrayVal.ArrayVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            elem_type = union_obj.ElementType()
+            arr_obj = ArrayVal.ArrayVal()
+            arr_obj.Init(val_table.Bytes, val_table.Pos)
+            elem_type = arr_obj.ElementType()
 
             if elem_type == ElementType.ElementType.Int:
-                return list(union_obj.IntValuesAsNumpy())
+                return list(arr_obj.IntValuesAsNumpy())
             elif elem_type == ElementType.ElementType.Long:
-                return list(union_obj.LongValuesAsNumpy())
+                return list(arr_obj.LongValuesAsNumpy())
             elif elem_type == ElementType.ElementType.Double:
-                return list(union_obj.DoubleValuesAsNumpy())
+                return list(arr_obj.DoubleValuesAsNumpy())
             elif elem_type == ElementType.ElementType.Float:
-                return list(union_obj.DoubleValuesAsNumpy())
+                return list(arr_obj.DoubleValuesAsNumpy())
             elif elem_type == ElementType.ElementType.Byte:
-                return bytes(union_obj.ByteValuesAsNumpy())
+                return bytes(arr_obj.ByteValuesAsNumpy())
             elif elem_type == ElementType.ElementType.String:
                 return [
-                    union_obj.StringValues(i).decode("utf-8")
-                    for i in range(union_obj.StringValuesLength())
+                    arr_obj.StringValues(i).decode("utf-8")
+                    for i in range(arr_obj.StringValuesLength())
                 ]
             else:
                 return []
@@ -715,7 +719,7 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(AsyncJavaObject, await self._send_raw(builder.Output()))
 
     async def invoke_method(self, obj_id, method_name: str, *args):
         """Invoke a method on a Java object asynchronously."""
@@ -842,7 +846,7 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(bool, await self._send_raw(builder.Output()))
 
     async def get_metrics(self) -> str:
         """Get server metrics report asynchronously.
@@ -869,9 +873,9 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(str, await self._send_raw(builder.Output()))
 
-    async def get_fields(self, obj, field_names: list[str]) -> list:
+    async def get_fields(self, obj, field_names: list[str]) -> list[Any]:
         """Get multiple field values from a Java object in a single round-trip.
 
         This is more efficient than calling get_field() multiple times when
@@ -915,14 +919,14 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(list[Any], await self._send_raw(builder.Output()))
 
     async def invoke_methods(
         self,
         obj,
         calls: list[tuple[str, tuple]],
         return_object_refs: bool | list[bool] = False,
-    ) -> list:
+    ) -> list[Any]:
         """Invoke multiple methods on the same Java object in a single round-trip.
 
         This is more efficient than calling invoke_method() multiple times when
@@ -1005,7 +1009,7 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(list[Any], await self._send_raw(builder.Output()))
 
     async def create_objects(
         self, specs: list[tuple[str, tuple]]
@@ -1075,7 +1079,7 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return await self._send_raw(builder.Output())
+        return cast(list["AsyncJavaObject"], await self._send_raw(builder.Output()))
 
     async def register_callback(
         self, callback_fn: Callable[..., Any], interface_name: str
@@ -1093,15 +1097,17 @@ class AsyncGatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        result = await self._send_raw(builder.Output())
+        result: AsyncJavaObject = cast(
+            AsyncJavaObject, await self._send_raw(builder.Output())
+        )
 
-        if isinstance(result, AsyncJavaObject):
-            callback_id = result.object_id
-            self._callbacks[callback_id] = callback_fn
+        # Store the callback function
+        callback_id = result.object_id
+        self._callbacks[callback_id] = callback_fn
 
         return result
 
-    async def unregister_callback(self, callback_id: int):
+    async def unregister_callback(self, callback_id: int) -> None:
         """Unregister a previously registered callback."""
         self._callbacks.pop(callback_id, None)
 

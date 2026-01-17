@@ -56,6 +56,7 @@ def _install_signal_handlers():
         except (OSError, ValueError):
             pass  # Can't set signal handler (e.g., not main thread)
 
+
 # JVM Flags required for Apache Arrow & Netty (Java 22+)
 # Also includes flags needed for Spark's Kryo serialization
 DEFAULT_JVM_FLAGS = [

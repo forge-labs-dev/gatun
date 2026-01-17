@@ -41,7 +41,9 @@ def benchmark(name: str, func, iterations: int = 100, warmup: int = 20):
     return avg
 
 
-def benchmark_throughput(name: str, func, data_size_bytes: int, iterations: int = 50, warmup: int = 10):
+def benchmark_throughput(
+    name: str, func, data_size_bytes: int, iterations: int = 50, warmup: int = 10
+):
     """Run a throughput benchmark and print MB/s."""
     # Warmup
     for _ in range(warmup):
@@ -57,7 +59,7 @@ def benchmark_throughput(name: str, func, data_size_bytes: int, iterations: int 
 
     avg_time = mean(times)
     throughput_mbps = (data_size_bytes / (1024 * 1024)) / avg_time
-    print(f"{name:50s}: {throughput_mbps:8.1f} MB/s (avg {avg_time*1000:.2f} ms)")
+    print(f"{name:50s}: {throughput_mbps:8.1f} MB/s (avg {avg_time * 1000:.2f} ms)")
     return throughput_mbps
 
 
@@ -74,11 +76,13 @@ def main():
     print()
 
     # 100 rows - typical small batch
-    small_table = pa.table({
-        "id": pa.array(range(100), type=pa.int64()),
-        "name": pa.array([f"item_{i}" for i in range(100)]),
-        "value": pa.array([float(i) * 1.5 for i in range(100)]),
-    })
+    small_table = pa.table(
+        {
+            "id": pa.array(range(100), type=pa.int64()),
+            "name": pa.array([f"item_{i}" for i in range(100)]),
+            "value": pa.array([float(i) * 1.5 for i in range(100)]),
+        }
+    )
     small_size = small_table.nbytes
 
     # Equivalent Python data
@@ -100,7 +104,7 @@ def main():
         hm = client.create_object("java.util.HashMap", small_dict)
         hm.size()
 
-    t_dict = benchmark("Dict[str,str] (100 entries) via HashMap", transfer_dict)
+    _ = benchmark("Dict[str,str] (100 entries) via HashMap", transfer_dict)
 
     # send_arrow_table (IPC format)
     def send_ipc():
@@ -129,12 +133,14 @@ def main():
     print()
 
     for num_rows in [1000, 5000, 10000]:
-        medium_table = pa.table({
-            "id": pa.array(range(num_rows), type=pa.int64()),
-            "name": pa.array([f"item_{i}" for i in range(num_rows)]),
-            "value": pa.array([float(i) * 1.5 for i in range(num_rows)]),
-            "flag": pa.array([i % 2 == 0 for i in range(num_rows)]),
-        })
+        medium_table = pa.table(
+            {
+                "id": pa.array(range(num_rows), type=pa.int64()),
+                "name": pa.array([f"item_{i}" for i in range(num_rows)]),
+                "value": pa.array([float(i) * 1.5 for i in range(num_rows)]),
+                "flag": pa.array([i % 2 == 0 for i in range(num_rows)]),
+            }
+        )
         data_size = medium_table.nbytes
 
         print(f"Table: {num_rows:,} rows, 4 columns, {data_size:,} bytes")
@@ -146,8 +152,14 @@ def main():
             arena.reset()
             client.send_arrow_buffers(t, arena, schema_cache)
 
-        t_ipc_m = benchmark(f"  IPC format ({num_rows:,} rows)", send_ipc_medium, iterations=50)
-        t_buf_m = benchmark(f"  Zero-copy buffers ({num_rows:,} rows)", send_buffers_medium, iterations=50)
+        t_ipc_m = benchmark(
+            f"  IPC format ({num_rows:,} rows)", send_ipc_medium, iterations=50
+        )
+        t_buf_m = benchmark(
+            f"  Zero-copy buffers ({num_rows:,} rows)",
+            send_buffers_medium,
+            iterations=50,
+        )
         print(f"    Speedup: {t_ipc_m / t_buf_m:.2f}x")
         print()
 
@@ -156,13 +168,17 @@ def main():
     print()
 
     for num_rows in [50000, 100000, 500000]:
-        large_table = pa.table({
-            "id": pa.array(range(num_rows), type=pa.int64()),
-            "value": pa.array([float(i) for i in range(num_rows)]),
-        })
+        large_table = pa.table(
+            {
+                "id": pa.array(range(num_rows), type=pa.int64()),
+                "value": pa.array([float(i) for i in range(num_rows)]),
+            }
+        )
         data_size = large_table.nbytes
 
-        print(f"Table: {num_rows:,} rows, 2 columns, {data_size:,} bytes ({data_size/(1024*1024):.1f} MB)")
+        print(
+            f"Table: {num_rows:,} rows, 2 columns, {data_size:,} bytes ({data_size / (1024 * 1024):.1f} MB)"
+        )
 
         def send_ipc_large(t=large_table):
             client.send_arrow_table(t)
@@ -173,8 +189,18 @@ def main():
 
         # Fewer iterations for large data
         iters = 20 if num_rows <= 100000 else 10
-        benchmark_throughput(f"  IPC format ({num_rows:,} rows)", send_ipc_large, data_size, iterations=iters)
-        benchmark_throughput(f"  Zero-copy buffers ({num_rows:,} rows)", send_buffers_large, data_size, iterations=iters)
+        benchmark_throughput(
+            f"  IPC format ({num_rows:,} rows)",
+            send_ipc_large,
+            data_size,
+            iterations=iters,
+        )
+        benchmark_throughput(
+            f"  Zero-copy buffers ({num_rows:,} rows)",
+            send_buffers_large,
+            data_size,
+            iterations=iters,
+        )
         print()
 
     # --- PyArrow Array transfer (primitives) ---
@@ -189,13 +215,19 @@ def main():
 
         def transfer_int_array(arr=int_array):
             # Pass pa.Array as argument - converts to Java int[]
-            result = client.jvm.java.util.Arrays.toString(arr)
+            _ = client.jvm.java.util.Arrays.toString(arr)
 
         def transfer_double_array(arr=double_array):
-            result = client.jvm.java.util.Arrays.toString(arr)
+            _ = client.jvm.java.util.Arrays.toString(arr)
 
-        benchmark(f"pa.Array[int32] ({size:,}) -> int[]", transfer_int_array, iterations=50)
-        benchmark(f"pa.Array[float64] ({size:,}) -> double[]", transfer_double_array, iterations=50)
+        benchmark(
+            f"pa.Array[int32] ({size:,}) -> int[]", transfer_int_array, iterations=50
+        )
+        benchmark(
+            f"pa.Array[float64] ({size:,}) -> double[]",
+            transfer_double_array,
+            iterations=50,
+        )
         print()
 
     # --- String data (more expensive) ---
@@ -204,30 +236,38 @@ def main():
 
     for num_rows in [1000, 10000]:
         # Short strings
-        short_str_table = pa.table({
-            "short": pa.array([f"s{i}" for i in range(num_rows)]),
-        })
+        short_str_table = pa.table(
+            {
+                "short": pa.array([f"s{i}" for i in range(num_rows)]),
+            }
+        )
 
         # Long strings (100 chars each)
-        long_str_table = pa.table({
-            "long": pa.array(["x" * 100 + str(i) for i in range(num_rows)]),
-        })
+        long_str_table = pa.table(
+            {
+                "long": pa.array(["x" * 100 + str(i) for i in range(num_rows)]),
+            }
+        )
 
-        print(f"Short strings ({num_rows:,} rows, ~3 chars each): {short_str_table.nbytes:,} bytes")
+        print(
+            f"Short strings ({num_rows:,} rows, ~3 chars each): {short_str_table.nbytes:,} bytes"
+        )
 
         def send_short(t=short_str_table):
             arena.reset()
             client.send_arrow_buffers(t, arena, schema_cache)
 
-        benchmark(f"  Zero-copy buffers", send_short, iterations=50)
+        benchmark("  Zero-copy buffers", send_short, iterations=50)
 
-        print(f"Long strings ({num_rows:,} rows, ~100 chars each): {long_str_table.nbytes:,} bytes")
+        print(
+            f"Long strings ({num_rows:,} rows, ~100 chars each): {long_str_table.nbytes:,} bytes"
+        )
 
         def send_long(t=long_str_table):
             arena.reset()
             client.send_arrow_buffers(t, arena, schema_cache)
 
-        benchmark(f"  Zero-copy buffers", send_long, iterations=50)
+        benchmark("  Zero-copy buffers", send_long, iterations=50)
         print()
 
     # --- Batch API comparison ---
@@ -246,7 +286,9 @@ def main():
             for i in range(num_items):
                 b.call(arr, "add", i)
 
-    t_batch = benchmark(f"Batch API: {num_items} add() calls", batch_insert, iterations=30)
+    t_batch = benchmark(
+        f"Batch API: {num_items} add() calls", batch_insert, iterations=30
+    )
 
     # Arrow: send all at once
     items_table = pa.table({"values": pa.array(range(num_items), type=pa.int64())})
@@ -255,7 +297,9 @@ def main():
         arena.reset()
         client.send_arrow_buffers(items_table, arena, schema_cache)
 
-    t_arrow = benchmark(f"Arrow: send {num_items} values at once", arrow_insert, iterations=30)
+    t_arrow = benchmark(
+        f"Arrow: send {num_items} values at once", arrow_insert, iterations=30
+    )
 
     print()
     print(f"  Arrow vs Batch speedup: {t_batch / t_arrow:.1f}x")
@@ -268,7 +312,9 @@ def main():
     print()
     print("Key findings:")
     print("  - Zero-copy buffers are faster than IPC for all sizes")
-    print("  - Arrow transfer is significantly faster than list/dict for structured data")
+    print(
+        "  - Arrow transfer is significantly faster than list/dict for structured data"
+    )
     print("  - Use send_arrow_buffers() with get_payload_arena() for best performance")
     print("  - For single values or small objects, regular API is fine")
     print()

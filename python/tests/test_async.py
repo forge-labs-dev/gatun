@@ -427,7 +427,9 @@ class TestAsyncObjectLifecycle:
         def compare(a, b):
             return 0
 
-        comparator = await async_client.register_callback(compare, "java.util.Comparator")
+        comparator = await async_client.register_callback(
+            compare, "java.util.Comparator"
+        )
         callback_id = comparator.object_id
 
         # Unregister should work
@@ -455,9 +457,11 @@ class TestAsyncArrowTransfer:
         import pyarrow as pa
 
         # Create a table with more data
-        table = pa.table({
-            "id": list(range(1000)),
-            "value": [f"item_{i}" for i in range(1000)],
-        })
+        table = pa.table(
+            {
+                "id": list(range(1000)),
+                "value": [f"item_{i}" for i in range(1000)],
+            }
+        )
         result = await async_client.send_arrow_table(table)
         assert "1000 rows" in result

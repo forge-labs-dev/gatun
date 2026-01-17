@@ -1,6 +1,5 @@
 """Tests for connect() and aconnect() convenience functions."""
 
-import asyncio
 import pytest
 
 from gatun import connect, aconnect, GatunClient

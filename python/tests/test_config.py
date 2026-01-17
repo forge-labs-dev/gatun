@@ -8,7 +8,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from gatun.config import (
     GatunConfig,
@@ -90,7 +89,7 @@ class TestFindPyprojectToml:
         """Test returns None when no pyproject.toml exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmppath = Path(tmpdir)
-            result = find_pyproject_toml(tmppath)
+            _ = find_pyproject_toml(tmppath)
             # Should return None or find a pyproject.toml further up
             # (may find the repo's pyproject.toml if run from within the repo)
             # Just verify it doesn't crash
@@ -213,7 +212,7 @@ class TestGetConfigAndReset:
     def test_reset_config_clears_cache(self):
         """Test reset_config clears the cached config."""
         reset_config()
-        config1 = get_config()
+        _ = get_config()
         reset_config()
         config2 = get_config()
         # After reset, get_config creates a new instance

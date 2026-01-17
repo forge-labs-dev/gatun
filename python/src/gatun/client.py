@@ -9,7 +9,7 @@ import os
 import socket
 import struct
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 import weakref
 
 import flatbuffers
@@ -78,6 +78,7 @@ def _create_typed_vector(builder, data: bytes, itemsize: int, num_elements: int)
 
     builder.vectorNumElems = num_elements
     return builder.EndVector()
+
 
 # Protocol version - must match the server version
 # Version 2: Per-client shared memory (handshake includes SHM path)
@@ -532,12 +533,12 @@ class ArrowTableView:
     @property
     def num_rows(self) -> int:
         """Get row count (safe, doesn't access buffer data)."""
-        return self._table.num_rows
+        return cast(int, self._table.num_rows)
 
     @property
     def num_columns(self) -> int:
         """Get column count (safe, doesn't access buffer data)."""
-        return self._table.num_columns
+        return cast(int, self._table.num_columns)
 
     @property
     def schema(self) -> pa.Schema:
@@ -547,7 +548,7 @@ class ArrowTableView:
     @property
     def column_names(self) -> list[str]:
         """Get column names (safe, doesn't access buffer data)."""
-        return self._table.column_names
+        return cast(list[str], self._table.column_names)
 
     def column(self, name: str):
         """Get a column by name."""
@@ -1193,9 +1194,13 @@ class GatunClient:
             socket_path = os.path.expanduser("~/gatun.sock")
 
         self.socket_path = socket_path
-        self.memory_path = None  # Set during connect() from server handshake
+        self.memory_path: str | None = (
+            None  # Set during connect() from server handshake
+        )
         self.callback_timeout = (
-            callback_timeout if callback_timeout is not None else DEFAULT_CALLBACK_TIMEOUT
+            callback_timeout
+            if callback_timeout is not None
+            else DEFAULT_CALLBACK_TIMEOUT
         )
         self.socket_timeout = (
             socket_timeout if socket_timeout is not None else DEFAULT_SOCKET_TIMEOUT
@@ -1204,9 +1209,11 @@ class GatunClient:
             handshake_timeout if handshake_timeout is not None else HANDSHAKE_TIMEOUT
         )
 
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.shm_file = None
-        self.shm = None
+        self.sock: socket.socket | None = socket.socket(
+            socket.AF_UNIX, socket.SOCK_STREAM
+        )
+        self.shm_file: Any = None  # BufferedRandom when connected
+        self.shm: mmap.mmap | None = None
 
         # These are set during connect()
         self.memory_size = 0
@@ -1215,7 +1222,7 @@ class GatunClient:
         self.response_offset = 0
 
         # JVM view for package-style access
-        self._jvm = None
+        self._jvm: JVMView | None = None
 
         # Callback registry: callback_id -> callable
         self._callbacks: dict[int, Callable[..., Any]] = {}
@@ -1264,7 +1271,7 @@ class GatunClient:
         if encoded is None:
             encoded = s.encode("utf-8")
             self._string_cache.set(s, encoded)
-        return builder.CreateString(encoded)
+        return cast(int, builder.CreateString(encoded))
 
     def _get_builder(self, large: bool = False) -> flatbuffers.Builder:
         """Get a reusable FlatBuffers builder.
@@ -1301,7 +1308,9 @@ class GatunClient:
             # Format: [4 bytes: version] [4 bytes: arena_epoch] [8 bytes: memory size]
             #         [2 bytes: shm_path_length] [N bytes: shm_path (UTF-8)]
             # Use timeout to prevent indefinite hang if server doesn't respond
-            handshake_header = _recv_exactly(self.sock, 18, timeout=self.handshake_timeout)
+            handshake_header = _recv_exactly(
+                self.sock, 18, timeout=self.handshake_timeout
+            )
             server_version, arena_epoch, self.memory_size, shm_path_len = struct.unpack(
                 "<IIQH", handshake_header
             )
@@ -1314,7 +1323,9 @@ class GatunClient:
                 )
 
             # Read SHM path
-            shm_path_bytes = _recv_exactly(self.sock, shm_path_len, timeout=self.handshake_timeout)
+            shm_path_bytes = _recv_exactly(
+                self.sock, shm_path_len, timeout=self.handshake_timeout
+            )
             self.memory_path = shm_path_bytes.decode("utf-8")
 
             # Synchronize arena epoch with server
@@ -1325,6 +1336,7 @@ class GatunClient:
             self.response_offset = self.memory_size - 65536
 
             # 3. Map Memory (session-specific SHM file created by server)
+            assert self.memory_path is not None, "Memory path not set"
             self.shm_file = open(self.memory_path, "r+b")
             self.shm = mmap.mmap(self.shm_file.fileno(), self.memory_size)
             logger.info(
@@ -1536,9 +1548,7 @@ class GatunClient:
                         # Truncate long error messages for logging
                         if len(error_text) > 200:
                             error_text = error_text[:200] + "..."
-                        logger.debug(
-                            "Discarded error during drain: %s", error_text
-                        )
+                        logger.debug("Discarded error during drain: %s", error_text)
 
                 self._pending_responses -= 1
                 drained += 1
@@ -1553,9 +1563,7 @@ class GatunClient:
                 # Socket error during drain (e.g., from _handle_callback sending response,
                 # or "Socket closed unexpectedly" from _recv_exactly)
                 self._mark_dead()
-                raise ProtocolDesyncError(
-                    f"Socket error during drain: {e}"
-                )
+                raise ProtocolDesyncError(f"Socket error during drain: {e}")
 
         if self._pending_responses > 0:
             # Hit max_drain limit - likely a bug or desync
@@ -1574,58 +1582,58 @@ class GatunClient:
                 errors_discarded,
             )
 
-    def _unpack_value(self, val_type, val_table):
+    def _unpack_value(self, val_type: int, val_table: Any) -> Any:
         """Unpack a FlatBuffer Value union to a Python object."""
         if val_type == Value.Value.NullVal:
             return None
         elif val_type == Value.Value.StringVal:
-            union_obj = StringVal.StringVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V().decode("utf-8")
+            str_obj = StringVal.StringVal()
+            str_obj.Init(val_table.Bytes, val_table.Pos)
+            return str_obj.V().decode("utf-8")
         elif val_type == Value.Value.IntVal:
-            union_obj = IntVal.IntVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            int_obj = IntVal.IntVal()
+            int_obj.Init(val_table.Bytes, val_table.Pos)
+            return int_obj.V()
         elif val_type == Value.Value.DoubleVal:
-            union_obj = DoubleVal.DoubleVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            double_obj = DoubleVal.DoubleVal()
+            double_obj.Init(val_table.Bytes, val_table.Pos)
+            return double_obj.V()
         elif val_type == Value.Value.BoolVal:
-            union_obj = BoolVal.BoolVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return union_obj.V()
+            bool_obj = BoolVal.BoolVal()
+            bool_obj.Init(val_table.Bytes, val_table.Pos)
+            return bool_obj.V()
         elif val_type == Value.Value.CharVal:
-            union_obj = CharVal.CharVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return chr(union_obj.V())  # Convert to Python str (single char)
+            char_obj = CharVal.CharVal()
+            char_obj.Init(val_table.Bytes, val_table.Pos)
+            return chr(char_obj.V())  # Convert to Python str (single char)
         elif val_type == Value.Value.ObjectRef:
-            union_obj = ObjectRef.ObjectRef()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return JavaObject(self, union_obj.Id())
+            ref_obj = ObjectRef.ObjectRef()
+            ref_obj.Init(val_table.Bytes, val_table.Pos)
+            return JavaObject(self, ref_obj.Id())
         elif val_type == Value.Value.ListVal:
-            union_obj = ListVal.ListVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            result = JavaList()
-            for i in range(union_obj.ItemsLength()):
-                item = union_obj.Items(i)
-                result.append(self._unpack_value(item.ValType(), item.Val()))
-            return result
+            list_obj = ListVal.ListVal()
+            list_obj.Init(val_table.Bytes, val_table.Pos)
+            list_result = JavaList()
+            for i in range(list_obj.ItemsLength()):
+                item = list_obj.Items(i)
+                list_result.append(self._unpack_value(item.ValType(), item.Val()))
+            return list_result
         elif val_type == Value.Value.MapVal:
-            union_obj = MapVal.MapVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            result = {}
-            for i in range(union_obj.EntriesLength()):
-                entry = union_obj.Entries(i)
+            map_obj = MapVal.MapVal()
+            map_obj.Init(val_table.Bytes, val_table.Pos)
+            map_result: dict[Any, Any] = {}
+            for i in range(map_obj.EntriesLength()):
+                entry = map_obj.Entries(i)
                 key_arg = entry.Key()
                 val_arg = entry.Value()
                 key = self._unpack_value(key_arg.ValType(), key_arg.Val())
                 val = self._unpack_value(val_arg.ValType(), val_arg.Val())
-                result[key] = val
-            return result
+                map_result[key] = val
+            return map_result
         elif val_type == Value.Value.ArrayVal:
-            union_obj = ArrayVal.ArrayVal()
-            union_obj.Init(val_table.Bytes, val_table.Pos)
-            return self._unpack_array(union_obj)
+            arr_obj = ArrayVal.ArrayVal()
+            arr_obj.Init(val_table.Bytes, val_table.Pos)
+            return self._unpack_array(arr_obj)
 
         return None
 
@@ -1840,9 +1848,13 @@ class GatunClient:
                 self._send_callback_response(callback_id, result, False, None)
             else:
                 # Execute with timeout using a thread
-                result_holder = {"result": None, "error": None, "done": False}
+                result_holder: dict[str, Any] = {
+                    "result": None,
+                    "error": None,
+                    "done": False,
+                }
 
-                def run_callback():
+                def run_callback() -> None:
                     try:
                         result_holder["result"] = callback_fn(*args)
                     except Exception as e:
@@ -1865,7 +1877,7 @@ class GatunClient:
                     )
                     return
                 elif result_holder["error"] is not None:
-                    raise result_holder["error"]
+                    raise cast(Exception, result_holder["error"])
                 else:
                     self._send_callback_response(
                         callback_id, result_holder["result"], False, None
@@ -1924,7 +1936,9 @@ class GatunClient:
                 arrow_batch._tab.Offset(_ARROW_BATCH_SCHEMA_BYTES_OFFSET)
             )
             start = arrow_batch._tab.Vector(o)
-            schema_bytes = bytes(arrow_batch._tab.Bytes[start : start + schema_bytes_len])
+            schema_bytes = bytes(
+                arrow_batch._tab.Bytes[start : start + schema_bytes_len]
+            )
             schema = deserialize_schema(schema_bytes)
             # Validate schema doesn't contain unsupported types (e.g., dictionary)
             _validate_supported_schema(schema)
@@ -2260,7 +2274,7 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(str, self._send_raw(builder.Output()))
 
     def is_instance_of(self, obj, class_name: str) -> bool:
         """Check if a Java object is an instance of a class.
@@ -2296,7 +2310,7 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(bool, self._send_raw(builder.Output()))
 
     def get_metrics(self) -> str:
         """Get server metrics report.
@@ -2323,9 +2337,9 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(str, self._send_raw(builder.Output()))
 
-    def get_fields(self, obj, field_names: list[str]) -> list:
+    def get_fields(self, obj, field_names: list[str]) -> list[Any]:
         """Get multiple field values from a Java object in a single round-trip.
 
         This is more efficient than calling get_field() multiple times when
@@ -2371,14 +2385,14 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(list[Any], self._send_raw(builder.Output()))
 
     def invoke_methods(
         self,
         obj,
         calls: list[tuple[str, tuple]],
         return_object_refs: bool | list[bool] = False,
-    ) -> list:
+    ) -> list[Any]:
         """Invoke multiple methods on the same Java object in a single round-trip.
 
         This is more efficient than calling invoke_method() multiple times when
@@ -2463,7 +2477,7 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(list[Any], self._send_raw(builder.Output()))
 
     def create_objects(self, specs: list[tuple[str, tuple]]) -> list["JavaObject"]:
         """Create multiple Java objects in a single round-trip.
@@ -2532,7 +2546,7 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(list["JavaObject"], self._send_raw(builder.Output()))
 
     def register_callback(
         self, callback_fn: Callable[..., Any], interface_name: str
@@ -2574,18 +2588,17 @@ class GatunClient:
         builder.Finish(cmd)
 
         # Send command and get back the proxy object
-        result = self._send_raw(builder.Output())
+        result: JavaObject = cast("JavaObject", self._send_raw(builder.Output()))
 
-        if isinstance(result, JavaObject):
-            # Get the callback_id from the response - it's stored as the object_id
-            # We need to also store our callback function
-            # The Java side assigns callback_id = object_id for simplicity
-            callback_id = result.object_id
-            self._callbacks[callback_id] = callback_fn
+        # Get the callback_id from the response - it's stored as the object_id
+        # We need to also store our callback function
+        # The Java side assigns callback_id = object_id for simplicity
+        callback_id = result.object_id
+        self._callbacks[callback_id] = callback_fn
 
         return result
 
-    def unregister_callback(self, callback_id: int):
+    def unregister_callback(self, callback_id: int) -> None:
         """Unregister a previously registered callback.
 
         Args:
@@ -2726,6 +2739,7 @@ class GatunClient:
             if isinstance(value, datetime.datetime):
                 # Convert datetime to java.sql.Timestamp
                 # First calculate epoch milliseconds
+                epoch_secs: float
                 if value.tzinfo is not None:
                     # Timezone-aware datetime
                     epoch_secs = calendar.timegm(value.utctimetuple())
@@ -3067,6 +3081,7 @@ class GatunClient:
             raise PayloadTooLargeError(bytes_written, max_payload_size, "Arrow batch")
 
         # Copy IPC data to shared memory payload zone using single memmove
+        assert self.shm is not None, "Not connected"
         payload_base = ctypes.addressof(ctypes.c_char.from_buffer(self.shm))
         payload_addr = payload_base + self.payload_offset
         ctypes.memmove(payload_addr, ipc_buffer.address, bytes_written)
@@ -3310,7 +3325,7 @@ class GatunClient:
         cmd = Cmd.CommandEnd(builder)
         builder.Finish(cmd)
 
-        return self._send_raw(builder.Output())
+        return cast(ArrowTableView, self._send_raw(builder.Output()))
 
     def _get_request_id(self) -> int:
         """Get the next request ID for cancellation support."""
@@ -3668,7 +3683,9 @@ class BatchContext:
 
         # Read response with timeout to prevent indefinite hang
         try:
-            sz_data = _recv_exactly(self._client.sock, 4, timeout=self._client.socket_timeout)
+            sz_data = _recv_exactly(
+                self._client.sock, 4, timeout=self._client.socket_timeout
+            )
         except SocketTimeoutError:
             self._client._mark_dead()
             raise

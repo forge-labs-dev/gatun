@@ -26,7 +26,7 @@ import ctypes
 import io
 import mmap
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import pyarrow as pa
 
@@ -57,6 +57,7 @@ class PayloadArena:
     # Instance attributes with optional types for from_mmap factory
     path: Path | None
     _file: "io.BufferedRandom | None"
+    _mmap: mmap.mmap | None
     _base_offset: int
 
     def __init__(self, path: Path | str, size: int):
@@ -339,7 +340,7 @@ def _get_own_buffers(array: pa.Array) -> list[pa.Buffer | None]:
     - SparseUnion: [type_ids]
     """
     arr_type = array.type
-    all_buffers = array.buffers()
+    all_buffers: list[pa.Buffer | None] = array.buffers()
 
     # For nested types, we only want the parent's buffers, not children's
     if isinstance(arr_type, (pa.ListType, pa.LargeListType)):
@@ -558,7 +559,8 @@ def compute_schema_hash(schema: pa.Schema) -> int:
 
 def serialize_schema(schema: pa.Schema) -> bytes:
     """Serialize an Arrow schema for transmission."""
-    return schema.serialize().to_pybytes()
+    result: bytes = schema.serialize().to_pybytes()
+    return result
 
 
 def deserialize_schema(schema_bytes: bytes) -> pa.Schema:
