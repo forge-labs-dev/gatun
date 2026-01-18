@@ -44,9 +44,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        working-directory: python
         run: uv sync
 
       - name: Run tests
-        working-directory: python
         run: uv run pytest -v
