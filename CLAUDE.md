@@ -12,7 +12,7 @@ Gatun is a high-performance Python-to-Java bridge using shared memory (mmap) and
 
 ### Components
 - **gatun-core** (Java): Server that manages Java objects and handles RPC requests
-- **python/src/gatun** (Python): Client library with sync/async clients, launcher, and config
+- **src/gatun** (Python): Client library with sync/async clients, launcher, and config
 - **schemas/commands.fbs**: FlatBuffers schema defining the wire protocol
 
 ### Communication Flow
@@ -37,7 +37,7 @@ Format: `[4 bytes: version][4 bytes: arena_epoch][8 bytes: memory size][2 bytes:
 
 ## Build Commands
 
-### Python (from python/ directory)
+### Python (from repository root)
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk uv sync    # Install deps and build JAR
 JAVA_HOME=/opt/homebrew/opt/openjdk uv sync --reinstall-package gatun  # Rebuild after schema/Java changes
@@ -65,9 +65,9 @@ Coverage reports are generated automatically:
 
 FlatBuffers code is generated from `schemas/commands.fbs`:
 - Java: `gatun-core/src/main/java/org/gatun/protocol/`
-- Python: `python/src/gatun/generated/org/gatun/protocol/`
+- Python: `src/gatun/generated/org/gatun/protocol/`
 
-The build backend (`python/gatun_build_backend.py`) automatically regenerates FlatBuffers code when the schema changes.
+The build backend (`gatun_build_backend.py`) automatically regenerates FlatBuffers code when the schema changes.
 
 ## Key Implementation Details
 

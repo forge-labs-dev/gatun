@@ -18,8 +18,8 @@ repos:
     rev: v1.15.0
     hooks:
       - id: mypy
-        files: ^python/src/
-        args: [--config-file=python/pyproject.toml]
+        files: ^src/
+        args: [--config-file=pyproject.toml]
         additional_dependencies:
           - flatbuffers>=23.5.26
           - pyarrow>=22.0.0

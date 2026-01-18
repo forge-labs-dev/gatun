@@ -18,8 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("gatun.backend")
 
 # --- Config ---
-BACKEND_DIR = Path(__file__).parent.resolve()
-PROJECT_ROOT = BACKEND_DIR.parent
+PROJECT_ROOT = Path(__file__).parent.resolve()
 # Use gradlew.bat on Windows, gradlew on Unix
 if platform.system() == "Windows":
     GRADLEW = PROJECT_ROOT / "gradlew.bat"
@@ -31,11 +30,11 @@ BUILD_SCRIPT = PROJECT_ROOT / "gatun-core" / "build.gradle.kts"
 # FlatBuffers schema and output directories
 SCHEMA_FILE = PROJECT_ROOT / "schemas" / "commands.fbs"
 JAVA_GEN_DIR = PROJECT_ROOT / "gatun-core" / "src" / "main" / "java"
-PYTHON_GEN_DIR = BACKEND_DIR / "src" / "gatun" / "generated"
+PYTHON_GEN_DIR = PROJECT_ROOT / "src" / "gatun" / "generated"
 
 # Location of the built 'Fat JAR' from Gradle
 JAR_SOURCE = PROJECT_ROOT / "gatun-core" / "build" / "libs" / "gatun-server-all.jar"
-JAR_DEST_DIR = BACKEND_DIR / "src" / "gatun" / "jars"
+JAR_DEST_DIR = PROJECT_ROOT / "src" / "gatun" / "jars"
 JAR_DEST_FILE = JAR_DEST_DIR / "gatun-server-all.jar"
 
 
