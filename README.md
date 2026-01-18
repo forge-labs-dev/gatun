@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Gatun Logo" width="200">
+  <img src="assets/logo.png" alt="Gatun Logo" width="400">
 </p>
 
 # Gatun
