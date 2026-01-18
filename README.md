@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Gatun Logo" width="200">
+</p>
+
 # Gatun
 
 > **⚠️ Alpha Status**: This project is experimental and under active development. APIs may change without notice. Not recommended for production use.
