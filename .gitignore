@@ -54,3 +54,7 @@ htmlcov/
 # FlatBuffers generated code
 gatun-core/src/main/java/org/gatun/protocol/
 src/gatun/generated/
+
+# Spark distribution (for testing)
+spark-*/
+spark-*.tgz

@@ -99,6 +99,7 @@ __all__ = [
 def connect(
     memory: Optional[str] = None,
     socket_path: Optional[str] = None,
+    classpath: Optional[list[str]] = None,
     trace: bool = False,
     log_level: Optional[str] = None,
     debug: bool = False,
@@ -109,6 +110,8 @@ def connect(
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
         socket_path: Path to Unix socket. Defaults to config value or ~/gatun.sock.
+        classpath: Additional JAR files or directories to add to the classpath.
+                   Use this to load external libraries (e.g., Spark JARs).
         trace: Enable trace mode for verbose method resolution logging.
         log_level: Java logging level ("FINE", "FINER", "INFO", etc.).
         debug: If True, Java server logs are printed to stderr in real-time.
@@ -125,10 +128,18 @@ def connect(
         GATUN_TRACE=true
         GATUN_LOG_LEVEL=FINE
         GATUN_DEBUG=true
+
+    Example with Spark:
+        import glob
+        spark_jars = glob.glob("/path/to/spark/jars/*.jar")
+        client = connect(memory="512MB", classpath=spark_jars)
+        SparkConf = client.jvm.org.apache.spark.SparkConf
+        conf = SparkConf().setMaster("local[2]").setAppName("MyApp")
     """
     session = launch_gateway(
         memory=memory,
         socket_path=socket_path,
+        classpath=classpath,
         trace=trace,
         log_level=log_level,
         debug=debug,
@@ -148,18 +159,23 @@ def connect(
 async def aconnect(
     memory: Optional[str] = None,
     socket_path: Optional[str] = None,
+    classpath: Optional[list[str]] = None,
     trace: bool = False,
     log_level: Optional[str] = None,
     debug: bool = False,
+    extra_jvm_flags: Optional[list[str]] = None,
 ) -> AsyncGatunClient:
     """Async convenience: Launches server and returns connected async client.
 
     Args:
         memory: Memory size (e.g., "512MB", "1GB"). Defaults to config value.
         socket_path: Path to Unix socket. Defaults to config value or ~/gatun.sock.
+        classpath: Additional JAR files or directories to add to the classpath.
+                   Use this to load external libraries (e.g., Spark JARs).
         trace: Enable trace mode for verbose method resolution logging.
         log_level: Java logging level ("FINE", "FINER", "INFO", etc.).
         debug: If True, Java server logs are printed to stderr in real-time.
+        extra_jvm_flags: Additional JVM flags to pass to the server.
 
     Example:
         async with await aconnect() as client:
@@ -181,9 +197,11 @@ async def aconnect(
     session = launch_gateway(
         memory=memory,
         socket_path=socket_path,
+        classpath=classpath,
         trace=trace,
         log_level=log_level,
         debug=debug,
+        extra_jvm_flags=extra_jvm_flags,
     )
 
     client = AsyncGatunClient(session.socket_path)
