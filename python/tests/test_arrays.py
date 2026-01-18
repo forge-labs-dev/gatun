@@ -2,210 +2,152 @@
 
 import array
 
+import pytest
+
 import pyarrow as pa
 
 
-# Uses the shared `client` fixture from conftest.py
+def test_array_fill(client):
+    """Test Arrays.fill() modifies a Java array in place."""
+    int_class = client.get_static_field("java.lang.Integer", "TYPE")
+    java_array = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", int_class, 5, return_object_ref=True
+    )
+
+    Arrays = client.jvm.java.util.Arrays
+    Arrays.fill(java_array, 7)
+
+    assert Arrays.toString(java_array) == "[7, 7, 7, 7, 7]"
 
 
-class TestArrayReturnValues:
-    """Test that Java arrays are returned correctly to Python.
+def test_array_sort_in_place(client):
+    """Test Arrays.sort() modifies a Java array in place."""
+    int_class = client.get_static_field("java.lang.Integer", "TYPE")
+    java_array = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", int_class, 5, return_object_ref=True
+    )
 
-    Java arrays are returned as JavaObject instances with iteration support.
-    Use list() to convert them to Python lists.
-    """
+    Array = client.jvm.java.lang.reflect.Array
+    for i, val in enumerate([5, 3, 1, 4, 2]):
+        Array.setInt(java_array, i, val)
 
-    def test_int_array_copyof(self, client):
-        """Test Arrays.copyOf returns int[] which can be iterated."""
-        Arrays = client.jvm.java.util.Arrays
-        original = pa.array([1, 2, 3, 4, 5], type=pa.int32())
-        # copyOf returns int[]
-        result = Arrays.copyOf(original, 5)
-        assert list(result) == [1, 2, 3, 4, 5]
+    Arrays = client.jvm.java.util.Arrays
+    Arrays.sort(java_array)
 
-    def test_double_array_copyof(self, client):
-        """Test Arrays.copyOf returns double[] which can be iterated."""
-        Arrays = client.jvm.java.util.Arrays
-        original = pa.array([1.5, 2.5, 3.5], type=pa.float64())
-        result = Arrays.copyOf(original, 3)
-        assert list(result) == [1.5, 2.5, 3.5]
-
-    def test_string_array_copyof(self, client):
-        """Test Arrays.copyOf with String[] equivalent which can be iterated."""
-        # Create Object[] with strings via ArrayList.toArray
-        ArrayList = client.jvm.java.util.ArrayList
-        al = ArrayList()
-        al.add("a")
-        al.add("b")
-        al.add("c")
-        arr = al.toArray()
-        assert list(arr) == ["a", "b", "c"]
-
-    def test_toarray_from_list(self, client):
-        """Test ArrayList.toArray() returns Object[] which can be iterated."""
-        ArrayList = client.jvm.java.util.ArrayList
-        arr = ArrayList()
-        arr.add("hello")
-        arr.add("world")
-        result = arr.toArray()
-        assert list(result) == ["hello", "world"]
+    assert Arrays.toString(java_array) == "[1, 2, 3, 4, 5]"
 
 
-class TestArrayArguments:
-    """Test that Python arrays are passed correctly to Java."""
-
-    def test_int_array_argument(self, client):
-        """Test passing int[] to Java."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([3, 1, 4, 1, 5], type=pa.int32())
-        Arrays.sort(arr)
-        # Note: Arrays.sort modifies in place but we can't verify that
-        # Instead, test that it doesn't error
-
-    def test_arrays_tostring(self, client):
-        """Test Arrays.toString(int[])."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([1, 2, 3], type=pa.int32())
-        result = Arrays.toString(arr)
-        assert result == "[1, 2, 3]"
-
-    def test_long_array_tostring(self, client):
-        """Test Arrays.toString(long[])."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([1, 2, 3], type=pa.int64())
-        result = Arrays.toString(arr)
-        assert result == "[1, 2, 3]"
-
-    def test_double_array_tostring(self, client):
-        """Test Arrays.toString(double[])."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([1.5, 2.5, 3.5], type=pa.float64())
-        result = Arrays.toString(arr)
-        assert result == "[1.5, 2.5, 3.5]"
-
-    def test_boolean_array_tostring(self, client):
-        """Test Arrays.toString(boolean[])."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([True, False, True], type=pa.bool_())
-        result = Arrays.toString(arr)
-        assert result == "[true, false, true]"
-
-    def test_string_array_tostring(self, client):
-        """Test Arrays.toString(Object[]) with strings."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array(["hello", "world"])
-        result = Arrays.toString(arr)
-        assert result == "[hello, world]"
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        (10, 0),
+        (30, 2),
+        (50, 4),
+    ],
+)
+def test_array_binary_search_found(client, key, expected):
+    """Test Arrays.binarySearch() finds elements at correct indices."""
+    Arrays = client.jvm.java.util.Arrays
+    arr = pa.array([10, 20, 30, 40, 50], type=pa.int32())
+    assert Arrays.binarySearch(arr, key) == expected
 
 
-class TestByteArrays:
-    """Test byte array handling."""
-
-    def test_bytes_to_java(self, client):
-        """Test passing Python bytes to Java."""
-        Arrays = client.jvm.java.util.Arrays
-        data = b"\x01\x02\x03\x04"
-        result = Arrays.toString(data)
-        assert result == "[1, 2, 3, 4]"
-
-    def test_bytearray_to_java(self, client):
-        """Test passing Python bytearray to Java."""
-        Arrays = client.jvm.java.util.Arrays
-        data = bytearray([1, 2, 3, 4])
-        result = Arrays.toString(data)
-        assert result == "[1, 2, 3, 4]"
+def test_array_binary_search_not_found(client):
+    """Test Arrays.binarySearch() returns negative for missing elements."""
+    Arrays = client.jvm.java.util.Arrays
+    arr = pa.array([10, 20, 30, 40, 50], type=pa.int32())
+    assert Arrays.binarySearch(arr, 25) < 0
 
 
-class TestPythonArrayModule:
-    """Test Python array.array support."""
-
-    def test_array_int(self, client):
-        """Test array.array('i', ...) as int[]."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = array.array("i", [1, 2, 3])
-        result = Arrays.toString(arr)
-        assert result == "[1, 2, 3]"
-
-    def test_array_double(self, client):
-        """Test array.array('d', ...) as double[]."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = array.array("d", [1.5, 2.5, 3.5])
-        result = Arrays.toString(arr)
-        assert result == "[1.5, 2.5, 3.5]"
+@pytest.mark.parametrize(
+    "arr1,arr2,expected",
+    [
+        ([1, 2, 3], [1, 2, 3], True),
+        ([1, 2, 3], [1, 2, 4], False),
+        ([], [], True),
+    ],
+)
+def test_array_equals(client, arr1, arr2, expected):
+    """Test Arrays.equals() compares two arrays."""
+    Arrays = client.jvm.java.util.Arrays
+    a1 = pa.array(arr1, type=pa.int32())
+    a2 = pa.array(arr2, type=pa.int32())
+    assert Arrays.equals(a1, a2) is expected
 
 
-class TestArrayRoundTrip:
-    """Test arrays can be sent to Java and received back.
-
-    Java arrays are returned as JavaObject instances with iteration support.
-    Use list() to convert them to Python lists.
-    """
-
-    def test_int_array_roundtrip_via_copy(self, client):
-        """Test int[] round trip via Arrays.copyOf."""
-        Arrays = client.jvm.java.util.Arrays
-        original = pa.array([10, 20, 30], type=pa.int32())
-
-        # copyOf returns int[]
-        copied = Arrays.copyOf(original, 3)
-        assert list(copied) == [10, 20, 30]
-
-    def test_double_array_roundtrip(self, client):
-        """Test double[] round trip."""
-        Arrays = client.jvm.java.util.Arrays
-        original = pa.array([1.1, 2.2, 3.3], type=pa.float64())
-
-        # Arrays.copyOf returns double[]
-        copied = Arrays.copyOf(original, 3)
-        assert list(copied) == [1.1, 2.2, 3.3]
-
-    def test_string_array_via_list(self, client):
-        """Test String[] round trip via ArrayList."""
-        ArrayList = client.jvm.java.util.ArrayList
-
-        # Create ArrayList and add strings
-        al = ArrayList()
-        al.add("apple")
-        al.add("banana")
-        al.add("cherry")
-
-        # toArray returns Object[]
-        result = al.toArray()
-        assert list(result) == ["apple", "banana", "cherry"]
+@pytest.mark.parametrize(
+    "start,end,expected",
+    [
+        (1, 4, [20, 30, 40]),
+        (0, 2, [10, 20]),
+        (3, 7, [40, 50, 0, 0]),  # Extends beyond array, pads with zeros
+    ],
+)
+def test_array_copy_of_range(client, start, end, expected):
+    """Test Arrays.copyOfRange() copies a slice."""
+    Arrays = client.jvm.java.util.Arrays
+    arr = pa.array([10, 20, 30, 40, 50], type=pa.int32())
+    result = Arrays.copyOfRange(arr, start, end)
+    assert list(result) == expected
 
 
-class TestArrayEdgeCases:
-    """Test edge cases for array handling."""
+def test_system_arraycopy(client):
+    """Test System.arraycopy() copies between arrays."""
+    int_class = client.get_static_field("java.lang.Integer", "TYPE")
+    src = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", int_class, 5, return_object_ref=True
+    )
+    dst = client.invoke_static_method(
+        "java.lang.reflect.Array", "newInstance", int_class, 5, return_object_ref=True
+    )
 
-    def test_empty_int_array(self, client):
-        """Test empty int array."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([], type=pa.int32())
-        result = Arrays.toString(arr)
+    Array = client.jvm.java.lang.reflect.Array
+    for i in range(5):
+        Array.setInt(src, i, (i + 1) * 10)
+
+    System = client.jvm.java.lang.System
+    System.arraycopy(src, 1, dst, 0, 3)
+
+    Arrays = client.jvm.java.util.Arrays
+    assert Arrays.toString(dst) == "[20, 30, 40, 0, 0]"
+
+
+def test_object_array_toarray(client):
+    """Test ArrayList.toArray() returns iterable Object[]."""
+    ArrayList = client.jvm.java.util.ArrayList
+    arr = ArrayList()
+    arr.add("hello")
+    arr.add("world")
+    result = arr.toArray()
+    assert list(result) == ["hello", "world"]
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        (b"\x01\x02\x03", "[1, 2, 3]"),
+        (bytearray([4, 5, 6]), "[4, 5, 6]"),
+        (array.array("i", [1, 2, 3]), "[1, 2, 3]"),
+        (array.array("d", [1.5, 2.5]), "[1.5, 2.5]"),
+    ],
+)
+def test_python_array_types(client, data, expected):
+    """Test Python bytes, bytearray, and array.array passed to Java."""
+    Arrays = client.jvm.java.util.Arrays
+    assert Arrays.toString(data) == expected
+
+
+@pytest.mark.parametrize(
+    "size",
+    [0, 100],
+)
+def test_array_sizes(client, size):
+    """Test empty and large arrays."""
+    Arrays = client.jvm.java.util.Arrays
+    arr = pa.array(range(size), type=pa.int32())
+    result = Arrays.toString(arr)
+    if size == 0:
         assert result == "[]"
-
-    def test_large_array(self, client):
-        """Test larger array (100 elements)."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array(range(100), type=pa.int32())
-        # Just verify it doesn't error
-        result = Arrays.toString(arr)
+    else:
         assert result.startswith("[0, 1, 2,")
         assert result.endswith("97, 98, 99]")
-
-    def test_float32_array(self, client):
-        """Test float32 array (widened to double)."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([1.5, 2.5, 3.5], type=pa.float32())
-        result = Arrays.toString(arr)
-        # Float widened to double
-        assert "1.5" in result
-        assert "2.5" in result
-        assert "3.5" in result
-
-    def test_int16_array(self, client):
-        """Test int16 array (widened to int)."""
-        Arrays = client.jvm.java.util.Arrays
-        arr = pa.array([100, 200, 300], type=pa.int16())
-        result = Arrays.toString(arr)
-        assert result == "[100, 200, 300]"
