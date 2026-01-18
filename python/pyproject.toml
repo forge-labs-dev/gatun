@@ -5,6 +5,9 @@ description = "High-performance Python-to-Java bridge using shared memory (exper
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.13"
+authors = [
+    { name = "Fangchen Li", email = "fangchen.li@outlook.com" },
+]
 keywords = [
     "java",
     "jvm",
@@ -32,6 +35,11 @@ dependencies = [
     "flatbuffers>=23.5.26",
     "pyarrow>=22.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/forge-labs-dev/gatun"
+Repository = "https://github.com/forge-labs-dev/gatun"
+Issues = "https://github.com/forge-labs-dev/gatun/issues"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

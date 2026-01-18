@@ -87,7 +87,11 @@ Reduce round-trips with batch operations:
 pip install gatun
 ```
 
-Requires Java 22+.
+## Requirements
+
+- **Python**: 3.13+
+- **Java**: 22+
+- **OS**: Linux, macOS (Windows is not supported - Unix domain sockets required)
 
 ## Quick Start
 
