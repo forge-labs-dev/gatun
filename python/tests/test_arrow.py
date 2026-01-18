@@ -1,10 +1,7 @@
-import tempfile
-from pathlib import Path
-
 import pyarrow as pa
 import pytest
 
-from gatun import PayloadArena, UnsupportedArrowTypeError, StaleArenaError
+from gatun import PayloadArena, StaleArenaError, UnsupportedArrowTypeError
 
 
 def test_send_pyarrow_table(client):
@@ -18,15 +15,8 @@ def test_send_pyarrow_table(client):
 
     table = pa.Table.from_arrays([names, ages, scores], names=["name", "age", "score"])
 
-    print(f"\nSending Arrow Table: {table.num_rows} rows")
-
-    # 2. Send via Shared Memory
     response = client.send_arrow_table(table)
 
-    # 3. Verify
-    print(f"Java Response: {response}")
-
-    # Our Java server implementation returns "Received X rows"
     assert f"Received {table.num_rows} rows" in str(response)
 
 
@@ -39,133 +29,57 @@ def test_send_arrow_buffers(client):
 
     table = pa.Table.from_arrays([names, ages], names=["name", "age"])
 
-    # 2. Get payload arena from client (writes to the same shm Java reads from)
     arena = client.get_payload_arena()
-
-    print(f"\nSending Arrow buffers: {table.num_rows} rows")
-
-    # 3. Send via zero-copy buffer transfer
     schema_cache = {}
-    response = client.send_arrow_buffers(table, arena, schema_cache)
 
-    # 4. Verify
-    print(f"Java Response: {response}")
+    response = client.send_arrow_buffers(table, arena, schema_cache)
     assert f"Received {table.num_rows} rows" in str(response)
 
     # Verify schema was cached
     assert len(schema_cache) == 1
 
-    # 5. Reset arena and send again (should skip schema)
+    # Reset arena and send again (should skip schema)
     arena.reset()
     response2 = client.send_arrow_buffers(table, arena, schema_cache)
     assert f"Received {table.num_rows} rows" in str(response2)
-
-    # Schema cache should still have just one entry
     assert len(schema_cache) == 1
 
     arena.close()
 
 
-def test_send_arrow_buffers_various_types(client):
-    """Test zero-copy transfer with various Arrow types."""
-
-    # Create table with multiple Arrow types
-    table = pa.table(
-        {
-            # Integer types
-            "int8_col": pa.array([1, 2, 3], type=pa.int8()),
-            "int16_col": pa.array([100, 200, 300], type=pa.int16()),
-            "int32_col": pa.array([1000, 2000, 3000], type=pa.int32()),
-            "int64_col": pa.array([10000, 20000, 30000], type=pa.int64()),
-            # Float types
-            "float32_col": pa.array([1.5, 2.5, 3.5], type=pa.float32()),
-            "float64_col": pa.array([1.11, 2.22, 3.33], type=pa.float64()),
-            # String type
-            "string_col": pa.array(["hello", "world", "test"]),
-            # Boolean type
-            "bool_col": pa.array([True, False, True]),
-        }
-    )
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(
-        f"\nSending Arrow buffers with various types: {table.num_rows} rows, {table.num_columns} columns"
-    )
-
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    print(f"Java Response: {response}")
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    arena.close()
-
-
-def test_send_arrow_buffers_with_nulls(client):
-    """Test zero-copy transfer with null values."""
-
-    # Create table with null values
-    table = pa.table(
-        {
-            "nullable_int": pa.array([1, None, 3, None, 5], type=pa.int64()),
-            "nullable_string": pa.array(["a", None, "c", "d", None]),
-            "nullable_float": pa.array([1.0, 2.0, None, 4.0, None], type=pa.float64()),
-        }
-    )
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(f"\nSending Arrow buffers with nulls: {table.num_rows} rows")
-
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    print(f"Java Response: {response}")
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    arena.close()
-
-
-def test_payload_arena_basic():
+def test_payload_arena_basic(tmp_path):
     """Test PayloadArena allocation and reset."""
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 4096)
 
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    # Test allocation
+    info1 = arena.allocate(100)
+    assert info1.offset == 0
+    assert info1.length == 100
+    assert info1.buffer is not None
+    assert info1.buffer.size == 100
 
-    try:
-        arena = PayloadArena.create(arena_path, 4096)
+    # Test alignment (next alloc should be 64-byte aligned)
+    info2 = arena.allocate(50)
+    assert info2.offset == 128  # 100 rounded up to 128 (64-byte aligned)
+    assert info2.length == 50
 
-        # Test allocation
-        info1 = arena.allocate(100)
-        assert info1.offset == 0
-        assert info1.length == 100
-        assert info1.buffer is not None
-        assert info1.buffer.size == 100
+    # Test bytes tracking
+    assert arena.bytes_used() == 128 + 50
 
-        # Test alignment (next alloc should be 64-byte aligned)
-        info2 = arena.allocate(50)
-        assert info2.offset == 128  # 100 rounded up to 128 (64-byte aligned)
-        assert info2.length == 50
+    # Test reset
+    arena.reset()
+    assert arena.bytes_used() == 0
 
-        # Test bytes tracking
-        assert arena.bytes_used() == 128 + 50
+    # Can allocate from beginning again
+    info3 = arena.allocate(200)
+    assert info3.offset == 0
 
-        # Test reset
-        arena.reset()
-        assert arena.bytes_used() == 0
-
-        # Can allocate from beginning again
-        info3 = arena.allocate(200)
-        assert info3.offset == 0
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
 
 
-def test_get_arrow_data_roundtrip(client):
-    """Test Java -> Python Arrow transfer via get_arrow_data."""
-
-    # 1. Create Arrow data and send to Java
+def test_basic_roundtrip(client):
+    """Test basic Arrow roundtrip (Python -> Java -> Python)."""
     original_table = pa.table(
         {
             "id": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
@@ -177,23 +91,13 @@ def test_get_arrow_data_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending Arrow table to Java: {original_table.num_rows} rows")
     client.send_arrow_buffers(original_table, arena, schema_cache)
-
-    # 2. Request the data back from Java
-    print("Requesting Arrow data back from Java...")
     received_table = client.get_arrow_data()
-
-    # 3. Verify the data matches
-    print(
-        f"Received table: {received_table.num_rows} rows, {received_table.num_columns} columns"
-    )
 
     assert received_table.num_rows == original_table.num_rows
     assert received_table.num_columns == original_table.num_columns
     assert received_table.schema == original_table.schema
 
-    # Verify data content
     for name in original_table.schema.names:
         orig_col = original_table.column(name).to_pylist()
         recv_col = received_table.column(name).to_pylist()
@@ -202,9 +106,8 @@ def test_get_arrow_data_roundtrip(client):
     arena.close()
 
 
-def test_get_arrow_data_various_types(client):
-    """Test Java -> Python Arrow transfer with various data types."""
-
+def test_various_types_roundtrip(client):
+    """Test roundtrip with various Arrow data types."""
     original_table = pa.table(
         {
             "int8_col": pa.array([1, 2, 3], type=pa.int8()),
@@ -221,17 +124,12 @@ def test_get_arrow_data_various_types(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending Arrow table with various types: {original_table.num_rows} rows")
     client.send_arrow_buffers(original_table, arena, schema_cache)
-
     received_table = client.get_arrow_data()
-
-    print(f"Received table: {received_table.num_rows} rows")
 
     assert received_table.num_rows == original_table.num_rows
     assert received_table.num_columns == original_table.num_columns
 
-    # Verify each column
     for name in original_table.schema.names:
         orig_col = original_table.column(name).to_pylist()
         recv_col = received_table.column(name).to_pylist()
@@ -240,8 +138,8 @@ def test_get_arrow_data_various_types(client):
     arena.close()
 
 
-def test_get_arrow_data_with_nulls(client):
-    """Test Java -> Python Arrow transfer with null values."""
+def test_nulls_roundtrip(client):
+    """Test roundtrip with null values."""
 
     original_table = pa.table(
         {
@@ -254,12 +152,8 @@ def test_get_arrow_data_with_nulls(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending Arrow table with nulls: {original_table.num_rows} rows")
     client.send_arrow_buffers(original_table, arena, schema_cache)
-
     received_table = client.get_arrow_data()
-
-    print(f"Received table: {received_table.num_rows} rows")
 
     assert received_table.num_rows == original_table.num_rows
 
@@ -272,57 +166,7 @@ def test_get_arrow_data_with_nulls(client):
     arena.close()
 
 
-def test_send_arrow_buffers_chunked_table(client):
-    """Test zero-copy transfer with chunked columns.
-
-    Arrow tables can have multiple chunks per column (e.g., from concatenation
-    or reading large files). The protocol should handle these correctly by
-    combining chunks before transfer.
-    """
-
-    # Create a chunked table by concatenating multiple tables
-    table1 = pa.table(
-        {
-            "id": pa.array([1, 2, 3], type=pa.int64()),
-            "name": pa.array(["Alice", "Bob", "Charlie"]),
-        }
-    )
-    table2 = pa.table(
-        {
-            "id": pa.array([4, 5], type=pa.int64()),
-            "name": pa.array(["David", "Eve"]),
-        }
-    )
-    table3 = pa.table(
-        {
-            "id": pa.array([6], type=pa.int64()),
-            "name": pa.array(["Frank"]),
-        }
-    )
-
-    # Concatenate creates a table with multiple chunks per column
-    chunked_table = pa.concat_tables([table1, table2, table3])
-
-    # Verify the table is actually chunked
-    assert chunked_table.column("id").num_chunks == 3
-    assert chunked_table.column("name").num_chunks == 3
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(
-        f"\nSending chunked Arrow table: {chunked_table.num_rows} rows, "
-        f"{chunked_table.column('id').num_chunks} chunks per column"
-    )
-
-    response = client.send_arrow_buffers(chunked_table, arena, schema_cache)
-    print(f"Java Response: {response}")
-    assert f"Received {chunked_table.num_rows} rows" in str(response)
-
-    arena.close()
-
-
-def test_get_arrow_data_chunked_roundtrip(client):
+def test_chunked_table_roundtrip(client):
     """Test roundtrip of chunked table (Python -> Java -> Python)."""
 
     # Create a chunked table
@@ -346,13 +190,10 @@ def test_get_arrow_data_chunked_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending chunked table: {chunked_table.num_rows} rows")
     client.send_arrow_buffers(chunked_table, arena, schema_cache)
 
     # Get back from Java
     received_table = client.get_arrow_data()
-
-    print(f"Received table: {received_table.num_rows} rows")
 
     # Verify data matches (note: returned table will be unchunked)
     assert received_table.num_rows == chunked_table.num_rows
@@ -366,68 +207,96 @@ def test_get_arrow_data_chunked_roundtrip(client):
     arena.close()
 
 
-def test_list_type_roundtrip(client):
-    """Test that list<int32> type is transferred correctly."""
-    table = pa.table(
+def _make_list_table():
+    return pa.table(
         {
             "id": pa.array([1, 2, 3], type=pa.int64()),
             "values": pa.array([[1, 2], [3, 4, 5], [6]], type=pa.list_(pa.int32())),
         }
     )
 
-    arena = client.get_payload_arena()
-    schema_cache = {}
 
-    print(f"\nSending table with list column: {table.num_rows} rows")
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    received_table = client.get_arrow_data()
-
-    # Verify schema preserved
-    assert received_table.schema == table.schema
-
-    # Verify data
-    assert received_table.column("id").to_pylist() == [1, 2, 3]
-    assert received_table.column("values").to_pylist() == [[1, 2], [3, 4, 5], [6]]
-
-    arena.close()
-
-
-def test_struct_type_roundtrip(client):
-    """Test that struct type is transferred correctly."""
+def _make_struct_table():
     struct_type = pa.struct([("x", pa.int32()), ("y", pa.int32())])
-    table = pa.table(
+    return pa.table(
         {
             "id": pa.array([1, 2], type=pa.int64()),
             "point": pa.array([{"x": 1, "y": 2}, {"x": 3, "y": 4}], type=struct_type),
         }
     )
 
+
+def _make_nested_list_of_structs_table():
+    inner_struct = pa.struct([("x", pa.int32()), ("y", pa.string())])
+    return pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "items": pa.array(
+                [[{"x": 1, "y": "a"}, {"x": 2, "y": "b"}], [{"x": 3, "y": "c"}]],
+                type=pa.list_(inner_struct),
+            ),
+        }
+    )
+
+
+def _make_fixed_size_list_table():
+    return pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "coords": pa.array(
+                [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                type=pa.list_(pa.int32(), 3),
+            ),
+        }
+    )
+
+
+def _make_large_list_table():
+    return pa.table(
+        {
+            "id": pa.array([1, 2], type=pa.int64()),
+            "values": pa.array(
+                [[1, 2, 3], [4, 5]],
+                type=pa.large_list(pa.int32()),
+            ),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "table_factory",
+    [
+        pytest.param(_make_list_table, id="list"),
+        pytest.param(_make_struct_table, id="struct"),
+        pytest.param(_make_nested_list_of_structs_table, id="nested_list_of_structs"),
+        pytest.param(_make_fixed_size_list_table, id="fixed_size_list"),
+        pytest.param(_make_large_list_table, id="large_list"),
+    ],
+)
+def test_nested_type_roundtrip(client, table_factory):
+    """Test nested Arrow types (list, struct, etc.) are transferred correctly."""
+    table = table_factory()
+
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending table with struct column: {table.num_rows} rows")
     response = client.send_arrow_buffers(table, arena, schema_cache)
     assert f"Received {table.num_rows} rows" in str(response)
 
     received_table = client.get_arrow_data()
 
-    # Verify schema preserved
     assert received_table.schema == table.schema
-
-    # Verify data
-    assert received_table.column("id").to_pylist() == [1, 2]
-    assert received_table.column("point").to_pylist() == [
-        {"x": 1, "y": 2},
-        {"x": 3, "y": 4},
-    ]
+    for name in table.schema.names:
+        assert received_table.column(name).to_pylist() == table.column(name).to_pylist()
 
     arena.close()
 
 
 def test_map_type_roundtrip(client):
-    """Test that map type is transferred correctly."""
+    """Test that map type is transferred correctly.
+
+    Maps need special comparison since key order may change.
+    """
     table = pa.table(
         {
             "id": pa.array([1, 2], type=pa.int64()),
@@ -440,55 +309,16 @@ def test_map_type_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending table with map column: {table.num_rows} rows")
     response = client.send_arrow_buffers(table, arena, schema_cache)
     assert f"Received {table.num_rows} rows" in str(response)
 
     received_table = client.get_arrow_data()
 
-    # Verify schema preserved
     assert received_table.schema == table.schema
-
-    # Verify data - maps may reorder keys, so convert to dict for comparison
     orig_attrs = table.column("attrs").to_pylist()
     recv_attrs = received_table.column("attrs").to_pylist()
     for orig, recv in zip(orig_attrs, recv_attrs):
         assert dict(orig) == dict(recv)
-
-    arena.close()
-
-
-def test_nested_list_of_structs_roundtrip(client):
-    """Test deeply nested type: list<struct<x:int32, y:string>>."""
-    inner_struct = pa.struct([("x", pa.int32()), ("y", pa.string())])
-    table = pa.table(
-        {
-            "id": pa.array([1, 2], type=pa.int64()),
-            "items": pa.array(
-                [[{"x": 1, "y": "a"}, {"x": 2, "y": "b"}], [{"x": 3, "y": "c"}]],
-                type=pa.list_(inner_struct),
-            ),
-        }
-    )
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(f"\nSending table with list<struct> column: {table.num_rows} rows")
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    received_table = client.get_arrow_data()
-
-    # Verify schema preserved
-    assert received_table.schema == table.schema
-
-    # Verify data
-    expected = [
-        [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}],
-        [{"x": 3, "y": "c"}],
-    ]
-    assert received_table.column("items").to_pylist() == expected
 
     arena.close()
 
@@ -619,15 +449,11 @@ def test_sliced_table_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending sliced table: {sliced_table.num_rows} rows (offset=3)")
     response = client.send_arrow_buffers(sliced_table, arena, schema_cache)
-    print(f"Java Response: {response}")
     assert f"Received {sliced_table.num_rows} rows" in str(response)
 
     # Roundtrip: get data back from Java
     received_table = client.get_arrow_data()
-
-    print(f"Received table: {received_table.num_rows} rows")
 
     # Verify data content matches the sliced portion
     assert received_table.num_rows == 4
@@ -659,7 +485,6 @@ def test_sliced_table_with_nulls_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending sliced table with nulls: {sliced_table.num_rows} rows")
     response = client.send_arrow_buffers(sliced_table, arena, schema_cache)
     assert f"Received {sliced_table.num_rows} rows" in str(response)
 
@@ -715,7 +540,6 @@ def test_date_time_types_roundtrip(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    print(f"\nSending table with date/time types: {table.num_rows} rows")
     response = client.send_arrow_buffers(table, arena, schema_cache)
     assert f"Received {table.num_rows} rows" in str(response)
 
@@ -930,189 +754,93 @@ def test_schema_hash_consistency_nested_types(client):
     arena.close()
 
 
-def test_fixed_size_list_roundtrip(client):
-    """Test that fixed_size_list type is transferred correctly."""
-    # Fixed-size list of 3 int32s per row
-    table = pa.table(
-        {
-            "id": pa.array([1, 2, 3], type=pa.int64()),
-            "coords": pa.array(
-                [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
-                type=pa.list_(pa.int32(), 3),
-            ),
-        }
-    )
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(f"\nSending table with fixed_size_list column: {table.num_rows} rows")
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    received_table = client.get_arrow_data()
-
-    # Verify schema preserved
-    assert received_table.schema == table.schema
-
-    # Verify data
-    assert received_table.column("id").to_pylist() == [1, 2, 3]
-    assert received_table.column("coords").to_pylist() == [
-        [1, 2, 3],
-        [4, 5, 6],
-        [7, 8, 9],
-    ]
-
-    arena.close()
-
-
-def test_large_list_roundtrip(client):
-    """Test that large_list type (64-bit offsets) is transferred correctly."""
-    table = pa.table(
-        {
-            "id": pa.array([1, 2], type=pa.int64()),
-            "values": pa.array(
-                [[1, 2, 3], [4, 5]],
-                type=pa.large_list(pa.int32()),
-            ),
-        }
-    )
-
-    arena = client.get_payload_arena()
-    schema_cache = {}
-
-    print(f"\nSending table with large_list column: {table.num_rows} rows")
-    response = client.send_arrow_buffers(table, arena, schema_cache)
-    assert f"Received {table.num_rows} rows" in str(response)
-
-    received_table = client.get_arrow_data()
-
-    # Verify schema preserved
-    assert received_table.schema == table.schema
-
-    # Verify data
-    assert received_table.column("values").to_pylist() == [[1, 2, 3], [4, 5]]
-
-    arena.close()
-
-
-def test_payload_arena_out_of_memory():
+def test_payload_arena_out_of_memory(tmp_path):
     """Test PayloadArena raises MemoryError when full."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 256)  # Small arena
 
-    try:
-        arena = PayloadArena.create(arena_path, 256)  # Small arena
+    # First allocation should succeed
+    info1 = arena.allocate(100)
+    assert info1.length == 100
 
-        # First allocation should succeed
-        info1 = arena.allocate(100)
-        assert info1.length == 100
+    # This should fail - not enough space
+    with pytest.raises(MemoryError) as exc_info:
+        arena.allocate(200)
 
-        # This should fail - not enough space
-        with pytest.raises(MemoryError) as exc_info:
-            arena.allocate(200)
+    assert "full" in str(exc_info.value).lower()
 
-        assert "full" in str(exc_info.value).lower()
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
 
 
-def test_payload_arena_context_manager():
+def test_payload_arena_context_manager(tmp_path):
     """Test PayloadArena works as a context manager."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
 
-    try:
-        with PayloadArena.create(arena_path, 4096) as arena:
-            info = arena.allocate(100)
-            assert info.length == 100
-            assert arena.bytes_used() == 100
+    with PayloadArena.create(arena_path, 4096) as arena:
+        info = arena.allocate(100)
+        assert info.length == 100
+        assert arena.bytes_used() == 100
 
-        # After context exit, arena should be closed
-        # (we can't easily verify this, but at least it shouldn't raise)
-    finally:
-        arena_path.unlink(missing_ok=True)
+    # After context exit, arena should be closed
 
 
-def test_payload_arena_allocate_and_copy_bytes():
+def test_payload_arena_allocate_and_copy_bytes(tmp_path):
     """Test allocate_and_copy with Python bytes."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 4096)
 
-    try:
-        arena = PayloadArena.create(arena_path, 4096)
+    data = b"hello world"
+    info = arena.allocate_and_copy(data)
 
-        data = b"hello world"
-        info = arena.allocate_and_copy(data)
+    assert info.length == len(data)
+    assert info.buffer is not None
+    assert bytes(info.buffer) == data
 
-        assert info.length == len(data)
-        assert info.buffer is not None
-        assert bytes(info.buffer) == data
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
 
 
-def test_payload_arena_allocate_and_copy_arrow_buffer():
+def test_payload_arena_allocate_and_copy_arrow_buffer(tmp_path):
     """Test allocate_and_copy with Arrow buffer."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 4096)
 
-    try:
-        arena = PayloadArena.create(arena_path, 4096)
+    # Create an Arrow buffer
+    arr = pa.array([1, 2, 3, 4], type=pa.int32())
+    arrow_buffer = arr.buffers()[1]  # Data buffer
 
-        # Create an Arrow buffer
-        arr = pa.array([1, 2, 3, 4], type=pa.int32())
-        arrow_buffer = arr.buffers()[1]  # Data buffer
+    info = arena.allocate_and_copy(arrow_buffer)
 
-        info = arena.allocate_and_copy(arrow_buffer)
+    assert info.length == arrow_buffer.size
+    assert info.buffer is not None
 
-        assert info.length == arrow_buffer.size
-        assert info.buffer is not None
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
 
 
-def test_payload_arena_allocate_and_copy_zero_length():
+def test_payload_arena_allocate_and_copy_zero_length(tmp_path):
     """Test allocate_and_copy with zero-length data."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 4096)
 
-    try:
-        arena = PayloadArena.create(arena_path, 4096)
+    info = arena.allocate_and_copy(b"")
 
-        info = arena.allocate_and_copy(b"")
+    assert info.length == 0
+    assert info.buffer is None  # Zero-length returns None buffer
 
-        assert info.length == 0
-        assert info.buffer is None  # Zero-length returns None buffer
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
 
 
-def test_payload_arena_bytes_available():
+def test_payload_arena_bytes_available(tmp_path):
     """Test bytes_available tracking."""
-    with tempfile.NamedTemporaryFile(suffix=".shm", delete=False) as f:
-        arena_path = Path(f.name)
+    arena_path = tmp_path / "test.shm"
+    arena = PayloadArena.create(arena_path, 1024)
 
-    try:
-        arena = PayloadArena.create(arena_path, 1024)
+    assert arena.bytes_available() == 1024
 
-        assert arena.bytes_available() == 1024
+    arena.allocate(100)
+    # After allocating 100 bytes (aligned to 64), available should decrease
+    assert arena.bytes_available() < 1024
 
-        arena.allocate(100)
-        # After allocating 100 bytes (aligned to 64), available should decrease
-        assert arena.bytes_available() < 1024
+    arena.reset()
+    assert arena.bytes_available() == 1024
 
-        arena.reset()
-        assert arena.bytes_available() == 1024
-
-        arena.close()
-    finally:
-        arena_path.unlink(missing_ok=True)
+    arena.close()
