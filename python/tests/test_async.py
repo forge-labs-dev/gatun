@@ -21,6 +21,11 @@ class TestAsyncClientBasics:
     """Test basic async client operations."""
 
     @pytest.mark.asyncio
+    async def test_ping(self, async_client):
+        """Test ping health check works asynchronously."""
+        assert await async_client.ping() is True
+
+    @pytest.mark.asyncio
     async def test_create_object(self, async_client):
         """Test creating a Java object asynchronously."""
         arr = await async_client.create_object("java.util.ArrayList")

@@ -372,6 +372,7 @@ client.invoke_static_method("java.lang.Math", "max", 10, 20)
 client.get_field(obj, "fieldName")                    # Get field value
 client.set_field(obj, "fieldName", value)             # Set field value
 client.is_instance_of(obj, "java.util.List")          # Check instance type
+client.ping()                                         # Health check (returns True if alive)
 client.get_metrics()                                  # Get server metrics report
 
 # Vectorized operations (single round-trip for multiple operations)

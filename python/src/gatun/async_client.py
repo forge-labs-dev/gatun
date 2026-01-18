@@ -848,6 +848,34 @@ class AsyncGatunClient:
 
         return cast(bool, await self._send_raw(builder.Output()))
 
+    async def ping(self) -> bool:
+        """Check if the Java server is alive and responsive.
+
+        This is a lightweight health check that sends a minimal request
+        to the server and waits for a response. Useful for:
+        - Verifying connection is still valid
+        - Detecting stale connections before making expensive calls
+        - Health checks in monitoring systems
+
+        Returns:
+            True if the server responded successfully.
+
+        Raises:
+            Various exceptions if the connection is dead or server unresponsive.
+
+        Example:
+            if await client.ping():
+                print("Server is alive")
+        """
+        builder = flatbuffers.Builder(256)
+
+        Cmd.CommandStart(builder)
+        Cmd.CommandAddAction(builder, Act.Action.Ping)
+        cmd = Cmd.CommandEnd(builder)
+        builder.Finish(cmd)
+
+        return cast(bool, await self._send_raw(builder.Output()))
+
     async def get_metrics(self) -> str:
         """Get server metrics report asynchronously.
 

@@ -15,6 +15,11 @@ def test_protocol_version_exported():
     assert PROTOCOL_VERSION >= 1
 
 
+def test_ping(client):
+    """Verify ping health check works."""
+    assert client.ping() is True
+
+
 def test_security_access_denied(client):
     """Verify we cannot free an object we don't own (simulated)."""
     obj = client.create_object("java.util.ArrayList")

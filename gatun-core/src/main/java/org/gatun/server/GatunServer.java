@@ -1096,6 +1096,9 @@ public class GatunServer {
           } else if (cmd.action() == Action.GetMetrics) {
             // Return server metrics as a string report
             result = Metrics.getInstance().report();
+          } else if (cmd.action() == Action.Ping) {
+            // Health check - just return true to confirm server is alive
+            result = true;
           }
 
           // 3. Pack Success
