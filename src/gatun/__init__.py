@@ -40,7 +40,13 @@ from gatun.async_client import (
 )
 from gatun.config import GatunConfig, get_config, load_config, reset_config
 from gatun.launcher import launch_gateway, GatunSession
-from gatun.arena import PayloadArena, UnsupportedArrowTypeError
+from gatun.arena import (
+    PayloadArena,
+    UnsupportedArrowTypeError,
+    ScopedArenaContext,
+    AsyncScopedArenaContext,
+    estimate_arrow_size,
+)
 
 __all__ = [
     # Sync client
@@ -93,6 +99,9 @@ __all__ = [
     "UnsupportedArrowTypeError",
     "StaleArenaError",
     "ArrowTableView",
+    "ScopedArenaContext",
+    "AsyncScopedArenaContext",
+    "estimate_arrow_size",
 ]
 
 

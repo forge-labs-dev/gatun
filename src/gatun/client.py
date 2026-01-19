@@ -16,7 +16,7 @@ import flatbuffers
 import pyarrow as pa
 
 if TYPE_CHECKING:
-    from gatun.arena import PayloadArena
+    from gatun.arena import PayloadArena, ScopedArenaContext
 
 from gatun.generated.org.gatun.protocol import Command as Cmd
 from gatun.generated.org.gatun.protocol import Action as Act
@@ -1375,6 +1375,30 @@ class GatunClient:
         payload_size = self.response_offset - self.payload_offset
         assert self.shm is not None, "Not connected"
         return PayloadArena.from_mmap(self.shm, self.payload_offset, payload_size)
+
+    def arrow_context(self) -> "ScopedArenaContext":
+        """Get a context manager for scoped Arrow transfers.
+
+        Provides automatic arena lifecycle management with reset between sends
+        and cleanup on context exit. This is the recommended way to transfer
+        Arrow data when sending multiple tables.
+
+        Returns:
+            ScopedArenaContext for use in a with statement.
+
+        Example:
+            with client.arrow_context() as ctx:
+                # Send multiple tables (arena auto-resets between sends)
+                ctx.send(table1)
+                ctx.send(table2)
+
+                # Receive data back from Java (returns owned copy)
+                result = ctx.receive()
+            # Arena automatically cleaned up on exit
+        """
+        from gatun.arena import ScopedArenaContext
+
+        return ScopedArenaContext(self)
 
     def _send_raw(self, data: bytes, wait_for_response=True, expects_response=True):
         """
@@ -3201,6 +3225,13 @@ class GatunClient:
         Returns:
             Response from Java after processing the batch.
 
+        Raises:
+            PayloadTooLargeError: If the table is too large for the arena's
+                                 available space. The error includes the
+                                 estimated size and available space.
+            UnsupportedArrowTypeError: If the table contains unsupported types
+                                      (e.g., dictionary encoding).
+
         Example:
             from gatun.arena import PayloadArena
 
@@ -3218,7 +3249,19 @@ class GatunClient:
             copy_arrow_table_to_arena,
             compute_schema_hash,
             serialize_schema,
+            estimate_arrow_size,
         )
+
+        # 0. Pre-check available space to provide informative error
+        estimated = estimate_arrow_size(table)
+        available = arena.bytes_available()
+        if estimated > available:
+            raise PayloadTooLargeError(
+                estimated,
+                available,
+                f"Arrow table with {table.num_rows} rows. "
+                f"Consider resetting arena or using streaming for large tables.",
+            )
 
         # 1. Copy table buffers into the arena
         buffer_infos, field_nodes = copy_arrow_table_to_arena(table, arena)
@@ -3267,6 +3310,7 @@ class GatunClient:
         nodes_vec = builder.EndVector()
 
         # Build ArrowBatchDescriptor
+        # direction: 0 = Python->Java (default), 1 = Java->Python
         ArrowBatchDescriptor.Start(builder)
         ArrowBatchDescriptor.AddSchemaHash(builder, schema_hash)
         if schema_bytes_vec is not None:
@@ -3275,6 +3319,7 @@ class GatunClient:
         ArrowBatchDescriptor.AddNodes(builder, nodes_vec)
         ArrowBatchDescriptor.AddBuffers(builder, buffers_vec)
         ArrowBatchDescriptor.AddArenaEpoch(builder, self._arena_epoch)
+        ArrowBatchDescriptor.AddDirection(builder, 0)  # Python -> Java
         batch_descriptor = ArrowBatchDescriptor.End(builder)
 
         # Build Command

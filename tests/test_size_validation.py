@@ -262,7 +262,7 @@ def test_send_arrow_table_batched_many_batches(client):
 
 
 def test_send_arrow_buffers_payload_overflow(client):
-    """Test that MemoryError is raised when data exceeds payload arena."""
+    """Test that PayloadTooLargeError is raised when data exceeds payload arena."""
     import pyarrow as pa
 
     # Get payload zone size
@@ -278,11 +278,15 @@ def test_send_arrow_buffers_payload_overflow(client):
     arena = client.get_payload_arena()
     schema_cache = {}
 
-    # Arena raises MemoryError when allocation exceeds available space
-    with pytest.raises(MemoryError) as exc_info:
+    # Pre-validation now raises PayloadTooLargeError before attempting allocation
+    with pytest.raises(PayloadTooLargeError) as exc_info:
         client.send_arrow_buffers(table, arena, schema_cache)
 
-    assert "Payload arena full" in str(exc_info.value)
+    # Verify error message provides helpful context
+    error = exc_info.value
+    assert error.payload_size > 0
+    assert error.max_size > 0
+    assert "rows" in str(error).lower()  # Should mention row count
 
 
 def test_send_arrow_buffers_near_payload_limit(client):

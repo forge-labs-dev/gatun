@@ -238,10 +238,14 @@ public class ArrowMemoryHandler {
     int numNodes = batchDesc.nodesLength();
     int numBuffers = batchDesc.buffersLength();
 
+    // Read direction field (0 = Python->Java, 1 = Java->Python)
+    // Currently used for logging; future versions may use for dynamic zone allocation
+    int direction = batchDesc.direction();
+
     LOG.fine(
         String.format(
-            "Arrow buffers received: schema_hash=%d, rows=%d, nodes=%d, buffers=%d, epoch=%d",
-            schemaHash, numRows, numNodes, numBuffers, descriptorEpoch));
+            "Arrow buffers received: schema_hash=%d, rows=%d, nodes=%d, buffers=%d, epoch=%d, direction=%d",
+            schemaHash, numRows, numNodes, numBuffers, descriptorEpoch, direction));
 
     // 1. Get or deserialize schema
     Schema schema = schemaCache.get(schemaHash);
@@ -470,6 +474,27 @@ public class ArrowMemoryHandler {
    */
   public ArrowWriteResult writeArrowBuffers(
       VectorSchemaRoot root, MemorySegment payloadShm, java.util.Set<Long> pythonSchemaCache) {
+    // Default: use second half of zone (safe for bidirectional transfers)
+    return writeArrowBuffers(root, payloadShm, pythonSchemaCache, false);
+  }
+
+  /**
+   * Write the current VectorSchemaRoot to the payload shared memory zone.
+   *
+   * <p>This overload allows using the full zone when Python's zone is known to be free.
+   *
+   * @param root The VectorSchemaRoot containing the data to write
+   * @param payloadShm Memory segment for the payload shared memory
+   * @param pythonSchemaCache Set of schema hashes that Python has cached
+   * @param useFullZone If true, use the full zone [0, size) instead of just [size/2, size).
+   *     Only use this when you know Python's zone is not in use.
+   * @return ArrowWriteResult containing buffer descriptors and metadata
+   */
+  public ArrowWriteResult writeArrowBuffers(
+      VectorSchemaRoot root,
+      MemorySegment payloadShm,
+      java.util.Set<Long> pythonSchemaCache,
+      boolean useFullZone) {
 
     Schema schema = root.getSchema();
 
@@ -510,10 +535,15 @@ public class ArrowMemoryHandler {
       }
 
       // Write buffers to payload shm with 64-byte alignment
-      // Java -> Python: write to SECOND HALF of payload zone [size/2, size)
-      // This avoids overwriting Python -> Java data in the first half
-      long halfPayloadSize = payloadShm.byteSize() / 2;
-      long currentOffset = halfPayloadSize;
+      // Default: Java -> Python writes to SECOND HALF of payload zone [size/2, size)
+      // This avoids overwriting Python -> Java data in the first half.
+      // When useFullZone is true, write from the beginning [0, size) for full capacity.
+      long startOffset = useFullZone ? 0 : payloadShm.byteSize() / 2;
+      long currentOffset = startOffset;
+
+      LOG.fine(
+          String.format(
+              "Writing Arrow buffers: useFullZone=%b, startOffset=%d", useFullZone, startOffset));
 
       for (ArrowBuf buffer : recordBatch.getBuffers()) {
         long length = buffer.readableBytes();

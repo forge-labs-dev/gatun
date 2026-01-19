@@ -476,7 +476,7 @@ This distinction exists because Object arrays are kept as references on the Java
 
 ### Arrow Data Transfer
 
-Gatun supports two methods for transferring Arrow data between Python and Java:
+Gatun supports multiple methods for transferring Arrow data between Python and Java:
 
 ```python
 from gatun import connect
@@ -488,7 +488,15 @@ client = connect()
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
 result = client.send_arrow_table(table)  # "Received 3 rows"
 
-# Method 2: Zero-Copy Buffer Transfer (optimal for large data)
+# Method 2: Scoped Context Manager (recommended for most use cases)
+# Handles arena lifecycle automatically with proper cleanup
+with client.arrow_context() as ctx:
+    ctx.send(table)              # Auto-resets arena between sends
+    ctx.send(another_table)      # Safe to send multiple tables
+    result = ctx.receive()       # Get data back as PyArrow table
+# Arena automatically closed on exit
+
+# Method 3: Zero-Copy Buffer Transfer (manual control for advanced use)
 table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
 arena = client.get_payload_arena()
 schema_cache = {}
@@ -498,6 +506,33 @@ client.send_arrow_buffers(table, arena, schema_cache)
 result_view = client.get_arrow_data()
 print(result_view.num_rows)  # 2
 print(result_view.to_pydict())  # {'name': ['Alice', 'Bob'], 'age': [25, 30]}
+
+arena.close()
+```
+
+#### Size Validation
+
+Gatun validates data size before transfer and provides informative errors:
+
+```python
+from gatun import connect, PayloadTooLargeError, estimate_arrow_size
+import pyarrow as pa
+
+client = connect(memory="16MB")
+arena = client.get_payload_arena()
+
+# Check size before sending
+large_table = pa.table({"data": list(range(1_000_000))})
+estimated_size = estimate_arrow_size(large_table)
+print(f"Estimated size: {estimated_size:,} bytes")
+print(f"Available: {arena.bytes_available():,} bytes")
+
+# If too large, get a clear error
+try:
+    client.send_arrow_buffers(large_table, arena, {})
+except PayloadTooLargeError as e:
+    print(f"Table too large: {e.payload_size:,} > {e.max_size:,} bytes")
+    print("Consider: reset arena, use batching, or increase memory")
 
 arena.close()
 ```
@@ -609,13 +644,50 @@ This prevents:
 
 ### Best Practices
 
+#### Recommended: Use the Context Manager
+
 ```python
 from gatun import connect
 import pyarrow as pa
 
-client = connect(memory="256MB")  # Larger memory for big datasets
+client = connect(memory="256MB")
 
-# For multiple transfers, reset arena between sends
+# Simple case: send and receive with automatic cleanup
+with client.arrow_context() as ctx:
+    ctx.send(my_table)
+    result = ctx.receive()
+    # Process result...
+# Arena automatically cleaned up, even on exceptions
+```
+
+#### For Batch Processing
+
+```python
+from gatun import connect, estimate_arrow_size
+import pyarrow as pa
+
+client = connect(memory="256MB")
+
+# Process large dataset in batches
+with client.arrow_context() as ctx:
+    for batch in large_table.to_batches(max_chunksize=100_000):
+        ctx.send(batch)  # Auto-resets arena between sends
+        # Process batch in Java...
+
+# Async version works the same way
+async with client.arrow_context() as ctx:
+    await ctx.send(table)
+```
+
+#### Manual Control (Advanced)
+
+```python
+from gatun import connect
+import pyarrow as pa
+
+client = connect(memory="256MB")
+
+# For fine-grained control over arena lifecycle
 arena = client.get_payload_arena()
 schema_cache = {}  # Reuse cache for schema deduplication
 
@@ -630,11 +702,11 @@ arena.close()
 ```
 
 **Guidelines:**
+- Use `arrow_context()` for most use cases - handles cleanup automatically
 - Use `send_arrow_table()` for small data (< 1K rows) - simpler API
-- Use `send_arrow_buffers()` for large data - better performance
-- Reset arena between transfers to avoid memory exhaustion
+- Use `send_arrow_buffers()` with manual arena for maximum control
+- Use `estimate_arrow_size()` to check size before large transfers
 - Keep `schema_cache` across transfers to avoid re-serializing schema
-- Check `arena.bytes_remaining()` before large transfers
 
 ### Low-Level API
 

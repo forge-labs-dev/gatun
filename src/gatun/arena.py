@@ -18,6 +18,14 @@ Example:
     arena.reset()
 
     arena.close()
+
+For scoped transfers with automatic cleanup, use ScopedArenaContext:
+
+    with client.arrow_context() as ctx:
+        for table in tables:
+            ctx.send(table)  # Auto-resets arena between sends
+        result = ctx.receive()  # Get data back from Java
+    # Arena automatically closed and reset on exit
 """
 
 from __future__ import annotations
@@ -26,9 +34,13 @@ import ctypes
 import io
 import mmap
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import pyarrow as pa
+
+if TYPE_CHECKING:
+    from gatun.client import GatunClient
+    from gatun.async_client import AsyncGatunClient
 
 
 class BufferInfo(NamedTuple):
@@ -566,3 +578,203 @@ def serialize_schema(schema: pa.Schema) -> bytes:
 def deserialize_schema(schema_bytes: bytes) -> pa.Schema:
     """Deserialize an Arrow schema from IPC format bytes."""
     return pa.ipc.read_schema(pa.BufferReader(schema_bytes))
+
+
+def estimate_arrow_size(table: pa.Table) -> int:
+    """Estimate buffer size needed for an Arrow table (conservative estimate).
+
+    This function estimates the total buffer size required to store a table
+    in the payload arena, including alignment padding. The estimate is
+    conservative (may overestimate) to ensure allocations don't fail.
+
+    Args:
+        table: PyArrow Table to estimate size for
+
+    Returns:
+        Estimated size in bytes including alignment padding
+    """
+    total = 0
+    for column in table.columns:
+        for chunk in column.chunks:
+            for buf in chunk.buffers():
+                if buf is not None:
+                    # Add buffer size plus maximum alignment padding (64 bytes)
+                    total += buf.size + PayloadArena.ALIGNMENT
+    return total
+
+
+class ScopedArenaContext:
+    """Context manager for scoped Arrow transfers with automatic cleanup.
+
+    Provides a convenient way to send and receive Arrow data with automatic
+    arena lifecycle management. The arena is reset between sends and cleaned
+    up on context exit.
+
+    Example:
+        with client.arrow_context() as ctx:
+            # Send multiple tables (arena auto-resets between sends)
+            ctx.send(table1)
+            ctx.send(table2)
+
+            # Receive data back from Java (copies to ensure validity after exit)
+            result = ctx.receive()
+
+        # Arena is automatically closed and reset on exit
+
+    Attributes:
+        client: The GatunClient instance
+        schema_cache: Schema cache shared across all sends in this context
+    """
+
+    def __init__(self, client: "GatunClient"):
+        """Initialize the scoped arena context.
+
+        Args:
+            client: GatunClient instance to use for transfers
+        """
+        self._client = client
+        self._arena: PayloadArena | None = None
+        self._schema_cache: dict[int, bool] = {}
+        self._entered = False
+
+    def __enter__(self) -> "ScopedArenaContext":
+        """Enter the context and acquire the arena."""
+        if self._entered:
+            raise RuntimeError("ScopedArenaContext is not reentrant")
+        self._arena = self._client.get_payload_arena()
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit the context, reset and close the arena."""
+        if self._arena:
+            try:
+                # Reset arena and notify server
+                self._arena.reset()
+                self._client.reset_payload_arena()
+            finally:
+                self._arena.close()
+                self._arena = None
+        self._entered = False
+
+    def send(self, table: pa.Table) -> str:
+        """Send an Arrow table to Java, auto-resetting arena first.
+
+        This method resets the arena before each send, allowing the same
+        arena to be reused for multiple sequential transfers.
+
+        Args:
+            table: PyArrow Table to send
+
+        Returns:
+            Response string from Java (e.g., "Received N rows")
+
+        Raises:
+            RuntimeError: If called outside of context manager
+            PayloadTooLargeError: If table is too large for arena
+        """
+        if not self._entered or self._arena is None:
+            raise RuntimeError("send() must be called within a context manager")
+
+        # Reset arena for this transfer
+        self._arena.reset()
+
+        # Send using the client's method
+        result: str = self._client.send_arrow_buffers(
+            table, self._arena, self._schema_cache
+        )
+        return result
+
+    def receive(self) -> pa.Table:
+        """Receive Arrow data from Java, returning a copy.
+
+        The returned table is a copy of the data, ensuring it remains valid
+        after the context exits (when the arena is reset).
+
+        Returns:
+            PyArrow Table with data from Java (owned copy)
+
+        Raises:
+            RuntimeError: If called outside of context manager
+        """
+        if not self._entered or self._arena is None:
+            raise RuntimeError("receive() must be called within a context manager")
+
+        # Get the view (backed by shared memory)
+        view = self._client.get_arrow_data()
+
+        # Return a copy to ensure validity after context exit
+        # to_pandas().to_arrow() would work but is slower
+        # Using pa.Table.from_batches with a RecordBatch copy
+        return pa.table(view.to_pydict())
+
+    @property
+    def arena(self) -> PayloadArena | None:
+        """Get the underlying arena (for advanced use)."""
+        return self._arena
+
+    @property
+    def schema_cache(self) -> dict[int, bool]:
+        """Get the schema cache (shared across sends)."""
+        return self._schema_cache
+
+
+class AsyncScopedArenaContext:
+    """Async context manager for scoped Arrow transfers with automatic cleanup.
+
+    Similar to ScopedArenaContext but for use with AsyncGatunClient.
+    Uses send_arrow_table() for async transfers (IPC format).
+
+    Example:
+        async with client.arrow_context() as ctx:
+            # Send multiple tables
+            await ctx.send(table1)
+            await ctx.send(table2)
+
+        # Resources automatically cleaned up on exit
+
+    Attributes:
+        client: The AsyncGatunClient instance
+    """
+
+    def __init__(self, client: "AsyncGatunClient"):
+        """Initialize the async scoped arena context.
+
+        Args:
+            client: AsyncGatunClient instance to use for transfers
+        """
+        self._client = client
+        self._entered = False
+
+    async def __aenter__(self) -> "AsyncScopedArenaContext":
+        """Enter the context."""
+        if self._entered:
+            raise RuntimeError("AsyncScopedArenaContext is not reentrant")
+        self._entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit the context."""
+        self._entered = False
+
+    async def send(self, table: pa.Table) -> str:
+        """Send an Arrow table to Java.
+
+        Uses the async client's send_arrow_table() method which uses
+        Arrow IPC format for transfer.
+
+        Args:
+            table: PyArrow Table to send
+
+        Returns:
+            Response string from Java (e.g., "Received N rows")
+
+        Raises:
+            RuntimeError: If called outside of context manager
+            PayloadTooLargeError: If table is too large for shared memory
+        """
+        if not self._entered:
+            raise RuntimeError("send() must be called within a context manager")
+
+        result: str = await self._client.send_arrow_table(table)
+        return result

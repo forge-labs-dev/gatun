@@ -25,10 +25,13 @@ import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Any, Callable, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, cast
 
 import flatbuffers
 import pyarrow as pa
+
+if TYPE_CHECKING:
+    from gatun.arena import AsyncScopedArenaContext
 
 from gatun.client import (
     CallbackTimeoutError,
@@ -1206,6 +1209,25 @@ class AsyncGatunClient:
         builder.Finish(cmd)
 
         return await self._send_raw(builder.Output())
+
+    def arrow_context(self) -> "AsyncScopedArenaContext":
+        """Get an async context manager for scoped Arrow transfers.
+
+        Provides a convenient way to send Arrow data with automatic cleanup.
+        Uses send_arrow_table() for transfers (IPC format).
+
+        Returns:
+            AsyncScopedArenaContext for use with async with statement
+
+        Example:
+            async with client.arrow_context() as ctx:
+                await ctx.send(table1)
+                await ctx.send(table2)
+            # Automatically cleaned up on exit
+        """
+        from gatun.arena import AsyncScopedArenaContext
+
+        return AsyncScopedArenaContext(self)
 
     async def close(self):
         """Close the connection."""

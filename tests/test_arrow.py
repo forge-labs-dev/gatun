@@ -1,7 +1,13 @@
 import pyarrow as pa
 import pytest
 
-from gatun import PayloadArena, StaleArenaError, UnsupportedArrowTypeError
+from gatun import (
+    PayloadArena,
+    StaleArenaError,
+    UnsupportedArrowTypeError,
+    PayloadTooLargeError,
+    estimate_arrow_size,
+)
 
 
 def test_send_pyarrow_table(client):
@@ -842,5 +848,209 @@ def test_payload_arena_bytes_available(tmp_path):
 
     arena.reset()
     assert arena.bytes_available() == 1024
+
+    arena.close()
+
+
+# --- Phase 1 Feature Tests ---
+
+
+def test_estimate_arrow_size():
+    """Test estimate_arrow_size provides reasonable estimates."""
+    # Simple table
+    table = pa.table(
+        {
+            "x": pa.array([1, 2, 3, 4, 5], type=pa.int64()),
+            "y": pa.array(["hello", "world", "test", "data", "example"]),
+        }
+    )
+
+    estimated = estimate_arrow_size(table)
+
+    # Should be positive and include some padding
+    assert estimated > 0
+
+    # Should be larger than just the raw data size (includes alignment padding)
+    raw_size = sum(
+        buf.size
+        for col in table.columns
+        for chunk in col.chunks
+        for buf in chunk.buffers()
+        if buf is not None
+    )
+    assert estimated >= raw_size
+
+    # Should include alignment padding (64 bytes per buffer)
+    num_buffers = sum(
+        1
+        for col in table.columns
+        for chunk in col.chunks
+        for buf in chunk.buffers()
+        if buf is not None
+    )
+    assert estimated >= raw_size + num_buffers * 64
+
+
+def test_estimate_arrow_size_empty_table():
+    """Test estimate_arrow_size with empty table."""
+    table = pa.table({"x": pa.array([], type=pa.int64())})
+    estimated = estimate_arrow_size(table)
+    # Empty table should still have minimal overhead
+    assert estimated >= 0
+
+
+def test_estimate_arrow_size_with_nulls():
+    """Test estimate_arrow_size accounts for validity bitmaps."""
+    table = pa.table({"x": pa.array([1, None, 3, None, 5], type=pa.int64())})
+    estimated = estimate_arrow_size(table)
+
+    # With nulls, we have an additional validity buffer
+    assert estimated > 0
+
+
+def test_scoped_arena_context_basic(client):
+    """Test ScopedArenaContext for basic send operations."""
+    table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "name": pa.array(["Alice", "Bob", "Charlie"]),
+        }
+    )
+
+    with client.arrow_context() as ctx:
+        response = ctx.send(table)
+        assert f"Received {table.num_rows} rows" in str(response)
+
+
+def test_scoped_arena_context_multiple_sends(client):
+    """Test ScopedArenaContext handles multiple sends with auto-reset."""
+    table1 = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
+    table2 = pa.table({"y": pa.array([4, 5, 6], type=pa.int64())})
+    table3 = pa.table({"z": pa.array([7, 8, 9], type=pa.int64())})
+
+    with client.arrow_context() as ctx:
+        # Multiple sends should work (arena auto-resets between sends)
+        response1 = ctx.send(table1)
+        assert "Received 3 rows" in str(response1)
+
+        response2 = ctx.send(table2)
+        assert "Received 3 rows" in str(response2)
+
+        response3 = ctx.send(table3)
+        assert "Received 3 rows" in str(response3)
+
+
+def test_scoped_arena_context_receive(client):
+    """Test ScopedArenaContext receive operation."""
+    original_table = pa.table(
+        {
+            "id": pa.array([1, 2, 3], type=pa.int64()),
+            "value": pa.array([10.0, 20.0, 30.0], type=pa.float64()),
+        }
+    )
+
+    with client.arrow_context() as ctx:
+        ctx.send(original_table)
+        received = ctx.receive()
+
+        # Received is a PyArrow table, check columns
+        assert received.column("id").to_pylist() == [1, 2, 3]
+        assert received.column("value").to_pylist() == [10.0, 20.0, 30.0]
+
+
+def test_scoped_arena_context_not_reentrant(client):
+    """Test that ScopedArenaContext is not reentrant."""
+    with client.arrow_context() as ctx:
+        # Trying to enter the same context again should fail
+        with pytest.raises(RuntimeError) as exc_info:
+            ctx.__enter__()
+        assert "reentrant" in str(exc_info.value).lower()
+
+
+def test_scoped_arena_context_send_outside_context(client):
+    """Test that send() outside context raises error."""
+    ctx = client.arrow_context()
+    table = pa.table({"x": pa.array([1], type=pa.int64())})
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ctx.send(table)
+    assert "context manager" in str(exc_info.value).lower()
+
+
+def test_scoped_arena_context_receive_outside_context(client):
+    """Test that receive() outside context raises error."""
+    ctx = client.arrow_context()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ctx.receive()
+    assert "context manager" in str(exc_info.value).lower()
+
+
+def test_scoped_arena_context_exception_cleanup(client):
+    """Test that ScopedArenaContext cleans up on exception."""
+    table = pa.table({"x": pa.array([1, 2, 3], type=pa.int64())})
+
+    class TestException(Exception):
+        pass
+
+    with pytest.raises(TestException):
+        with client.arrow_context() as ctx:
+            ctx.send(table)
+            raise TestException("Test error")
+
+    # After exception, context should be properly cleaned up
+    # A new context should work
+    with client.arrow_context() as ctx:
+        response = ctx.send(table)
+        assert "Received 3 rows" in str(response)
+
+
+def test_send_arrow_buffers_size_validation(client):
+    """Test that send_arrow_buffers validates size before transfer."""
+    # Create a large table
+    large_array = pa.array(list(range(100000)), type=pa.int64())
+    large_table = pa.table({"big_col": large_array})
+
+    # Get the arena (which has limited size)
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Estimate the size needed
+    estimated = estimate_arrow_size(large_table)
+
+    # If table is larger than arena, should raise PayloadTooLargeError
+    if estimated > arena.bytes_available():
+        with pytest.raises(PayloadTooLargeError) as exc_info:
+            client.send_arrow_buffers(large_table, arena, schema_cache)
+
+        error = exc_info.value
+        assert error.payload_size > 0
+        assert error.max_size > 0
+        assert "rows" in str(error).lower()
+
+    arena.close()
+
+
+def test_send_arrow_buffers_size_validation_after_partial_use(client):
+    """Test size validation when arena is partially used."""
+    # Create a table that needs more than a few bytes
+    table = pa.table({"x": pa.array(list(range(100)), type=pa.int64())})
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Estimate how much space the table needs
+    estimated = estimate_arrow_size(table)
+
+    # Fill arena so there's not enough space for the table
+    space_to_leave = estimated // 2  # Leave less than half what's needed
+    arena.allocate(arena.bytes_available() - space_to_leave)
+
+    # Now try to send data - should fail with informative error
+    with pytest.raises(PayloadTooLargeError) as exc_info:
+        client.send_arrow_buffers(table, arena, schema_cache)
+
+    error = exc_info.value
+    assert "Consider resetting arena" in str(error)
 
     arena.close()

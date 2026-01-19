@@ -382,7 +382,7 @@ client.create_objects([("class1", ()), ("class2", (arg,))])  # Multiple creation
 ```
 
 ### Arrow Data Transfer
-Two methods for transferring Arrow data:
+Multiple methods for transferring Arrow data:
 
 #### IPC Format (Simple)
 ```python
@@ -392,8 +392,41 @@ table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
 result = client.send_arrow_table(table)  # "Received 3 rows"
 ```
 
-#### Zero-Copy Buffer Transfer (Optimal)
-For maximum performance, use buffer descriptors to avoid IPC serialization:
+#### Scoped Context Manager (Recommended)
+Handles arena lifecycle automatically with proper cleanup:
+```python
+import pyarrow as pa
+
+# Send and receive with automatic cleanup
+with client.arrow_context() as ctx:
+    ctx.send(table1)          # Auto-resets arena between sends
+    ctx.send(table2)          # Safe to send multiple tables
+    result = ctx.receive()    # Get data back as PyArrow table
+# Arena automatically closed on exit
+
+# Async version
+async with client.arrow_context() as ctx:
+    await ctx.send(table)
+```
+
+#### Size Validation
+Check size before transfer to avoid errors:
+```python
+from gatun import estimate_arrow_size, PayloadTooLargeError
+
+# Estimate buffer size needed
+estimated = estimate_arrow_size(large_table)
+print(f"Estimated: {estimated:,} bytes")
+
+# Size is validated automatically - raises PayloadTooLargeError if too large
+try:
+    client.send_arrow_buffers(large_table, arena, {})
+except PayloadTooLargeError as e:
+    print(f"Too large: {e.payload_size:,} > {e.max_size:,} bytes")
+```
+
+#### Zero-Copy Buffer Transfer (Manual Control)
+For maximum performance with fine-grained control:
 ```python
 import pyarrow as pa
 

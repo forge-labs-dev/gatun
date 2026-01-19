@@ -134,18 +134,25 @@ table FieldNode {
 // Arrow batch descriptor for zero-copy transfer
 // Sent with SendArrowBuffers action (Python -> Java) or in Response (Java -> Python)
 //
-// PAYLOAD ZONE LAYOUT:
+// PAYLOAD ZONE LAYOUT (with dynamic allocation):
 // The payload shared memory is logically divided into two halves:
-// - First half (offset 0 to size/2): Used by Python -> Java transfers
-// - Second half (offset size/2 to size): Used by Java -> Python transfers
+// - First half (offset 0 to size/2): Default zone for Python -> Java transfers
+// - Second half (offset size/2 to size): Default zone for Java -> Python transfers
 //
-// This avoids overwriting source data during bidirectional transfers.
+// Dynamic zone allocation allows using the full zone for unidirectional transfers
+// when the opposite direction's zone is not in use. The `direction` field indicates
+// the transfer direction, enabling the receiver to know which zone to expect data in.
+//
 // Buffer offsets in this descriptor are absolute offsets from the start of
 // the payload zone, so Python/Java can compute the correct address as:
 //   buffer_address = payload_base_address + buffer_descriptor.offset
 //
+// Default allocation (for bidirectional safety):
 // When Python sends data: offsets are in [0, size/2)
 // When Java sends data: offsets are in [size/2, size)
+//
+// Full zone allocation (when opposite zone is free):
+// Either side may use offsets in [0, size) for the full capacity
 table ArrowBatchDescriptor {
   // Schema: serialized Arrow IPC schema bytes (cached by hash)
   schema_hash: uint64;        // Hash of schema for caching
@@ -162,6 +169,12 @@ table ArrowBatchDescriptor {
   // Incremented on each reset_payload_arena() call
   // Tables with stale epoch are invalid after arena reset
   arena_epoch: uint64;
+
+  // Transfer direction for dynamic zone allocation
+  // 0 = Python -> Java (default, uses first half of zone)
+  // 1 = Java -> Python (uses second half of zone)
+  // When opposite direction's zone is free, the full zone may be used
+  direction: ubyte = 0;
 }
 
 // --- Vectorized Command Support ---
