@@ -585,3 +585,238 @@ class TestBulkDataFrameOperations:
         field_names = [schema.apply(i).name() for i in range(schema.size())]
         assert "row_num" in field_names
         assert "running_sum" in field_names
+
+
+class TestLargeDataFrameArrowTransfer:
+    """Tests for large DataFrame operations with Arrow data transfer."""
+
+    def test_large_dataframe_with_complex_operations(self, spark_session, spark_client):
+        """Test creating a large DataFrame, performing operations, and collecting results.
+
+        This test demonstrates:
+        1. Creating a 50,000 row DataFrame in Java
+        2. Performing multiple transformations (filter, select, aggregate, join)
+        3. Collecting aggregated results back to Python
+        """
+        import pyarrow as pa
+
+        # 1. Create a large DataFrame in Java
+        size = 50_000
+        df = spark_session.range(size).selectExpr(
+            "id",
+            "id % 100 as category",
+            "id % 10 as subcategory",
+            "cast(id as double) * 1.5 as value",
+            "concat('item_', cast(id as string)) as name",
+        )
+
+        # Verify initial size
+        assert df.count() == size
+
+        # 2. Perform complex operations
+        # Filter to keep ~half the rows
+        filtered = df.filter("category < 50")
+        assert filtered.count() == size // 2
+
+        # Add computed columns
+        functions = spark_client.jvm.org.apache.spark.sql.functions
+        transformed = filtered.withColumn(
+            "value_squared", functions.pow(filtered.col("value"), functions.lit(2.0))
+        ).withColumn(
+            "category_name",
+            functions.concat(functions.lit("cat_"), filtered.col("category")),
+        )
+
+        # 3. Aggregate by category
+        aggregated = (
+            transformed.groupBy("category")
+            .agg(
+                functions.count("*").alias("count"),
+                functions.sum("value").alias("total_value"),
+                functions.avg("value").alias("avg_value"),
+                functions.min("id").alias("min_id"),
+                functions.max("id").alias("max_id"),
+            )
+            .orderBy("category")
+        )
+
+        # Should have 50 distinct categories (0-49)
+        agg_count = aggregated.count()
+        assert agg_count == 50
+
+        # 4. Collect results to Python
+        rows = list(aggregated.collect())
+        assert len(rows) == 50
+
+        # Verify first row (category 0)
+        first_row = rows[0]
+        assert first_row.getLong(0) == 0  # category
+        assert first_row.getLong(1) == 500  # count (50000/2/50 = 500 rows per category)
+
+        # Verify last row (category 49)
+        last_row = rows[49]
+        assert last_row.getLong(0) == 49  # category
+
+        # 5. Convert collected results to PyArrow table for Python processing
+        # Extract data from Java Row objects
+        categories = []
+        counts = []
+        total_values = []
+        avg_values = []
+
+        for row in rows:
+            categories.append(row.getLong(0))
+            counts.append(row.getLong(1))
+            total_values.append(row.getDouble(2))
+            avg_values.append(row.getDouble(3))
+
+        # Create PyArrow table from collected data
+        result_table = pa.table(
+            {
+                "category": pa.array(categories, type=pa.int64()),
+                "count": pa.array(counts, type=pa.int64()),
+                "total_value": pa.array(total_values, type=pa.float64()),
+                "avg_value": pa.array(avg_values, type=pa.float64()),
+            }
+        )
+
+        # Verify the Arrow table
+        assert result_table.num_rows == 50
+        assert result_table.num_columns == 4
+
+        # Verify data integrity
+        assert result_table.column("category")[0].as_py() == 0
+        assert result_table.column("count")[0].as_py() == 500
+
+    def test_arrow_roundtrip_with_spark_processing(self, spark_session, spark_client):
+        """Test Arrow data round-trip with Spark-like processing.
+
+        This test demonstrates:
+        1. Creating Arrow data in Python
+        2. Sending to Java via zero-copy transfer
+        3. Getting it back as Arrow via get_arrow_data()
+        4. Verifying data integrity
+        """
+        import pyarrow as pa
+
+        # 1. Create source data in Python
+        size = 10_000
+        source_table = pa.table(
+            {
+                "id": pa.array(range(size), type=pa.int64()),
+                "category": pa.array([i % 20 for i in range(size)], type=pa.int64()),
+                "value": pa.array(
+                    [float(i) * 1.5 for i in range(size)], type=pa.float64()
+                ),
+            }
+        )
+
+        # 2. Send to Java via zero-copy
+        arena = spark_client.get_payload_arena()
+        schema_cache = {}
+
+        response = spark_client.send_arrow_buffers(source_table, arena, schema_cache)
+        assert f"Received {size} rows" in str(response)
+
+        # 3. Get data back from Java
+        result_view = spark_client.get_arrow_data()
+
+        # 4. Verify the returned data
+        assert result_view.num_rows == size
+        assert result_view.num_columns == 3
+
+        # Convert to Python dict for verification
+        result_dict = result_view.to_pydict()
+
+        # Verify columns exist
+        assert "id" in result_dict
+        assert "category" in result_dict
+        assert "value" in result_dict
+
+        # Verify data values
+        assert result_dict["id"][0] == 0
+        assert result_dict["id"][size - 1] == size - 1
+        assert result_dict["category"][0] == 0
+        assert result_dict["category"][20] == 0  # 20 % 20 = 0
+        assert abs(result_dict["value"][100] - 150.0) < 0.0001  # 100 * 1.5
+
+        arena.close()
+
+    def test_large_join_and_collect(self, spark_session, spark_client):
+        """Test joining large DataFrames and collecting results.
+
+        This test creates two DataFrames, joins them, and transfers
+        aggregated results back to Python.
+        """
+        import pyarrow as pa
+
+        # Create two large DataFrames
+        size = 20_000
+
+        # Fact table: transactions
+        transactions = spark_session.range(size).selectExpr(
+            "id as txn_id",
+            "id % 100 as customer_id",
+            "cast(id as double) * 10.0 as amount",
+            "id % 5 as product_category",
+        )
+
+        # Dimension table: customers (100 unique customers)
+        customers = spark_session.range(100).selectExpr(
+            "id as customer_id",
+            "concat('Customer_', cast(id as string)) as customer_name",
+            "id % 3 as region",
+        )
+
+        # Join transactions with customers
+        functions = spark_client.jvm.org.apache.spark.sql.functions
+        joined = transactions.join(customers, "customer_id")
+
+        # Verify join size (all transactions should match)
+        assert joined.count() == size
+
+        # Aggregate by region
+        by_region = (
+            joined.groupBy("region")
+            .agg(
+                functions.count("*").alias("txn_count"),
+                functions.sum("amount").alias("total_amount"),
+                functions.countDistinct("customer_id").alias("unique_customers"),
+            )
+            .orderBy("region")
+        )
+
+        # Should have 3 regions (0, 1, 2)
+        assert by_region.count() == 3
+
+        # Collect and convert to Arrow
+        rows = list(by_region.collect())
+        regions = []
+        txn_counts = []
+        total_amounts = []
+        unique_customers = []
+
+        for row in rows:
+            regions.append(row.getLong(0))
+            txn_counts.append(row.getLong(1))
+            total_amounts.append(row.getDouble(2))
+            unique_customers.append(row.getLong(3))
+
+        result_table = pa.table(
+            {
+                "region": pa.array(regions, type=pa.int64()),
+                "txn_count": pa.array(txn_counts, type=pa.int64()),
+                "total_amount": pa.array(total_amounts, type=pa.float64()),
+                "unique_customers": pa.array(unique_customers, type=pa.int64()),
+            }
+        )
+
+        # Verify results
+        assert result_table.num_rows == 3
+
+        # Each region should have ~33 or 34 unique customers
+        for uc in unique_customers:
+            assert 33 <= uc <= 34
+
+        # Total transactions should equal size
+        assert sum(txn_counts) == size

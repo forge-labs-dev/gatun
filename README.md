@@ -476,23 +476,165 @@ This distinction exists because Object arrays are kept as references on the Java
 
 ### Arrow Data Transfer
 
+Gatun supports two methods for transferring Arrow data between Python and Java:
+
 ```python
 from gatun import connect
 import pyarrow as pa
 
 client = connect()
 
-# Send a PyArrow table to Java
+# Method 1: IPC Format (simple, good for small data)
 table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
 result = client.send_arrow_table(table)  # "Received 3 rows"
 
-# For large data, use zero-copy buffer transfer
+# Method 2: Zero-Copy Buffer Transfer (optimal for large data)
 table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
 arena = client.get_payload_arena()
 schema_cache = {}
 client.send_arrow_buffers(table, arena, schema_cache)
+
+# Get data back from Java
+result_view = client.get_arrow_data()
+print(result_view.num_rows)  # 2
+print(result_view.to_pydict())  # {'name': ['Alice', 'Bob'], 'age': [25, 30]}
+
 arena.close()
 ```
+
+## Arrow Memory Architecture
+
+Gatun's Arrow integration uses shared memory for high-performance data transfer with a carefully designed memory safety model.
+
+### Shared Memory Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Shared Memory Region                         │
+├─────────────────────────────────────────────────────────────────┤
+│ Command Zone (64KB)    │ Python writes commands, Java reads     │
+├─────────────────────────────────────────────────────────────────┤
+│ Payload Zone           │ Arrow data buffers                      │
+│   ├── First Half       │   Python → Java transfers               │
+│   └── Second Half      │   Java → Python transfers               │
+├─────────────────────────────────────────────────────────────────┤
+│ Response Zone (64KB)   │ Java writes responses, Python reads    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The payload zone is split in half to enable **bidirectional zero-copy transfer** without data races:
+- **Python → Java**: Writes to first half `[0, size/2)`
+- **Java → Python**: Writes to second half `[size/2, size)`
+
+### Memory Safety: The Epoch System
+
+Gatun uses an **arena epoch** system to prevent use-after-free and stale data access:
+
+```python
+from gatun import connect, StaleArenaError
+import pyarrow as pa
+
+client = connect()
+arena = client.get_payload_arena()
+
+# Send data (epoch = 0)
+table = pa.table({"id": [1, 2, 3]})
+client.send_arrow_buffers(table, arena, {})
+
+# Get data back - view is bound to current epoch
+view = client.get_arrow_data()  # view._epoch = 0
+
+# Reset arena - epoch increments to 1
+arena.reset()
+client.reset_payload_arena()
+
+# Accessing stale view raises StaleArenaError
+try:
+    data = view.to_pydict()  # Raises StaleArenaError!
+except StaleArenaError as e:
+    print(f"View epoch {e.view_epoch} != current epoch {e.current_epoch}")
+
+arena.close()
+```
+
+**How epochs work:**
+
+1. **Initial state**: Both Python and Java start with epoch 0
+2. **On data transfer**: The `ArrowBatchDescriptor` includes the current epoch
+3. **On validation**: Java rejects data if descriptor epoch doesn't match its epoch
+4. **On reset**: Both sides increment their epoch, invalidating all previous views
+5. **On access**: `ArrowTableView` checks epoch before returning data
+
+This prevents:
+- **Use-after-reset**: Accessing data after arena memory is reused
+- **Stale reads**: Reading outdated data from a previous transfer
+- **Cross-session corruption**: Data from one transfer corrupting another
+
+### Data Flow: Python → Java
+
+```
+1. Python: Copy Arrow buffers to shared memory (first half)
+   ┌──────────────┐     memcpy      ┌──────────────────────┐
+   │ PyArrow Table│ ───────────────>│ Shared Memory [0,N/2)│
+   └──────────────┘                 └──────────────────────┘
+
+2. Python: Send ArrowBatchDescriptor via FlatBuffers
+   - Buffer offsets and lengths
+   - Schema (or schema hash if cached)
+   - Current epoch
+
+3. Java: Validate epoch, wrap buffers as ArrowBuf (zero-copy read)
+   ┌──────────────────────┐  wrap   ┌──────────────────────┐
+   │ Shared Memory [0,N/2)│ ───────>│ VectorSchemaRoot     │
+   └──────────────────────┘         └──────────────────────┘
+```
+
+### Data Flow: Java → Python
+
+```
+1. Python: Request data via GetArrowData command
+
+2. Java: Write Arrow buffers to shared memory (second half)
+   ┌──────────────────────┐  memcpy ┌────────────────────────┐
+   │ VectorSchemaRoot     │ ───────>│ Shared Memory [N/2, N) │
+   └──────────────────────┘         └────────────────────────┘
+
+3. Java: Send ArrowBatchDescriptor with buffer offsets + epoch
+
+4. Python: Wrap buffers as PyArrow arrays (zero-copy read)
+   ┌────────────────────────┐  wrap  ┌──────────────┐
+   │ Shared Memory [N/2, N) │ ──────>│ ArrowTableView│
+   └────────────────────────┘        └──────────────┘
+```
+
+### Best Practices
+
+```python
+from gatun import connect
+import pyarrow as pa
+
+client = connect(memory="256MB")  # Larger memory for big datasets
+
+# For multiple transfers, reset arena between sends
+arena = client.get_payload_arena()
+schema_cache = {}  # Reuse cache for schema deduplication
+
+for batch in large_table.to_batches(max_chunksize=100_000):
+    arena.reset()
+    client.reset_payload_arena()
+    client.send_arrow_buffers(batch, arena, schema_cache)
+    # Process batch in Java...
+
+# Always close arena when done
+arena.close()
+```
+
+**Guidelines:**
+- Use `send_arrow_table()` for small data (< 1K rows) - simpler API
+- Use `send_arrow_buffers()` for large data - better performance
+- Reset arena between transfers to avoid memory exhaustion
+- Keep `schema_cache` across transfers to avoid re-serializing schema
+- Check `arena.bytes_remaining()` before large transfers
 
 ### Low-Level API
 
@@ -698,9 +840,19 @@ Gatun uses a client-server architecture with shared memory for high-performance 
 
 ### Memory Layout
 
-- Command zone: offset 0 (Python writes, Java reads)
-- Payload zone: offset 4096 (Arrow data)
-- Response zone: last 4KB (Java writes, Python reads)
+```
+Offset 0          64KB                            size-64KB        size
+   │               │                                  │              │
+   ▼               ▼                                  ▼              ▼
+   ┌───────────────┬──────────────────────────────────┬──────────────┐
+   │ Command Zone  │         Payload Zone             │Response Zone │
+   │ (Python→Java) │  [First half]  │  [Second half]  │ (Java→Python)│
+   └───────────────┴───────────────┴──────────────────┴──────────────┘
+                    Python→Java     Java→Python
+                    Arrow data      Arrow data
+```
+
+See [Arrow Memory Architecture](#arrow-memory-architecture) for details on the epoch-based memory safety model.
 
 ## Development
 
