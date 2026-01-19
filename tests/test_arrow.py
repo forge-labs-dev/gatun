@@ -1054,3 +1054,151 @@ def test_send_arrow_buffers_size_validation_after_partial_use(client):
     assert "Consider resetting arena" in str(error)
 
     arena.close()
+
+
+# --- Data Transfer Examples (mirrors README documentation) ---
+
+
+def test_arrow_data_transfer_method1_ipc_format(client):
+    """Test Method 1: IPC Format (simple, good for small data).
+
+    This mirrors the README example for send_arrow_table().
+    """
+    table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+    result = client.send_arrow_table(table)
+    assert "Received 3 rows" in result
+
+
+def test_arrow_data_transfer_method2_scoped_context(client):
+    """Test Method 2: Scoped Context Manager (recommended for most use cases).
+
+    This mirrors the README example for arrow_context().
+    """
+    table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+    another_table = pa.table({"id": [10, 20], "name": ["Alice", "Bob"]})
+
+    with client.arrow_context() as ctx:
+        # Auto-resets arena between sends
+        response1 = ctx.send(table)
+        assert "Received 3 rows" in response1
+
+        # Safe to send multiple tables
+        response2 = ctx.send(another_table)
+        assert "Received 2 rows" in response2
+
+        # Get data back as PyArrow table
+        result = ctx.receive()
+        assert result.num_rows == 2
+        assert result.column("id").to_pylist() == [10, 20]
+    # Arena automatically closed on exit
+
+
+def test_arrow_data_transfer_method3_zero_copy_manual(client):
+    """Test Method 3: Zero-Copy Buffer Transfer (manual control for advanced use).
+
+    This mirrors the README example for send_arrow_buffers().
+    """
+    table = pa.table({"name": ["Alice", "Bob"], "age": [25, 30]})
+
+    arena = client.get_payload_arena()
+    schema_cache = {}
+
+    # Send using zero-copy buffer transfer
+    client.send_arrow_buffers(table, arena, schema_cache)
+
+    # Get data back from Java
+    result_view = client.get_arrow_data()
+    assert result_view.num_rows == 2
+    assert result_view.to_pydict() == {"name": ["Alice", "Bob"], "age": [25, 30]}
+
+    arena.close()
+
+
+def test_arrow_size_validation_example(client):
+    """Test size validation as shown in README.
+
+    This mirrors the README example for estimate_arrow_size() and PayloadTooLargeError.
+    """
+    arena = client.get_payload_arena()
+
+    # Check size before sending
+    table = pa.table({"data": list(range(1000))})
+    estimated_size = estimate_arrow_size(table)
+
+    # Estimated size should be positive
+    assert estimated_size > 0
+
+    # Available space should be positive
+    available = arena.bytes_available()
+    assert available > 0
+
+    # For small tables, should fit
+    if estimated_size < available:
+        schema_cache = {}
+        response = client.send_arrow_buffers(table, arena, schema_cache)
+        assert "Received 1000 rows" in response
+
+    arena.close()
+
+
+def test_arrow_batch_processing_example(client):
+    """Test batch processing pattern as shown in README.
+
+    This mirrors the README example for processing large datasets in batches.
+    """
+    # Create a larger table to process in batches
+    large_table = pa.table(
+        {
+            "id": pa.array(range(500), type=pa.int64()),
+            "value": pa.array([float(i) * 1.5 for i in range(500)], type=pa.float64()),
+        }
+    )
+
+    # Process in batches using context manager
+    batch_responses = []
+    with client.arrow_context() as ctx:
+        for batch in large_table.to_batches(max_chunksize=100):
+            batch_table = pa.Table.from_batches([batch])
+            response = ctx.send(batch_table)
+            batch_responses.append(response)
+            # Auto-resets arena between sends
+
+    # Should have 5 batches (500 / 100 = 5)
+    assert len(batch_responses) == 5
+
+    # Each batch should have been received
+    for i, response in enumerate(batch_responses):
+        assert "Received" in response
+
+
+def test_arrow_manual_batch_processing_example(client):
+    """Test manual batch processing pattern as shown in README.
+
+    This mirrors the README example for fine-grained control over arena lifecycle.
+    """
+    large_table = pa.table(
+        {
+            "id": pa.array(range(300), type=pa.int64()),
+            "category": pa.array([i % 10 for i in range(300)], type=pa.int64()),
+        }
+    )
+
+    # For fine-grained control over arena lifecycle
+    arena = client.get_payload_arena()
+    schema_cache = {}  # Reuse cache for schema deduplication
+
+    batch_count = 0
+    for batch in large_table.to_batches(max_chunksize=100):
+        arena.reset()
+        client.reset_payload_arena()
+
+        batch_table = pa.Table.from_batches([batch])
+        response = client.send_arrow_buffers(batch_table, arena, schema_cache)
+        assert "Received" in response
+        batch_count += 1
+
+    # Should have processed 3 batches
+    assert batch_count == 3
+
+    # Always close arena when done
+    arena.close()
